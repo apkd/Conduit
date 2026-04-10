@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <AssemblyName>conduit</AssemblyName>
+        <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <LangVersion>preview</LangVersion>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <RootNamespace>Conduit</RootNamespace>
+        <IsPackable>false</IsPackable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+        <DefineConstants>$(DefineConstants);CONDUIT_WINDOWS</DefineConstants>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+        <DefineConstants>$(DefineConstants);CONDUIT_LINUX</DefineConstants>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+        <PublishAot>true</PublishAot>
+        <PublishSingleFile>true</PublishSingleFile>
+        <SelfContained>true</SelfContained>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <PublishDir>$(MSBuildProjectDirectory)/publish/$(RuntimeIdentifier)/</PublishDir>
+
+        <PublishTrimmed>true</PublishTrimmed>
+        <TrimMode>full</TrimMode>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+        <EnableDynamicLoading>false</EnableDynamicLoading>
+        <EnableUnsafeUTF7Encoding>false</EnableUnsafeUTF7Encoding>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4"/>
+        <PackageReference Include="ModelContextProtocol" Version="1.1.0"/>
+        <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.1.0"/>
+        <PackageReference Include="System.CommandLine" Version="2.0.5"/>
+        <PackageReference Include="ZLinq" Version="1.5.5"/>
+        <PackageReference Include="ZLogger" Version="2.5.10"/>
+        <PackageReference Include="ZString" Version="2.6.0"/>
+    </ItemGroup>
+
+</Project>

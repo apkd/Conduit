@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "Conduit.Tests": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "TUNIT_DISABLE_HTML_REPORTER": "true"
+      }
+    }
+  }
+}

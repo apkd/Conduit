@@ -1,0 +1,6 @@
+{
+    "name": "Conduit.Tests.PlayMode",
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}
