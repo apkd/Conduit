@@ -143,9 +143,6 @@ namespace Conduit
                 builder.AppendLine().AppendLine();
             }
 
-            builder.Append("TEST FILTER: ");
-            builder.AppendLine(activeTestFilterPattern);
-            builder.AppendLine();
             builder.AppendLine("RAN TESTS:");
             if (filteredStartedTests.Count == 0)
             {

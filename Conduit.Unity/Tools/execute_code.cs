@@ -203,24 +203,6 @@ namespace Conduit
                         references.Add(relativePath);
             }
 
-            StageModuleReferences(
-                projectPath,
-                "UnityEditorModules",
-                CompilationPipeline.PrecompiledAssemblySources.UnityEditor,
-                "UnityEditor.",
-                references,
-                seen
-            );
-
-            StageModuleReferences(
-                projectPath,
-                "UnityEngineModules",
-                CompilationPipeline.PrecompiledAssemblySources.UnityEngine,
-                "UnityEngine.",
-                references,
-                seen
-            );
-
             var resolvedReferences = references.ToArray();
             lock (cacheGate)
             {
@@ -233,59 +215,6 @@ namespace Conduit
             }
 
             return resolvedReferences;
-        }
-
-        static void StageModuleReferences(
-            string projectPath,
-            string stagingDirectoryName,
-            CompilationPipeline.PrecompiledAssemblySources source,
-            string filePrefix,
-            List<string> references,
-            HashSet<string> seen
-        )
-        {
-            var stagingDirectoryPath = Path.Combine(
-                projectPath,
-                "Library",
-                "Conduit",
-                "ExecuteCodeReferences",
-                stagingDirectoryName
-            );
-
-            Directory.CreateDirectory(stagingDirectoryPath);
-
-            foreach (var sourcePath in CompilationPipeline.GetPrecompiledAssemblyPaths(source))
-            {
-                if (!sourcePath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var fileName = Path.GetFileName(sourcePath);
-                if (!fileName.StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var targetPath = Path.Combine(stagingDirectoryPath, fileName);
-                CopyIfChanged(sourcePath, targetPath);
-                var relativePath = ToProjectRelativePath(projectPath, targetPath);
-                if (seen.Add(relativePath))
-                    references.Add(relativePath);
-            }
-        }
-
-        static void CopyIfChanged(string sourcePath, string targetPath)
-        {
-            if (!File.Exists(targetPath))
-            {
-                File.Copy(sourcePath, targetPath, true);
-                return;
-            }
-
-            var sourceInfo = new FileInfo(sourcePath);
-            var targetInfo = new FileInfo(targetPath);
-            if (sourceInfo.Length == targetInfo.Length && sourceInfo.LastWriteTimeUtc == targetInfo.LastWriteTimeUtc)
-                return;
-
-            File.Copy(sourcePath, targetPath, true);
-            File.SetLastWriteTimeUtc(targetPath, sourceInfo.LastWriteTimeUtc);
         }
 
         [HideInCallstack]

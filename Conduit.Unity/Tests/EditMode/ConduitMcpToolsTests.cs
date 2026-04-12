@@ -714,7 +714,7 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void ExecuteCode_GetAdditionalReferences_ReusesCachedSnapshot()
+    public void ExecuteCode_GetAdditionalReferences_ReusesCachedProjectLocalSnapshot()
     {
         execute_code.Initialize();
         var projectPath = execute_code.GetCurrentProjectPath();
@@ -724,6 +724,13 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(first, Is.Not.Empty);
         Assert.That(second, Is.SameAs(first));
+        foreach (var reference in first)
+        {
+            Assert.That(Path.IsPathRooted(reference), Is.False, reference);
+            Assert.That(reference, Does.EndWith(".dll"), reference);
+            Assert.That(reference, Does.Not.StartWith("Library/Conduit/ExecuteCodeReferences/"), reference);
+            Assert.That(reference, Does.Not.StartWith("Temp/execute_code/"), reference);
+        }
     }
 
     [Test]
@@ -1333,7 +1340,7 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void FilteredTestDiagnostic_IncludesFilterAndStartedTests()
+    public void FilteredTestDiagnostic_IncludesStartedTests()
     {
         try
         {
@@ -1344,7 +1351,6 @@ public sealed class ConduitMcpToolsTests
 
             var diagnostic = run_tests.BuildFilteredTestRunDiagnostic("Passed 2 tests.");
             Assert.That(diagnostic, Does.StartWith("Passed 2 tests."));
-            Assert.That(diagnostic, Does.Contain("TEST FILTER: *Resolve*"));
             Assert.That(diagnostic, Does.Contain("RAN TESTS:"));
             Assert.That(diagnostic, Does.Contain("ConduitMcpToolsTests.Resolve_TracksMatchSource"));
             Assert.That(diagnostic, Does.Contain("ConduitMcpToolsTests.Resolve_AcceptsWhitespaceAfterExactObjectIdPrefix"));
