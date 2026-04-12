@@ -11,22 +11,22 @@
                                  A simple and fast MCP server for Unity.
 ```
 
-[![Latest version number](https://img.shields.io/github/package-json/version/apkd/Conduit?labelColor=2C3439&label=Version&logo=unity
-)](https://github.com/apkd/Conduit/releases/tag/latest)
+[![Latest version number](https://img.shields.io/github/package-json/v/apkd/Conduit?filename=Conduit.Unity%2Fpackage.json&labelColor=2C3439&label=Version&logo=unity)](https://github.com/apkd/Conduit/releases/tag/latest)
 [![MIT License](https://img.shields.io/github/license/apkd/Conduit?style=flat&label=License&logo=listmonk&labelColor=2C3439&color=fff)](https://github.com/apkd/Conduit/blob/master/LICENSE)
-[![Test status badge](https://github.com/apkd/Conduit/actions/workflows/test.yml/badge.svg?branch=master&event=push)](https://github.com/apkd/Conduit/actions/workflows/test.yml)
-[![GitHub commit activity](https://img.shields.io/github/commit-activity/y/apkd/Conduit?authorFilter=apkd&label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
+[![Test status badge](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml/badge.svg?branch=master&event=push)](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/w/apkd/Conduit?authorFilter=apkd&label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
 [![GitHub last commit](https://img.shields.io/github/last-commit/apkd/Conduit?labelColor=2C3439&color=f97&logoColor=f96&logo=tinder&label=Last%20commit)](https://github.com/apkd/Conduit/commit/HEAD~1)
 
 A Unity MCP server that stays out of the way of your coding agent.
 
-- Robust: survives compilation errors, assembly reloads, restarts, and deals with multiple concurrent agents and Unity instances.
+- Robust: survives crashes, restarts, assembly reloads, and handles multiple agents and Unity instances.
 - Context-efficient: conserves the agent's context window and saves tokens. Small number of versatile tools.
 - Simple setup: one Unity package, one server exe, editor config wizard. No dependencies, no pollution.
 
-WIP:
-- No linux support
-- Docs are incomplete
+> [!CAUTION]
+> This package is WIP:
+> - No linux support
+> - Docs are incomplete
 
 > [!WARNING]
 > **Granting an AI agent access to Unity indirectly gives them escalated access to your machine.**
@@ -56,16 +56,16 @@ You can also declare it directly in `Packages/manifest.json`:
 ***Tools → Conduit → Setup MCP Server***
 
 > [!CAUTION]
-> *(automatic setup and tutorial/docs is WIP)*
+> *(automatic setup and tutorial/docs coming soon)*
 
 ## Manual setup
 
 <details>
   <summary><h4>Build and editor configuration instructions</h4></summary>
 
-It's really quite easy.
+You can either:
 
-- Either download the server executable from the [releases page](https://github.com/apkd/Conduit/releases/latest), or...
+- Download the server executable from the [releases page](https://github.com/apkd/Conduit/releases/latest), or...
 - Build it by running `dotnet publish`,
 
 Now configure your editor:
@@ -948,6 +948,7 @@ If you really want to, you can include something like this in your agent instruc
 
 ```
 Use the Unity MCP tools to prototype solutions, validate code compilation and run tests.
-Use the `restart` tool any time you need to start/restart Unity in case of instability.
-Avoid building the Unity project manually; simply call `refresh_asset_database` after making code changes.
+Invoke the `restart` tool in case of instability.
+Don't build the Unity solution manually; simply call `refresh_asset_database` after making any code changes.
+When dealing with assets and GameObjects, `search`, `show`, `to_json`, `from_json_overwrite`, `find_missing_scripts`, `get_dependencies` and `find_references_to` are your friends.
 ```
