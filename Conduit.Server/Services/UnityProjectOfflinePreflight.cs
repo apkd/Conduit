@@ -12,7 +12,7 @@ static class UnityProjectOfflinePreflight
         = "A Unity editor process is running for this project, but the Conduit package does not appear to be installed.";
 
     public const string UnresponsiveBridgeDiagnostic
-        = "A Unity editor process is running for this project, but the Conduit bridge is not responding.";
+        = "A Unity editor process is running for this project, but the Unity connection is not responding.";
 
     public static async Task<OfflinePreflightResult> ExecuteAsync(
         string normalizedProjectPath,

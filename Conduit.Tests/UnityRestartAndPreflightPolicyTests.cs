@@ -104,7 +104,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         var invalidHandshake = BridgeClientResult.Failure(
             handshake: null,
             BridgeRuntimeFailureKind.InvalidHandshake,
-            "Unity bridge returned an invalid hello handshake.",
+            "Unity returned an invalid hello handshake for '/mnt/b/src/SampleProject'.",
             commandSent: false
         );
 
@@ -115,7 +115,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
             hasConduitPackageSignal: true
         );
 
-        await Assert.That(blockedDiagnostic).IsEqualTo("Unity bridge returned an invalid hello handshake.");
+        await Assert.That(blockedDiagnostic).IsEqualTo("Unity returned an invalid hello handshake for '/mnt/b/src/SampleProject'.");
     }
 
     [Test]

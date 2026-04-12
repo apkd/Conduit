@@ -137,7 +137,10 @@ sealed class ProjectCommandQueue
 #endif
 }
 
-sealed class QueuedProjectCommand(ProjectSession session, BridgeCommand command, CancellationToken requestCancellation)
+sealed class QueuedProjectCommand(
+    ProjectSession session,
+    BridgeCommand command,
+    CancellationToken requestCancellation)
 {
     public ProjectSession Session { get; } = session;
 

@@ -26,10 +26,12 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         timeoutCts.CancelAfter(timeout);
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         var cacheEntry = connectionCache.GetOrAdd(normalizedProjectPath, static _ => new());
+        var gateAcquired = false;
 
-        await cacheEntry.Gate.WaitAsync(timeoutCts.Token);
         try
         {
+            await cacheEntry.Gate.WaitAsync(timeoutCts.Token);
+            gateAcquired = true;
             if (cacheEntry.TryGetActive(out _, out var cachedHandshake))
                 return BridgeClientResult.Connected(cachedHandshake!);
 
@@ -49,9 +51,19 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
             return connectResult.Result;
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return BridgeClientResult.Failure(
+                handshake: null,
+                BridgeRuntimeFailureKind.ConnectTimedOut,
+                $"Could not establish a Unity connection for '{normalizedProjectPath}' in time.",
+                commandSent: false
+            );
+        }
         finally
         {
-            cacheEntry.Gate.Release();
+            if (gateAcquired)
+                cacheEntry.Gate.Release();
         }
     }
 
@@ -209,7 +221,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 : BridgeClientResult.Failure(
                     handshake,
                     BridgeRuntimeFailureKind.SendTimedOut,
-                    $"Unity bridge did not accept '{commandType}' before the send timeout elapsed.",
+                    $"Timed out while trying to send '{commandType}' to Unity.",
                     commandSent
                 );
         }
@@ -250,7 +262,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         return (null, lastFailure ?? BridgeClientResult.Failure(
             handshake: null,
             BridgeRuntimeFailureKind.ConnectTimedOut,
-            $"Unity bridge for '{projectPath}' did not become reachable in time.",
+            $"Could not establish a Unity connection for '{projectPath}' in time.",
             commandSent: false
         ));
     }
@@ -277,23 +289,23 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             }
             catch (IOException exception)
             {
-                logger.ZLogDebug($"Unity bridge disconnected while sending the hello handshake for '{normalizedProjectPath}'.", exception);
+                logger.ZLogDebug($"Unity connection disconnected while sending the hello handshake for '{normalizedProjectPath}'.", exception);
                 await DisposeConnectionAsync(pipe, reader);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
-                    $"Unity bridge for '{normalizedProjectPath}' disconnected during the hello handshake.",
+                    $"The Unity connection for '{normalizedProjectPath}' closed during the hello handshake.",
                     commandSent: false
                 ));
             }
             catch (ObjectDisposedException exception)
             {
-                logger.ZLogDebug($"Unity bridge disposed the pipe while sending the hello handshake for '{normalizedProjectPath}'.", exception);
+                logger.ZLogDebug($"Unity connection disposed the pipe while sending the hello handshake for '{normalizedProjectPath}'.", exception);
                 await DisposeConnectionAsync(pipe, reader);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
-                    $"Unity bridge for '{normalizedProjectPath}' disconnected during the hello handshake.",
+                    $"The Unity connection for '{normalizedProjectPath}' closed during the hello handshake.",
                     commandSent: false
                 ));
             }
@@ -305,7 +317,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
-                    $"Unity bridge for '{normalizedProjectPath}' disconnected during the hello handshake.",
+                    $"The Unity connection for '{normalizedProjectPath}' closed during the hello handshake.",
                     commandSent: false
                 ));
             }
@@ -317,7 +329,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.InvalidHandshake,
-                    $"Unity bridge for '{normalizedProjectPath}' returned an invalid hello handshake. This usually means the editor is reloading.",
+                    $"Unity returned an invalid hello handshake for '{normalizedProjectPath}'. This usually means the editor is reloading.",
                     commandSent: false
                 ));
             }
@@ -329,7 +341,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.ProjectMismatch,
-                    $"Unity bridge responded for '{response.Project.ProjectPath}' while '{normalizedProjectPath}' was requested.",
+                    $"Unity connection responded for '{response.Project.ProjectPath}' while '{normalizedProjectPath}' was requested.",
                     commandSent: false
                 ));
             }
@@ -342,29 +354,29 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
-                $"Unity bridge for '{normalizedProjectPath}' did not become reachable in time.",
+                $"Could not establish a Unity connection for '{normalizedProjectPath}' in time.",
                 commandSent: false
             ));
         }
         catch (IOException exception)
         {
-            logger.ZLogDebug($"Unity bridge connection attempt failed for '{normalizedProjectPath}'.", exception);
+            logger.ZLogDebug($"Unity connection attempt failed for '{normalizedProjectPath}'.", exception);
             await DisposeConnectionAsync(pipe, reader);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
-                $"Unity bridge for '{normalizedProjectPath}' did not become reachable in time.",
+                $"Could not establish a Unity connection for '{normalizedProjectPath}' in time.",
                 commandSent: false
             ));
         }
         catch (ObjectDisposedException exception)
         {
-            logger.ZLogDebug($"Unity bridge connection was disposed while connecting to '{normalizedProjectPath}'.", exception);
+            logger.ZLogDebug($"Unity connection was disposed while connecting to '{normalizedProjectPath}'.", exception);
             await DisposeConnectionAsync(pipe, reader);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
-                $"Unity bridge for '{normalizedProjectPath}' did not become reachable in time.",
+                $"Could not establish a Unity connection for '{normalizedProjectPath}' in time.",
                 commandSent: false
             ));
         }
@@ -409,7 +421,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         BridgeClientResult.Failure(
             handshake: null,
             BridgeRuntimeFailureKind.ProcessExited,
-            $"Unity editor process {processId} exited {(string.IsNullOrWhiteSpace(context) ? "while waiting for the Unity bridge" : $"while '{context}' was running")}.",
+            $"Unity editor process {processId} exited {(string.IsNullOrWhiteSpace(context) ? "while running the command" : $"while '{context}' was running")}.",
             commandSent
         );
 
@@ -460,21 +472,21 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             }
             catch (IOException exception)
             {
-                logger.ZLogDebug($"Unity bridge disconnected during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
+                logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
                 return BridgeClientResult.Failure(
                     Handshake,
                     BridgeRuntimeFailureKind.SendFailed,
-                    $"Unity bridge disconnected while sending '{command.CommandType}'.",
+                    $"The Unity connection closed while sending '{command.CommandType}'.",
                     commandSent: false
                 );
             }
             catch (ObjectDisposedException exception)
             {
-                logger.ZLogDebug($"Unity bridge disposed the pipe during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
+                logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
                 return BridgeClientResult.Failure(
                     Handshake,
                     BridgeRuntimeFailureKind.SendFailed,
-                    $"Unity bridge disconnected while sending '{command.CommandType}'.",
+                    $"The Unity connection closed while sending '{command.CommandType}'.",
                     commandSent: false
                 );
             }
@@ -504,7 +516,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                             BridgeClientResult.Failure(
                                 Handshake,
                                 BridgeRuntimeFailureKind.StartAckDisconnected,
-                                $"Unity bridge disconnected before '{commandType}' acknowledged starting.",
+                                $"The Unity connection closed before '{commandType}' acknowledged starting.",
                                 commandSent
                             )
                         );
@@ -536,33 +548,33 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                             : BridgeRuntimeFailureKind.StartAckDisconnected,
                         startTimeoutCts.IsCancellationRequested
                             ? $"Unity did not acknowledge starting '{commandType}' within {timeout}."
-                            : $"Unity bridge disconnected before '{commandType}' acknowledged starting.",
+                            : $"The Unity connection closed before '{commandType}' acknowledged starting.",
                         commandSent
                     )
                 );
             }
             catch (IOException exception)
             {
-                logger.ZLogDebug($"Unity bridge disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
+                logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
                 return new(
                     null,
                     BridgeClientResult.Failure(
                         Handshake,
                         BridgeRuntimeFailureKind.StartAckDisconnected,
-                        $"Unity bridge disconnected before '{commandType}' acknowledged starting.",
+                        $"The Unity connection closed before '{commandType}' acknowledged starting.",
                         commandSent
                     )
                 );
             }
             catch (ObjectDisposedException exception)
             {
-                logger.ZLogDebug($"Unity bridge disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
+                logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
                 return new(
                     null,
                     BridgeClientResult.Failure(
                         Handshake,
                         BridgeRuntimeFailureKind.StartAckDisconnected,
-                        $"Unity bridge disconnected before '{commandType}' acknowledged starting.",
+                        $"The Unity connection closed before '{commandType}' acknowledged starting.",
                         commandSent
                     )
                 );
@@ -588,7 +600,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                         return BridgeClientResult.Failure(
                             Handshake,
                             BridgeRuntimeFailureKind.ResultDisconnected,
-                            $"Unity bridge disconnected before '{commandType}' reported completion.",
+                            $"The Unity connection closed before '{commandType}' reported completion.",
                             commandSent
                         );
                     }
@@ -613,27 +625,27 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                         : BridgeRuntimeFailureKind.ResultDisconnected,
                     ct.IsCancellationRequested
                         ? $"Unity did not report completion for '{commandType}' within {timeout}."
-                        : $"Unity bridge disconnected before '{commandType}' reported completion.",
+                        : $"The Unity connection closed before '{commandType}' reported completion.",
                     commandSent
                 );
             }
             catch (IOException exception)
             {
-                logger.ZLogDebug($"Unity bridge disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
+                logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
                 return BridgeClientResult.Failure(
                     Handshake,
                     BridgeRuntimeFailureKind.ResultDisconnected,
-                    $"Unity bridge disconnected before '{commandType}' reported completion.",
+                    $"The Unity connection closed before '{commandType}' reported completion.",
                     commandSent
                 );
             }
             catch (ObjectDisposedException exception)
             {
-                logger.ZLogDebug($"Unity bridge disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
+                logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
                 return BridgeClientResult.Failure(
                     Handshake,
                     BridgeRuntimeFailureKind.ResultDisconnected,
-                    $"Unity bridge disconnected before '{commandType}' reported completion.",
+                    $"The Unity connection closed before '{commandType}' reported completion.",
                     commandSent
                 );
             }

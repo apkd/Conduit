@@ -21,8 +21,6 @@ public sealed class UnityProjectOperations(
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
         = new(StringComparer.OrdinalIgnoreCase);
 
-    readonly ProjectSingleFlight<ToolExecutionResult> restartOperations = new();
-
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
         = new(bridgeClient, projectRegistry, environmentInspector, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
 
@@ -50,13 +48,11 @@ public sealed class UnityProjectOperations(
         }
     }
 
-    public Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
-        => restartOperations.RunAsync(
-            projectPath,
-            (normalizedProjectPath, operationCt) => processController.RestartAsync(normalizedProjectPath, operationCt),
-            applicationLifetime.ApplicationStopping,
-            ct
-        );
+    public async Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
+    {
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        return await processController.RestartAsync(normalizedProjectPath, ct);
+    }
 
     public Task<ToolExecutionResult> PlayAsync(string projectPath, CT ct)
         => EnqueueAsync(
@@ -144,12 +140,15 @@ public sealed class UnityProjectOperations(
             ct: ct
         );
 
-    public Task<ToolExecutionResult> RefreshAssetDatabaseAsync(string projectPath, CT ct)
-        => EnqueueAsync(
-            projectPath: projectPath,
+    public async Task<ToolExecutionResult> RefreshAssetDatabaseAsync(string projectPath, CT ct)
+    {
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        return await EnqueueAsync(
+            projectPath: normalizedProjectPath,
             command: new() { CommandType = BridgeCommandTypes.RefreshAssetDatabase },
             ct: ct
         );
+    }
 
     public Task<ToolExecutionResult> ExecuteCodeAsync(string projectPath, string snippet, CT ct)
         => EnqueueAsync(

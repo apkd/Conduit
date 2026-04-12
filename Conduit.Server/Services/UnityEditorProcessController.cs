@@ -135,7 +135,7 @@ public sealed class UnityEditorProcessController(
             var restartCompilationDiagnostics = environmentInspector.ReadLatestCompilationDiagnostics(restartLogPath);
             if (pingExecution.Result?.Outcome == ToolOutcome.Success)
             {
-                builder.AppendLine("Bridge became responsive.");
+                builder.AppendLine("Unity connection became responsive.");
                 AppendLatestCompilationDiagnostics(builder, restartCompilationDiagnostics);
                 return ToolExecutionResult.Success(string.Empty, ConduitUtility.FinishText(builder));
             }
