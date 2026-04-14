@@ -144,6 +144,7 @@ namespace Conduit
             )
             {
                 flags = AssemblyBuilderFlags.EditorAssembly,
+                referencesOptions = ReferencesOptions.UseEngineModules,
                 additionalReferences = GetAdditionalReferences(projectPath, snippetRootPath),
             };
 
