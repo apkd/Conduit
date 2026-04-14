@@ -71,6 +71,7 @@ public sealed class UnityEditorProcessController(
             restartLogPath = environmentInspector.GetRestartLogPath(snapshot.ProjectPath);
             if (Path.GetDirectoryName(restartLogPath) is { Length: > 0 } logDirectoryPath)
                 Directory.CreateDirectory(logDirectoryPath);
+            PrepareRestartLogPath(restartLogPath);
 
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
             restartedProcess = Process.Start(
@@ -195,6 +196,26 @@ public sealed class UnityEditorProcessController(
 
     internal static string BuildLaunchArguments(string platformProjectPath, string logPath) =>
         $"-projectPath \"{platformProjectPath}\" -logFile \"{logPath}\"";
+
+    internal static void PrepareRestartLogPath(string restartLogPath)
+    {
+        if (string.IsNullOrWhiteSpace(restartLogPath))
+            return;
+
+        try
+        {
+            using var stream = new FileStream(
+                restartLogPath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete
+            );
+        }
+        catch
+        {
+            // Best-effort only; restart still proceeds and may fall back to stale log content if this fails.
+        }
+    }
 
     internal static string[] PreserveSceneBackups(string projectPath)
     {

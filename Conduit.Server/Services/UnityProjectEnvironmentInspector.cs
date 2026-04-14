@@ -49,20 +49,11 @@ public sealed class UnityProjectEnvironmentInspector
     internal CompilationDiagnosticSummary ReadCompilationDiagnosticsSince(string? logPath, long startOffset) =>
         probe.ReadCompilationDiagnosticsSince(logPath, startOffset);
 
-    internal CompilationDiagnosticSummary ReadCompilationDiagnosticsSince(UnityProjectEnvironmentSnapshot snapshot, long startOffset) =>
-        probe.ReadCompilationDiagnosticsSince(snapshot, startOffset);
-
     internal CompilationDiagnosticSummary ReadLatestCompilationDiagnostics(string? logPath) =>
         probe.ReadLatestCompilationDiagnostics(logPath);
 
     internal CompilationDiagnosticSummary ReadLatestCompilationDiagnostics(UnityProjectEnvironmentSnapshot snapshot) =>
         probe.ReadLatestCompilationDiagnostics(snapshot);
-
-    internal string? TryReadCompilationFailureSince(string? logPath, long startOffset) =>
-        probe.TryReadCompilationFailureSince(logPath, startOffset);
-
-    internal string? TryReadLatestCompilationFailure(string? logPath) =>
-        probe.TryReadLatestCompilationFailure(logPath);
 
     internal int? ResolveEditorProcessId(UnityProjectEnvironmentSnapshot snapshot, BridgeProjectHandshake? handshake = null) =>
         probe.ResolveEditorProcessId(snapshot, handshake);

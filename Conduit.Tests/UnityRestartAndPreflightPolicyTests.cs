@@ -19,6 +19,34 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task PrepareRestartLogPathClearsExistingLogContent()
+    {
+        var projectPath = CreateTempProject();
+        try
+        {
+            var logDirectoryPath = Path.Combine(projectPath, "Logs");
+            Directory.CreateDirectory(logDirectoryPath);
+            var logPath = Path.Combine(logDirectoryPath, "Editor.log");
+            await File.WriteAllTextAsync(
+                logPath,
+                """
+                ## Script Compilation Error
+                stale error
+                """
+            );
+
+            UnityEditorProcessController.PrepareRestartLogPath(logPath);
+
+            await Assert.That(File.Exists(logPath)).IsTrue();
+            await Assert.That(new FileInfo(logPath).Length).IsEqualTo(0);
+        }
+        finally
+        {
+            Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task SafeModeBlockedPreflightPreservesSafeModeDiagnostic()
     {
         var snapshot = new UnityProjectEnvironmentSnapshot(

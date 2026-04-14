@@ -117,26 +117,11 @@ sealed partial class UnityProjectEnvironmentProbe
     public CompilationDiagnosticSummary ReadCompilationDiagnosticsSince(string? logPath, long startOffset) =>
         ReadCompilationDiagnostics(logPath, startOffset);
 
-    public CompilationDiagnosticSummary ReadCompilationDiagnosticsSince(UnityProjectEnvironmentSnapshot snapshot, long startOffset) =>
-        ReadCompilationDiagnostics(ResolveEditorLogPath(snapshot), startOffset);
-
     public CompilationDiagnosticSummary ReadLatestCompilationDiagnostics(string? logPath) =>
         ReadCompilationDiagnostics(logPath, startOffset: null);
 
     public CompilationDiagnosticSummary ReadLatestCompilationDiagnostics(UnityProjectEnvironmentSnapshot snapshot) =>
         ReadCompilationDiagnostics(ResolveEditorLogPath(snapshot), startOffset: null);
-
-    public string? TryReadCompilationFailureSince(string? logPath, long startOffset) =>
-        ReadCompilationDiagnosticsSince(logPath, startOffset).ErrorText;
-
-    public string? TryReadCompilationFailureSince(UnityProjectEnvironmentSnapshot snapshot, long startOffset) =>
-        ReadCompilationDiagnosticsSince(snapshot, startOffset).ErrorText;
-
-    public string? TryReadLatestCompilationFailure(string? logPath) =>
-        ReadLatestCompilationDiagnostics(logPath).ErrorText;
-
-    public string? TryReadLatestCompilationFailure(UnityProjectEnvironmentSnapshot snapshot) =>
-        ReadLatestCompilationDiagnostics(snapshot).ErrorText;
 
     public int? ResolveEditorProcessId(UnityProjectEnvironmentSnapshot snapshot, BridgeProjectHandshake? handshake = null)
     {
