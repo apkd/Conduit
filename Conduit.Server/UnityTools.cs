@@ -64,11 +64,11 @@ public sealed class UnityTools
     [Description(
         $"""
          Returns additional help for finding objects with {CMD.Search}, {CMD.Show}, {CMD.ToJson}, and {CMD.FromJsonOverwrite}.
-         Run this command once to find out how to efficiently search for objects
+         Run this command once to find out how to efficiently search for objects.
          """
     )]
-    public static string Help(UnityProjectRegistry projectRegistry) =>
-        HelpTool.GetHelpString(projectRegistry.GetLatestUnityVersion());
+    public static string Help(UnityProjectRegistry projectRegistry)
+        => HelpTool.GetHelpString(projectRegistry.GetLatestUnityVersion());
 
     [McpServerTool(Name = CMD.GetDependencies)]
     [Description(
@@ -129,15 +129,17 @@ public sealed class UnityTools
 
     [McpServerTool(Name = CMD.Search)]
     [Description(
-        """
-        Searches Unity objects and returns a compact plaintext list of matches.
-        Supports advanced queries, targeting assets and runtime objects.
+        $"""
+        Universal Unity search tool that supports assets, prefabs, scene GameObjects, tests, and more.
+        Prints each found object's name, asset path and ID.
+        After you find an object, you can use its ID with other commands, such as {CMD.Show}, {CMD.ToJson}, etc. 
+
         Use the help command for more search tips.
         """
     )]
     public static Task<string> Search(
         [Description("Project path")] string projectPath,
-        [Description("Entity ID, asset path, hierarchy path, or Unity search query. Examples: camera t:prefab ")]
+        [Description("The search query. Use the help command to learn more. Examples: t:prefab camera, ext=mat, +fuzzy PlayerPrefab")]
         string query,
         UnityProjectOperations operations,
         CancellationToken ct

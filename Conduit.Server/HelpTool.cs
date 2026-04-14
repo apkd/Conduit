@@ -8,44 +8,38 @@ static class HelpTool
         string eid = usesEntityIds ? "eid" : "id";
         string entity = usesEntityIds ? "entity" : "instance";
 
-        return $$$"""
-                  Common object search help for `search`, `show`, `to_json`, and `from_json_overwrite`.
+        return $"""
+                The same search query format is used for `search`, `show`, `to_json`, and `from_json_overwrite`.
 
-                  If you have an exact search target, you can simply specify one of these:
-                  - exact {{{entity}}} ID: `{{{eid}}}:12345`
-                  - exact asset path: `Assets/Foo.prefab`, `Assets/Materials/My Material.mat`
-                  - exact hierarchy path: `/Root GameObject/Child (1)` for a scene object
+                If you have an exact search target, you can simply specify one of these:
+                - exact {entity} ID: `{eid}:12345`
+                - exact asset path: `Assets/Foo.prefab`, `Assets/Materials/My Material.mat`
+                - exact hierarchy path: `/Root GameObject/Child (1)` for a scene object
+                - list project NUnit tests: `t:test`, `t:test editmode`, ``t:test SomeModule`
 
-                  Otherwise, the search will use the Unity Search query engine.
+                If none of the above match, the Unity Search query engine is used, supporting the following formats:
 
-                  Resolution order is: exact {{{entity}}} ID (`{{{eid}}}:`) -> exact asset path -> exact hierarchy path -> Unity search query.
-                  If you pass plain text that is not an ID or path, it is treated as a Unity search query.
+                **Hierarchy (`h:`) filters:**
 
-                  The filters below were verified in-engine against this project.
+                - component search: `t:Camera`, `t=MeshRenderer`
+                - property search: `Camera.Orthographic=false`, `fieldofview=60`, `p(Camera.Orthographic)=false`, `p(fieldofview)=60`
+                - numeric layer filter: `layer=0`
+                - tag filter: `tag=MainCamera`
+                - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`, `ref:Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
+                - prefab state: `prefab:any`, `prefab:variant`, `prefab:root`
+                - scene-state filters: `active=true`, `components>3`, `is:child`, `is:leaf`, `is:prefab`, `is:root`, `is:static`, `path=/ConduitHelpRoot/ConduitHelpChild`, `size>1`
+                - fuzzy matching: `+fuzzy ConduitHelpCam`
 
-                  **Hierarchy (`h:`) filters:**
+                **Project (`p:`) filters:**
 
-                  - component search: `t:Camera`, `t=MeshRenderer`
-                  - property search: `Camera.Orthographic=false`, `fieldofview=60`, `p(Camera.Orthographic)=false`, `p(fieldofview)=60`
-                  - numeric layer filter: `layer=0`
-                  - tag filter: `tag=MainCamera`
-                  - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`, `ref:Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
-                  - prefab state: `prefab:any`, `prefab:variant`, `prefab:root`
-                  - scene-state filters: `active=true`, `components>3`, `is:child`, `is:leaf`, `is:prefab`, `is:root`, `is:static`, `path=/ConduitHelpRoot/ConduitHelpChild`, `size>1`
-                  - fuzzy matching: `+fuzzy ConduitHelpCam`
-
-                  **Project (`p:`) filters:**
-
-                  - type: `t:material`, `t=Material`
-                  - labels: `l:Weapons`
-                  - search area: `a:assets`
-                  - prefab state: `prefab:any`, `prefab:variant`
-                  - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
-                  - file filters: `dir=Assets/ConduitHelpValidation`, `ext=mat`, `name=ConduitHelpMaterial`, `is:subasset`, `size>0`
-                  - `+noResultsLimit`
-
-                  The following were intentionally left out because they were not verified here or did not work as originally written: `renderinglayer`, `missing:...`, layer names such as `layer=Default`, `id=...`, `is:hidden`, `is:visible`, `age`, `a:packages`, `a:all`, and `prefab:asset`.
-                  """;
+                - type: `t:material`, `t=Material`
+                - labels: `l:Weapons`
+                - search area: `a:assets`
+                - prefab state: `prefab:any`, `prefab:variant`
+                - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
+                - file filters: `dir=Assets/ConduitHelpValidation`, `ext=mat`, `name=ConduitHelpMaterial`, `is:subasset`, `size>0`
+                - `+noResultsLimit`
+                """;
     }
 
     static bool UsesEntityIds(string? unityVersion)

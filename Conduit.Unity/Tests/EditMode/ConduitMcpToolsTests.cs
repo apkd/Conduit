@@ -927,6 +927,31 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Search_TestQuery_ListsKnownEditModeTests()
+    {
+        var result = ConduitSearchUtility.Search("t:test editmode Search_WindowTarget");
+
+        Assert.That(result, Does.Contain("ConduitMcpToolsTests.Search_WindowTarget_UsesSharedEditorWindowSelector | EditMode"));
+        Assert.That(result, Does.Not.Contain("ConduitMcpEndToEndTests.Search_ReturnsSceneObjectMatchAndNoMatchFailure"));
+    }
+
+    [Test]
+    public void Search_TestQuery_ExactTestsAliasListsTests()
+    {
+        var result = ConduitSearchUtility.Search("tests");
+
+        Assert.That(result, Does.Contain("ConduitMcpToolsTests.Resolve_TracksMatchSource | EditMode"));
+    }
+
+    [Test]
+    public void Search_TestQuery_PlayModeFilterWithoutProjectMatchesUsesNoMatchText()
+    {
+        var result = ConduitSearchUtility.Search("t:test playmode");
+
+        Assert.That(result, Is.EqualTo("No matches for 't:test playmode'."));
+    }
+
+    [Test]
     public void Show_WindowTarget_ShowsBasicEditorWindowInfo()
     {
         RequireInteractiveEditorWindows();

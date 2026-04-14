@@ -280,6 +280,21 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(9)]
+    public async Task Search_TestQuery_ListsDiscoveredTests()
+    {
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.Search,
+            Args(
+                ("projectPath", projectPath),
+                ("query", "t:test editmode Search_ReturnsSceneObjectMatchAndNoMatchFailure")
+            )
+        );
+
+        AssertSuccessful(result, "ConduitMcpEndToEndTests.Search_ReturnsSceneObjectMatchAndNoMatchFailure", "EditMode");
+    }
+
+    [Test]
+    [Order(10)]
     public async Task ToJson_ReturnsCameraJsonAndSceneGuidance()
     {
         OpenSampleScene();
@@ -306,7 +321,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(10)]
+    [Order(11)]
     public async Task FromJsonOverwrite_UpdatesMaterialAndRejectsUnsupportedPatchAtomically()
     {
         var assetPath = CreateTemporaryMaterialAssetCopy();
@@ -344,7 +359,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(11)]
+    [Order(12)]
     public async Task SaveScenes_SavesDirtyTempSceneAndRejectsMissingOpenScene()
     {
         OpenSampleScene();
@@ -376,7 +391,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(12)]
+    [Order(13)]
     public async Task DiscardScenes_DiscardsDirtyTempSceneAndRejectsMissingOpenScene()
     {
         OpenSampleScene();
@@ -412,7 +427,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(13)]
+    [Order(14)]
     public async Task ExecuteCode_CoversSuccessCacheRuntimeFailureAndCompileFailure()
     {
         var runtimeTogglePath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCode_{Guid.NewGuid():N}.flag");
@@ -470,7 +485,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(14)]
+    [Order(15)]
     public async Task Play_TogglesBetweenEditModeAndPlayMode()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
@@ -506,7 +521,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(15)]
+    [Order(16)]
     public async Task Screenshot_CapturesCameraSceneAssetAndAmbiguousSelector()
     {
         OpenSampleScene();
