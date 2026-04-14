@@ -49,7 +49,10 @@ public sealed class UnityTools
 
     [McpServerTool(Name = "restart")]
     [Description(
-        """Starts or restarts the Unity editor"""
+        """
+        Starts or restarts the Unity editor.
+        Never kill the Unity process manually - simply use the `restart` tool to recover from any error state.
+        """
     )]
     public static Task<string> Restart(
         [Description("Project path")] string projectPath,
