@@ -236,7 +236,7 @@ namespace Conduit
             var previewTexture = AssetPreview.GetAssetPreview(target);
             var deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(5);
             while (previewTexture == null
-                   && AssetPreview.IsLoadingAssetPreview(target.GetInstanceID())
+                   && IsLoadingAssetPreview(target)
                    && DateTime.UtcNow < deadlineUtc)
             {
                 await Task.Delay(100);
@@ -248,6 +248,15 @@ namespace Conduit
                 throw new InvalidOperationException($"Unity could not generate a preview image for '{target.name}'.");
 
             return SaveTexture(previewTexture, prefix);
+        }
+
+        static bool IsLoadingAssetPreview(Object target)
+        {
+#if UNITY_6000_4_OR_NEWER
+            return AssetPreview.IsLoadingAssetPreview(target.GetEntityId());
+#else
+            return AssetPreview.IsLoadingAssetPreview(target.GetInstanceID());
+#endif
         }
 
         static string CaptureSceneBounds(Scene scene, Bounds bounds, string prefix, bool topDown)
