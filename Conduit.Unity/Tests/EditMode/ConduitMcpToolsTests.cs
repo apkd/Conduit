@@ -165,9 +165,11 @@ public sealed class ConduitMcpToolsTests
     public void Show_SearchMatchStaysOnExactObject()
     {
         var output = show.Show(CameraSearchQuery);
+        var camera = Camera.main;
+        Assert.That(camera, Is.Not.Null);
 
         Assert.That(output, Does.Contain($"Scene: {SceneAsset}"));
-        Assert.That(output, Does.Contain("GameObject: Main Camera [eid:"));
+        Assert.That(output, Does.Contain($"GameObject: Main Camera [{ConduitUtility.FormatObjectId(camera!.gameObject)}]"));
         Assert.That(output, Does.Not.Contain("Main Object:"));
         Assert.That(output, Does.Not.Contain("Imported Subassets:"));
     }

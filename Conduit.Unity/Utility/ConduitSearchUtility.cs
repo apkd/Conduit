@@ -133,13 +133,28 @@ namespace Conduit
             if (!entityId.IsValid())
                 return false;
 
-            var target = EditorUtility.EntityIdToObject(entityId);
+            var target = ResolveEntityIdToObject(entityId
+#if !UNITY_6000_3_OR_NEWER
+                , rawEntityId
+#endif
+            );
             if (target == null)
                 return false;
 
             match = CreateMatch(target, ResolvedObjectMatchSource.EntityId);
             return true;
         }
+
+#if UNITY_6000_3_OR_NEWER
+        static Object? ResolveEntityIdToObject(EntityId entityId) => EditorUtility.EntityIdToObject(entityId);
+#else
+        static Object? ResolveEntityIdToObject(EntityId entityId, int instanceId)
+        {
+            // Unity 6000.2 exposes entity IDs, but not the editor-side reverse lookup helper yet.
+            _ = entityId;
+            return EditorUtility.InstanceIDToObject(instanceId);
+        }
+#endif
 #else
         static bool TryResolveInstanceId(string query, out ResolvedObjectMatch match, out bool isObjectIdQuery)
         {
