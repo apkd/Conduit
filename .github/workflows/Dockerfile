@@ -113,7 +113,6 @@ rm -rf "$DEST/Editor/Data/Resources/PackageManager/Editor/*.tgz" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/Diagnostics" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.visualeffectgraph" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.shaderanalysis" || true
-rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.rendering.light-transport" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.rendering.denoising" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.render-pipelines.high-definition-config" || true
 rm -rf "$DEST/Editor/Data/Resources/PackageManager/BuiltInPackages/com.unity.render-pipelines.high-definition" || true
