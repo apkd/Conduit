@@ -72,8 +72,16 @@ namespace Conduit
 
             var matches = Resolve(normalizedQuery, MaxResults);
             return matches.Count == 0
-                ? $"No matches for '{normalizedQuery}'."
+                ? FormatNoMatches(normalizedQuery)
                 : FormatMatches(matches, includeHint: false);
+        }
+
+        public static string FormatNoMatches(string query)
+        {
+            var normalizedQuery = query?.Trim() ?? string.Empty;
+            return ShouldWarnAboutUnsupportedOrSyntax(normalizedQuery)
+                ? "Unity search does not support OR operators. Run separate queries instead."
+                : $"No matches for '{normalizedQuery}'.";
         }
 
         public static string FormatMatches(IReadOnlyList<ResolvedObjectMatch> matches, bool includeHint)
@@ -324,13 +332,26 @@ namespace Conduit
         static string SearchTests(string query, TestSearchCriteria criteria)
         {
             if (criteria.Mode == TestSearchMode.None)
-                return $"No matches for '{query}'.";
+                return FormatNoMatches(query);
 
             var matches = DiscoverTests(criteria);
             return matches.Count == 0
-                ? $"No matches for '{query}'."
+                ? FormatNoMatches(query)
                 : FormatTestMatches(matches);
         }
+
+        static bool ShouldWarnAboutUnsupportedOrSyntax(string query)
+            => !string.IsNullOrWhiteSpace(query)
+               && !IsEditorWindowQuery(query)
+               && !query.StartsWith("/", StringComparison.Ordinal)
+               && !query.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+               && !query.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)
+               && !TryGetObjectIdValue(query, out _)
+               && !TryParseTestSearch(query, out _)
+               && ContainsUnsupportedOrSyntax(query);
+
+        static bool ContainsUnsupportedOrSyntax(string query)
+			=> query.Contains("||", StringComparison.Ordinal) || query.Contains(" OR ", StringComparison.Ordinal);
 
         static List<DiscoveredTestMatch> DiscoverTests(TestSearchCriteria criteria)
         {

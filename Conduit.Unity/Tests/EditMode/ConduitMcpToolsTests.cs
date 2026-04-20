@@ -954,6 +954,45 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Search_QueryWithUnsupportedOrSyntaxAndNoMatchesExplainsConstraint()
+    {
+        var result = ConduitSearchUtility.Search("t:prefab ConduitMissingAlpha OR t:prefab ConduitMissingBeta");
+
+        Assert.That(
+            result,
+            Is.EqualTo(
+                "Unity search does not support OR operators. Run separate queries instead."
+            )
+        );
+    }
+
+    [Test]
+    public void Search_QueryWithUnsupportedPipeOrSyntaxAndNoMatchesExplainsConstraint()
+    {
+        var result = ConduitSearchUtility.Search("t:prefab ConduitMissingAlpha || t:prefab ConduitMissingBeta");
+
+        Assert.That(
+            result,
+            Is.EqualTo(
+                "Unity search does not support OR operators. Run separate queries instead."
+            )
+        );
+    }
+
+    [Test]
+    public void Show_QueryWithUnsupportedOrSyntaxAndNoMatchesExplainsConstraint()
+    {
+        var result = show.Show("t:prefab ConduitMissingAlpha OR t:prefab ConduitMissingBeta");
+
+        Assert.That(
+            result,
+            Is.EqualTo(
+                "Unity search does not support OR operators. Run separate queries instead."
+            )
+        );
+    }
+
+    [Test]
     public void Show_WindowTarget_ShowsBasicEditorWindowInfo()
     {
         RequireInteractiveEditorWindows();

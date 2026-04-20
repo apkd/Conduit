@@ -110,7 +110,7 @@ namespace Conduit
         public static string Show(string query)
             => ConduitSearchUtility.Resolve(query) switch
             {
-                { Count: 0 }           => $"No matches for '{query}'.",
+                { Count: 0 }           => ConduitSearchUtility.FormatNoMatches(query),
                 { Count: 1 } matches   => DebugResolvedObject(matches[0]),
                 { Count: > 1 } matches => ConduitSearchUtility.FormatMatches(matches, includeHint: true),
             };

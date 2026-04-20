@@ -35,7 +35,7 @@ namespace Conduit
         {
             var matches = ConduitSearchUtility.Resolve(query);
             if (matches.Count == 0)
-                return $"No matches for '{query}'.";
+                return ConduitSearchUtility.FormatNoMatches(query);
 
             if (matches.Count > 1)
                 return ConduitSearchUtility.FormatMatches(matches, includeHint: true);
@@ -61,7 +61,7 @@ namespace Conduit
 
             var matches = ConduitSearchUtility.Resolve(query);
             if (matches.Count == 0)
-                return $"No matches for '{query}'.";
+                return ConduitSearchUtility.FormatNoMatches(query);
 
             if (matches.Count > 1)
                 return ConduitSearchUtility.FormatMatches(matches, includeHint: true);
