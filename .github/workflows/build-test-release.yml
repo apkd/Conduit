@@ -65,8 +65,12 @@ jobs:
 
           release_requested=false
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_requested=true
-            level="${{ inputs.bump_level }}"
+            if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+              release_requested=true
+              level="${{ inputs.bump_level }}"
+            else
+              level=""
+            fi
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" && "${{ contains(github.event.head_commit.message, '[skip release]') }}" != "true" ]]; then
             release_requested=true
             level="patch"
@@ -330,7 +334,7 @@ jobs:
         run: exit 1
 
   prepare:
-    if: needs.version.outputs.release_requested == 'true'
+    if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
     needs: [version, build, test-server, test-unity]
     permissions:
       contents: write
@@ -394,7 +398,7 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release:
-    if: needs.prepare.outputs.sha != ''
+    if: needs.prepare.outputs.sha != '' && github.ref == 'refs/heads/master'
     needs: [version, prepare]
     permissions:
       contents: write
