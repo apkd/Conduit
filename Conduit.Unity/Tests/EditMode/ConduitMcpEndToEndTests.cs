@@ -428,6 +428,52 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(14)]
+    public async Task ExecuteCode_AutoInfersMissingNamespaceAndKeepsSuccessSilent()
+    {
+        const string snippet = "return BindingFlags.Public.ToString();";
+
+        var first = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        var second = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        AssertSuccessful(first, "Public");
+        AssertSuccessful(second, "Public");
+        Assert.That(first.Text, Does.Not.Contain("Retried with inferred namespaces"));
+        Assert.That(second.Text, Does.Not.Contain("Retried with inferred namespaces"));
+    }
+
+    [Test]
+    [Order(15)]
+    public async Task ExecuteCode_AutoInfersMultipleNamespacesInSingleRetry()
+    {
+        const string snippet = "return Regex.IsMatch(typeof(MethodInfo).Name, \"^Method\").ToString();";
+
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        AssertSuccessful(result, "true");
+        Assert.That(result.Text, Does.Not.Contain("Retried with inferred namespaces"));
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_CoversSuccessCacheRuntimeFailureAndCompileFailure()
     {
         var runtimeTogglePath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCode_{Guid.NewGuid():N}.flag");
@@ -471,11 +517,29 @@ public sealed class ConduitMcpEndToEndTests
                     ("snippet", "namespace Rejected { }")
                 )
             );
+            var unsupportedCompileFailure = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", "return bindingFlags;")
+                )
+            );
+            var retryFailure = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", "return BindingFlags.MissingMember.ToString();")
+                )
+            );
 
             AssertSuccessful(success, "5");
             AssertSuccessful(cachedSuccess, "5");
             AssertTextContainsAny(runtimeFailure.Text, "FormatException", "Input string");
             AssertTextContainsAny(compileFailure.Text, "Namespace declarations are not supported", "execute_code(");
+            Assert.That(unsupportedCompileFailure.Text, Does.Contain("bindingFlags"));
+            Assert.That(unsupportedCompileFailure.Text, Does.Not.Contain("Retried with inferred namespaces"));
+            Assert.That(retryFailure.Text, Does.Contain("Retried with inferred namespaces: System.Reflection."));
+            Assert.That(retryFailure.Text, Does.Contain("MissingMember"));
         }
         finally
         {
@@ -485,7 +549,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(15)]
+    [Order(17)]
     public async Task Play_TogglesBetweenEditModeAndPlayMode()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;

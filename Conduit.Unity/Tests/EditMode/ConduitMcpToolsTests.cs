@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -767,6 +768,291 @@ public sealed class ConduitMcpToolsTests
             "[Warning] Temp/execute_code/1.cs(2,1): warning CS0618: " +
             "'Application.RegisterLogCallback(Application.LogCallback)' is obsolete: " +
             "'Application.RegisterLogCallback is deprecated. Use Application.logMessageReceived instead.'"));
+    }
+
+    [Test]
+    public void ExecuteCode_ParseRetryableMissingSymbol_RecognizesSupportedDiagnostics()
+    {
+        var missingName = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(9,36): error CS0103: The name 'BindingFlags' does not exist in the current context",
+        };
+        var missingType = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
+        };
+
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingName, out var missingNameSymbol), Is.True);
+        Assert.That(missingNameSymbol, Is.EqualTo("BindingFlags"));
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingType, out var missingTypeSymbol), Is.True);
+        Assert.That(missingTypeSymbol, Is.EqualTo("MethodInfo"));
+    }
+
+    [Test]
+    public void ExecuteCode_ParseRetryableMissingSymbol_RejectsUnsupportedOrNonTypeLikeDiagnostics()
+    {
+        var missingVariable = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(9,36): error CS0103: The name 'bindingFlags' does not exist in the current context",
+        };
+        var unsupported = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(9,36): error CS1061: 'string' does not contain a definition for 'Foo'",
+        };
+
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingVariable, out _), Is.False);
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(unsupported, out _), Is.False);
+    }
+
+    [Test]
+    public void ExecuteCode_ParseRetryableMissingSymbol_RejectsQualifiedNames()
+    {
+        var qualifiedType = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'System.Reflection.MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
+        };
+        var aliasedType = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'global::MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
+        };
+
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(qualifiedType, out _), Is.False);
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(aliasedType, out _), Is.False);
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_ResolvesUnambiguousReflectionImport()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse("return BindingFlags.Public.ToString();");
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            execute_code.GetCurrentProjectPath(),
+            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
+            parsedSnippet,
+            compilerMessages,
+            out var inferredNamespaces
+        );
+
+        Assert.That(inferred, Is.True);
+        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection" }));
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_ResolvesMultipleNamespacesInSingleRetry()
+    {
+        var projectPath = execute_code.GetCurrentProjectPath();
+        var parsedSnippet = ConduitCodeParser.Parse("return Regex.IsMatch(typeof(MethodInfo).Name, \"^Method\").ToString();");
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,24): error CS0103: The name 'Regex' does not exist in the current context",
+            },
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,39): error CS0246: The type or namespace name 'MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            projectPath,
+            execute_code.GetSnippetRootPath(projectPath),
+            parsedSnippet,
+            compilerMessages,
+            out var inferredNamespaces
+        );
+
+        Assert.That(inferred, Is.True);
+        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection", "System.Text.RegularExpressions" }));
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_DeduplicatesRepeatedMissingSymbols()
+    {
+        var projectPath = execute_code.GetCurrentProjectPath();
+        var parsedSnippet = ConduitCodeParser.Parse("var a = BindingFlags.Public; return BindingFlags.NonPublic.ToString();");
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,9): error CS0103: The name 'BindingFlags' does not exist in the current context",
+            },
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,38): error CS0103: The name 'BindingFlags' does not exist in the current context",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            projectPath,
+            execute_code.GetSnippetRootPath(projectPath),
+            parsedSnippet,
+            compilerMessages,
+            out var inferredNamespaces
+        );
+
+        Assert.That(inferred, Is.True);
+        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection" }));
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_DoesNotRetryWhenNamespaceAlreadyImported()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse(
+            "using System.Reflection;\n"
+            + "\n"
+            + "return BindingFlags.Public.ToString();\n"
+        );
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(3,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            execute_code.GetCurrentProjectPath(),
+            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
+            parsedSnippet,
+            compilerMessages,
+            out _
+        );
+
+        Assert.That(inferred, Is.False);
+    }
+
+    [Test]
+    public void ExecuteCode_BuildSnippetSource_DeduplicatesInferredAndExplicitUsingDirectives()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse(
+            "using System.Reflection;\n"
+            + "using System.Reflection;\n"
+            + "\n"
+            + "return BindingFlags.Public.ToString();\n"
+        );
+        var buildSnippetSource = typeof(execute_code).GetMethod(
+            "BuildSnippetSource",
+            BindingFlags.Static | BindingFlags.NonPublic
+        );
+        Assert.That(buildSnippetSource, Is.Not.Null);
+
+        var generatedSource = (string)buildSnippetSource!.Invoke(
+            null,
+            new object?[]
+            {
+                "SnippetHost_Test",
+                "1.cs",
+                parsedSnippet,
+                new[] { "System.Reflection" },
+            }
+        )!;
+
+        Assert.That(CountOccurrences(generatedSource, "using System.Reflection;"), Is.EqualTo(1), generatedSource);
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_RejectsMixedErrorSets()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse("return BindingFlags.Public.ToString();");
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
+            },
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,1): error CS1002: ; expected",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            execute_code.GetCurrentProjectPath(),
+            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
+            parsedSnippet,
+            compilerMessages,
+            out _
+        );
+
+        Assert.That(inferred, Is.False);
+    }
+
+    [Test]
+    public void ExecuteCode_ResolveMissingSymbolNamespace_RejectsAmbiguousCandidates()
+    {
+        var lookup = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["Thing"] = new[] { "A.B", "C.D" },
+        };
+
+        var resolved = execute_code.TryResolveMissingSymbolNamespace(
+            "Thing",
+            lookup,
+            new(StringComparer.Ordinal),
+            new(StringComparer.Ordinal),
+            out _
+        );
+
+        Assert.That(resolved, Is.False);
+    }
+
+    [Test]
+    public void ExecuteCode_ResolveMissingSymbolNamespace_ReusesPreviouslyResolvedNamespace()
+    {
+        var lookup = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["Thing"] = new[] { "A.B", "C.D" },
+        };
+        var resolvedNamespaces = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "A.B",
+        };
+
+        var resolved = execute_code.TryResolveMissingSymbolNamespace(
+            "Thing",
+            lookup,
+            new(StringComparer.Ordinal),
+            resolvedNamespaces,
+            out var resolvedNamespace
+        );
+
+        Assert.That(resolved, Is.True);
+        Assert.That(resolvedNamespace, Is.EqualTo("A.B"));
+    }
+
+    static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var startIndex = 0;
+        while ((startIndex = text.IndexOf(value, startIndex, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            startIndex += value.Length;
+        }
+
+        return count;
     }
 
     [Test]

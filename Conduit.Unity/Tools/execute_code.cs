@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
+using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
 using Assembly = System.Reflection.Assembly;
@@ -23,6 +24,7 @@ namespace Conduit
         static bool initialized;
         static int nextSnippetArtifactId;
         static CachedAdditionalReferences? additionalReferencesCache;
+        static CachedTypeNamespaceLookup? typeNamespaceLookupCache;
         static readonly Dictionary<string, CachedSnippetCompilation> compilationCache = new(StringComparer.Ordinal);
 
         static readonly HashSet<string> defaultUsingDirectives = new(StringComparer.Ordinal)
@@ -68,11 +70,30 @@ namespace Conduit
                     sourceFilePath,
                     assemblyPath
                 );
+                string[]? inferredNamespaces = null;
+                if (TryInferMissingNamespaces(projectPath, snippetRootPath, parsedSnippet, compilerMessages, out var retryNamespaces))
+                {
+                    inferredNamespaces = retryNamespaces;
+                    File.WriteAllText(
+                        sourceFilePath,
+                        BuildSnippetSource(typeName, displaySourcePath, parsedSnippet, retryNamespaces)
+                    );
+
+                    await AwaitEditorUpdateAsync();
+                    compilerMessages = await CompileAssemblyAsync(
+                        projectPath,
+                        snippetRootPath,
+                        sourceFilePath,
+                        assemblyPath
+                    );
+                }
+
                 var compilation = CacheCompilation(
                     snippetText,
                     fullTypeName,
                     assemblyPath,
-                    compilerMessages
+                    compilerMessages,
+                    inferredNamespaces
                 );
                 return await ExecuteCachedCompilationAsync(compilation);
             }
@@ -110,7 +131,10 @@ namespace Conduit
         static void CleanupGeneratedFiles()
         {
             lock (cacheGate)
+            {
                 nextSnippetArtifactId = 0;
+                typeNamespaceLookupCache = null;
+            }
 
             var projectPath = GetCurrentProjectPath();
             DeleteDirectoryIfPresent(GetSnippetRootPath(projectPath));
@@ -168,6 +192,20 @@ namespace Conduit
             }
 
             return await completion.Task;
+        }
+
+        static Task AwaitEditorUpdateAsync()
+        {
+            var completion = new TaskCompletionSource<bool>();
+
+            void OnUpdate()
+            {
+                EditorApplication.update -= OnUpdate;
+                completion.TrySetResult(true);
+            }
+
+            EditorApplication.update += OnUpdate;
+            return completion.Task;
         }
 
         internal static string[] GetAdditionalReferences(string projectPath, string snippetRootPath)
@@ -277,10 +315,14 @@ namespace Conduit
             string snippetText,
             string fullTypeName,
             string assemblyPath,
-            CompilerMessage[] compilerMessages
+            CompilerMessage[] compilerMessages,
+            string[]? inferredNamespaces = null
         )
         {
             var compileErrorDiagnostic = FormatCompilerMessages(FilterCompilerMessages(compilerMessages, CompilerMessageType.Error));
+            if (!string.IsNullOrWhiteSpace(compileErrorDiagnostic) && inferredNamespaces is { Length: > 0 })
+                compileErrorDiagnostic = BuildRetryFailureDiagnostic(inferredNamespaces, compileErrorDiagnostic);
+
             var warningDiagnostic = FormatCompilerMessages(FilterCompilerMessages(compilerMessages, CompilerMessageType.Warning));
             var compilation = new CachedSnippetCompilation
             {
@@ -302,19 +344,45 @@ namespace Conduit
                 return (++nextSnippetArtifactId).ToString(CultureInfo.InvariantCulture);
         }
 
-        static string BuildSnippetSource(string typeName, string displaySourcePath, SnippetParseResult parsedSnippet)
+        static string BuildSnippetSource(
+            string typeName,
+            string displaySourcePath,
+            SnippetParseResult parsedSnippet,
+            IReadOnlyList<string>? inferredNamespaces = null
+        )
         {
             var builder = new StringBuilder();
+            using var pooledEmitted = ConduitUtility.GetPooledSet<string>(out var emittedUsingDirectives);
             builder.AppendLine("using System;");
+            emittedUsingDirectives.Add("using System;");
             builder.AppendLine("using System.Collections.Generic;");
+            emittedUsingDirectives.Add("using System.Collections.Generic;");
             builder.AppendLine("using System.IO;");
+            emittedUsingDirectives.Add("using System.IO;");
             builder.AppendLine(linqUsingDirective);
+            emittedUsingDirectives.Add(linqUsingDirective);
             builder.AppendLine("using System.Threading.Tasks;");
+            emittedUsingDirectives.Add("using System.Threading.Tasks;");
             builder.AppendLine("using UnityEditor;");
+            emittedUsingDirectives.Add("using UnityEditor;");
             builder.AppendLine("using UnityEngine;");
+            emittedUsingDirectives.Add("using UnityEngine;");
+            if (inferredNamespaces is { Count: > 0 })
+            {
+                foreach (var inferredNamespace in inferredNamespaces)
+                {
+                    var inferredUsingDirective = $"using {inferredNamespace};";
+                    if (!emittedUsingDirectives.Add(inferredUsingDirective))
+                        continue;
+
+                    builder.AppendLine(inferredUsingDirective);
+                }
+            }
+
             foreach (var usingDirective in parsedSnippet.Usings)
             {
-                if (defaultUsingDirectives.Contains(usingDirective.Text.Trim()))
+                var normalizedUsingDirective = usingDirective.Text.Trim();
+                if (!emittedUsingDirectives.Add(normalizedUsingDirective))
                     continue;
 
                 AppendChunk(builder, usingDirective, displaySourcePath);
@@ -419,6 +487,296 @@ namespace Conduit
         internal static string GetSnippetRootPath(string projectPath)
             => Path.Combine(projectPath, "Temp", SnippetTempDirectoryName);
 
+        internal static bool TryInferMissingNamespaces(
+            string projectPath,
+            string snippetRootPath,
+            SnippetParseResult parsedSnippet,
+            CompilerMessage[] compilerMessages,
+            out string[] inferredNamespaces
+        )
+        {
+            inferredNamespaces = Array.Empty<string>();
+            var errorMessages = FilterCompilerMessages(compilerMessages, CompilerMessageType.Error);
+            if (errorMessages.Length == 0)
+                return false;
+
+            using var pooledImported = ConduitUtility.GetPooledSet<string>(out var importedNamespaces);
+            CollectImportedNamespaces(parsedSnippet, importedNamespaces);
+
+            using var pooledInferred = ConduitUtility.GetPooledSet<string>(out var resolvedNamespaces);
+            var typeNamespaceLookup = GetTypeNamespaceLookup(projectPath, snippetRootPath);
+            foreach (var errorMessage in errorMessages)
+            {
+                if (!TryParseRetryableMissingSymbol(errorMessage, out var missingSymbol))
+                    return false;
+
+                if (!TryResolveMissingSymbolNamespace(missingSymbol, typeNamespaceLookup, importedNamespaces, resolvedNamespaces, out var resolvedNamespace))
+                    return false;
+
+                resolvedNamespaces.Add(resolvedNamespace);
+            }
+
+            if (resolvedNamespaces.Count == 0)
+                return false;
+
+            inferredNamespaces = ConduitUtility.SortStrings(resolvedNamespaces, StringComparer.Ordinal);
+            return true;
+        }
+
+        static void CollectImportedNamespaces(SnippetParseResult parsedSnippet, HashSet<string> importedNamespaces)
+        {
+            foreach (var defaultUsingDirective in defaultUsingDirectives)
+                if (TryGetNamespaceFromUsingDirective(defaultUsingDirective, out var defaultNamespace))
+                    importedNamespaces.Add(defaultNamespace);
+
+            foreach (var usingDirective in parsedSnippet.Usings)
+                if (TryGetNamespaceFromUsingDirective(usingDirective.Text, out var importedNamespace))
+                    importedNamespaces.Add(importedNamespace);
+        }
+
+        internal static bool TryParseRetryableMissingSymbol(CompilerMessage compilerMessage, out string symbolName)
+        {
+            symbolName = string.Empty;
+            if (compilerMessage.type != CompilerMessageType.Error
+                || compilerMessage.message is not { Length: > 0 } message
+                || !TryGetCompilerErrorCode(message, out var errorCode))
+                return false;
+
+            return errorCode switch
+            {
+                "CS0103" => TryExtractQuotedValue(
+                    message,
+                    "The name '",
+                    "' does not exist in the current context",
+                    requireTypeLikeName: true,
+                    out symbolName
+                ),
+                "CS0246" => TryExtractQuotedValue(
+                    message,
+                    "The type or namespace name '",
+                    "' could not be found",
+                    requireTypeLikeName: true,
+                    out symbolName
+                ),
+                _ => false,
+            };
+        }
+
+        static bool TryGetCompilerErrorCode(string message, out string errorCode)
+        {
+            const string marker = ": error ";
+            var markerIndex = message.IndexOf(marker, StringComparison.Ordinal);
+            if (markerIndex < 0)
+            {
+                errorCode = string.Empty;
+                return false;
+            }
+
+            var codeStart = markerIndex + marker.Length;
+            var codeEnd = message.IndexOf(':', codeStart);
+            if (codeEnd <= codeStart)
+            {
+                errorCode = string.Empty;
+                return false;
+            }
+
+            errorCode = message[codeStart..codeEnd].Trim();
+            return errorCode.Length > 0;
+        }
+
+        static bool TryExtractQuotedValue(
+            string message,
+            string prefix,
+            string suffix,
+            bool requireTypeLikeName,
+            out string symbolName
+        )
+        {
+            symbolName = string.Empty;
+            var prefixIndex = message.IndexOf(prefix, StringComparison.Ordinal);
+            if (prefixIndex < 0)
+                return false;
+
+            var valueStart = prefixIndex + prefix.Length;
+            var valueEnd = message.IndexOf(suffix, valueStart, StringComparison.Ordinal);
+            if (valueEnd <= valueStart)
+                return false;
+
+            symbolName = message[valueStart..valueEnd].Trim();
+            if (symbolName.Length == 0 || symbolName.Contains(".") || symbolName.Contains("::"))
+                return false;
+
+            return !requireTypeLikeName || LooksLikeTypeName(symbolName);
+        }
+
+        static bool LooksLikeTypeName(string symbolName)
+            => symbolName.Length > 0
+               && (char.IsUpper(symbolName[0]) || symbolName[0] == '_')
+               && IsSimpleIdentifier(symbolName);
+
+        static bool IsSimpleIdentifier(string value)
+        {
+            if (value.Length == 0 || (!char.IsLetter(value[0]) && value[0] != '_'))
+                return false;
+
+            foreach (var ch in value)
+                if (!char.IsLetterOrDigit(ch) && ch != '_')
+                    return false;
+
+            return true;
+        }
+
+        internal static bool TryResolveMissingSymbolNamespace(
+            string symbolName,
+            Dictionary<string, string[]> typeNamespaceLookup,
+            HashSet<string> importedNamespaces,
+            HashSet<string> resolvedNamespaces,
+            out string resolvedNamespace
+        )
+        {
+            resolvedNamespace = string.Empty;
+            if (!typeNamespaceLookup.TryGetValue(symbolName, out var candidateNamespaces))
+                return false;
+
+            string? previouslyResolvedNamespace = null;
+            string? uniqueNamespace = null;
+            foreach (var candidateNamespace in candidateNamespaces)
+            {
+                if (importedNamespaces.Contains(candidateNamespace))
+                    return false;
+
+                if (resolvedNamespaces.Contains(candidateNamespace))
+                {
+                    previouslyResolvedNamespace ??= candidateNamespace;
+                    continue;
+                }
+
+                if (previouslyResolvedNamespace != null)
+                    continue;
+
+                if (uniqueNamespace != null)
+                    return false;
+
+                uniqueNamespace = candidateNamespace;
+            }
+
+            resolvedNamespace = uniqueNamespace ?? previouslyResolvedNamespace ?? string.Empty;
+            return resolvedNamespace.Length > 0;
+        }
+
+        static Dictionary<string, string[]> GetTypeNamespaceLookup(string projectPath, string snippetRootPath)
+        {
+            lock (cacheGate)
+            {
+                if (typeNamespaceLookupCache is { } cachedLookup
+                    && string.Equals(cachedLookup.ProjectPath, projectPath, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(cachedLookup.SnippetRootPath, snippetRootPath, StringComparison.OrdinalIgnoreCase))
+                    return cachedLookup.Lookup;
+            }
+
+            var normalizedSnippetRootPath = NormalizeDirectoryPath(snippetRootPath);
+            var lookup = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (!ShouldIndexAssembly(assembly, normalizedSnippetRootPath))
+                    continue;
+
+                foreach (var type in GetLoadableTypes(assembly))
+                {
+                    if (type == null
+                        || type.IsNested
+                        || string.IsNullOrWhiteSpace(type.Namespace)
+                        || !TryNormalizeTypeName(type.Name, out var typeName))
+                        continue;
+
+                    if (!lookup.TryGetValue(typeName, out var namespaces))
+                    {
+                        namespaces = new(StringComparer.Ordinal);
+                        lookup[typeName] = namespaces;
+                    }
+
+                    namespaces.Add(type.Namespace);
+                }
+            }
+
+            var finalizedLookup = new Dictionary<string, string[]>(lookup.Count, StringComparer.Ordinal);
+            foreach (var entry in lookup)
+                finalizedLookup[entry.Key] = ConduitUtility.SortStrings(entry.Value, StringComparer.Ordinal);
+
+            lock (cacheGate)
+            {
+                typeNamespaceLookupCache = new()
+                {
+                    ProjectPath = projectPath,
+                    SnippetRootPath = snippetRootPath,
+                    Lookup = finalizedLookup,
+                };
+            }
+
+            return finalizedLookup;
+        }
+
+        static bool ShouldIndexAssembly(Assembly assembly, string normalizedSnippetRootPath)
+        {
+            if (assembly.IsDynamic)
+                return false;
+
+            if (assembly.Location is not { Length: > 0 } location)
+                return true;
+
+            var normalizedLocation = NormalizeDirectoryPath(Path.GetDirectoryName(Path.GetFullPath(location)) ?? string.Empty);
+            return !normalizedLocation.StartsWith(normalizedSnippetRootPath, StringComparison.OrdinalIgnoreCase);
+        }
+
+        static IEnumerable<Type> GetLoadableTypes(Assembly assembly)
+        {
+            try
+            {
+                return assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                using var pooledTypes = ConduitUtility.GetPooledList<Type>(out var types);
+                foreach (var type in exception.Types)
+                    if (type != null)
+                        types.Add(type);
+
+                return types.ToArray();
+            }
+        }
+
+        static bool TryNormalizeTypeName(string typeName, out string normalizedTypeName)
+        {
+            var aritySeparator = typeName.IndexOf('`');
+            normalizedTypeName = aritySeparator >= 0 ? typeName[..aritySeparator] : typeName;
+            return IsSimpleIdentifier(normalizedTypeName);
+        }
+
+        static bool TryGetNamespaceFromUsingDirective(string usingDirective, out string namespaceName)
+        {
+            namespaceName = string.Empty;
+            var trimmed = usingDirective.Trim();
+            if (!trimmed.StartsWith("using ", StringComparison.Ordinal) || !trimmed.EndsWith(";", StringComparison.Ordinal))
+                return false;
+
+            var namespaceStart = "using ".Length;
+            var namespaceText = trimmed[namespaceStart..^1].Trim();
+            if (namespaceText.Length == 0
+                || namespaceText.StartsWith("static ", StringComparison.Ordinal)
+                || namespaceText.Contains("="))
+                return false;
+
+            foreach (var segment in namespaceText.Split('.'))
+                if (!IsSimpleIdentifier(segment))
+                    return false;
+
+            namespaceName = namespaceText;
+            return true;
+        }
+
+        static string BuildRetryFailureDiagnostic(IReadOnlyList<string> inferredNamespaces, string compileErrorDiagnostic)
+            => $"Retried with inferred namespaces: {string.Join(", ", inferredNamespaces)}.\n\n{compileErrorDiagnostic}";
+
         static string NormalizeDirectoryPath(string path)
         {
             var normalizedPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -434,6 +792,13 @@ namespace Conduit
             public string ProjectPath = string.Empty;
             public string SnippetRootPath = string.Empty;
             public string[] References = Array.Empty<string>();
+        }
+
+        sealed class CachedTypeNamespaceLookup
+        {
+            public string ProjectPath = string.Empty;
+            public string SnippetRootPath = string.Empty;
+            public Dictionary<string, string[]> Lookup = new(StringComparer.Ordinal);
         }
 
         sealed class CachedSnippetCompilation
