@@ -178,9 +178,6 @@ public sealed class UnityEditorProcessController(
 
                 previousLogSnapshot = currentLogSnapshot;
                 currentWindowDeadlineUtc = nextWindowDeadlineUtc;
-                builder.AppendLine(
-                    $"Observed restart log activity; extending the startup window to {(currentWindowDeadlineUtc - startupStartedUtc).TotalMinutes:0} minute(s)."
-                );
                 continue;
             }
 
