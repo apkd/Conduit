@@ -216,7 +216,7 @@ public sealed class UnityTools
         """
         Immediately compiles and runs a one-off C# snippet inside the Unity editor. Works in edit mode and in play mode.
         Supports top-level statements, local functions, leading using directives, leading type declarations, and leading static fields.
-        The generated snippet already imports System, generic collections, IO, Linq, Tasks, reflection, UnityEditor, and UnityEngine; skip these namespaces.
+        The generated snippet already imports System, generic collections, IO, Linq, Tasks, UnityEditor, and UnityEngine; skip these namespaces.
         You can also skip whitespace and other tokens that don't impact execution. Prefer extremely terse code; single-letter variable names, etc.
         Useful for testing and debugging, prototyping code, validating assumptions, and even making modifications to the project.
         """
