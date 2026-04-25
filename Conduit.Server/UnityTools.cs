@@ -228,6 +228,21 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ExecuteCodeAsync(projectPath, snippet, ct));
 
+    [McpServerTool(Name = CMD.ViewBurstAsm)]
+    [Description(
+        """
+        Returns Burst Inspector-style assembly for a fuzzy-matched Burst compilation target.
+        Uses assembly output equivalent to Enhanced With Minimal Debug Information, safety checks disabled, and Auto target CPU.
+        """
+    )]
+    public static Task<string> ViewBurstAsm(
+        [Description("Project path")] string projectPath,
+        [Description("Burst compilation target or method name to fuzzy match")]
+        string target,
+        UnityProjectOperations operations,
+        CancellationToken ct
+    ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, ct));
+
     [McpServerTool(Name = CMD.RunTestsEditMode)]
     [Description("Runs the edit mode test suite")]
     public static Task<string> RunTestsEditMode(

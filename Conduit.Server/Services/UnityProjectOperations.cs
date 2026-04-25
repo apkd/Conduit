@@ -157,6 +157,13 @@ public sealed class UnityProjectOperations(
             ct: ct
         );
 
+    public Task<ToolExecutionResult> ViewBurstAsmAsync(string projectPath, string target, CT ct)
+        => EnqueueAsync(
+            projectPath: projectPath,
+            command: new() { CommandType = BridgeCommandTypes.ViewBurstAsm, Target = target },
+            ct: ct
+        );
+
     public Task<ToolExecutionResult> RunTestsEditModeAsync(string projectPath, string? testFilter, CT ct)
         => EnqueueAsync(
             projectPath,

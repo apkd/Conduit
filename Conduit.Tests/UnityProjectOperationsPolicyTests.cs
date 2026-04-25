@@ -90,6 +90,13 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task ViewBurstAsmCommandPolicy_IsRegistered()
+    {
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ViewBurstAsm)).IsEqualTo(BridgeCommandKind.ViewBurstAsm);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(10));
+    }
+
+    [Test]
     public async Task RefreshRecoveryTreatsUpdatingAsBusy()
     {
         await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new() { IsUpdating = true })).IsTrue();

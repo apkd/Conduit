@@ -66,6 +66,18 @@ namespace Conduit
         static async Task ExecuteCodeAsync(PendingOperationState operation)
             => await CompleteCurrentAsync(await execute_code.ExecuteAsync(operation));
 
+        static async Task ExecuteViewBurstAsmAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(view_burst_asm.ViewBurstAsm(operation.target ?? string.Empty));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
         static async Task ExecuteCommandAsync(Func<string> getResult)
         {
             try

@@ -30,6 +30,7 @@ static class UnityToolTimeouts
             DiscardScenes        => TimeSpan.FromSeconds(40),
             RefreshAssetDatabase => TimeSpan.FromMinutes(10),
             ExecuteCode          => TimeSpan.FromMinutes(10),
+            ViewBurstAsm         => TimeSpan.FromMinutes(5),
             RunTestsEditMode     => TimeSpan.FromMinutes(10),
             RunTestsPlayMode     => TimeSpan.FromMinutes(20),
             RunTestsPlayer       => TimeSpan.FromMinutes(30),

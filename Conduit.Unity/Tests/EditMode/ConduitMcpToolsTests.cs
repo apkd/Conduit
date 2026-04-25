@@ -110,6 +110,116 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmCommand_Parses()
+    {
+        var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ViewBurstAsm);
+
+        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ViewBurstAsm));
+    }
+
+    [Test]
+    public void ViewBurstAsmMatch_SelectsExactAndUniqueSubstringTargets()
+    {
+        var targets = CreateBurstAsmTargets();
+
+        var exact = view_burst_asm.MatchTarget("Gameplay.Motion.MoveJob - (IJob)", targets);
+        var substring = view_burst_asm.MatchTarget("RenderChunk", targets);
+
+        Assert.That(exact.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
+        Assert.That(exact.SelectedIndex, Is.EqualTo(0));
+        Assert.That(substring.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
+        Assert.That(substring.SelectedIndex, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ViewBurstAsmMatch_UsesTokenScoringForFuzzyNames()
+    {
+        var targets = CreateBurstAsmTargets();
+
+        var match = view_burst_asm.MatchTarget("render execute", targets);
+
+        Assert.That(match.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
+        Assert.That(match.SelectedIndex, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ViewBurstAsmMatch_RejectsAmbiguousTargets()
+    {
+        var targets = CreateBurstAsmTargets();
+
+        var match = view_burst_asm.MatchTarget("motion job", targets);
+
+        Assert.That(match.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Ambiguous));
+        Assert.That(match.CandidateIndexes, Is.EquivalentTo(new[] { 0, 1 }));
+    }
+
+    [Test]
+    public void ViewBurstAsmMatch_ReturnsNoMatchWithCandidates()
+    {
+        var targets = CreateBurstAsmTargets();
+
+        var match = view_burst_asm.MatchTarget("missing target", targets);
+
+        Assert.That(match.Kind, Is.EqualTo(BurstAsmTargetMatchKind.None));
+        Assert.That(match.CandidateIndexes, Has.Length.EqualTo(3));
+    }
+
+    [Test]
+    public void ViewBurstAsmOptions_UseInspectorDefaults()
+    {
+        var fixture = new BurstInspectorOptionsFixture();
+
+        view_burst_asm.ApplyInspectorOptionOverrides(fixture);
+        var options = view_burst_asm.BuildInspectorOptions("--float-mode=Default");
+
+        Assert.That(fixture.EnableBurstSafetyChecks, Is.False);
+        Assert.That(fixture.ForceEnableBurstSafetyChecks, Is.False);
+        Assert.That(fixture.EnableBurstDebug, Is.False);
+        Assert.That(options, Does.Contain("--float-mode=Default"));
+        Assert.That(options, Does.Contain("--disable-warnings=BC1370;BC1322"));
+        Assert.That(options, Does.Contain("--target=Auto"));
+        Assert.That(options, Does.Contain("--debug=2"));
+        Assert.That(options, Does.EndWith("--dump=Asm"));
+    }
+
+    [Test]
+    public void ViewBurstAsmCleanup_StripsOnlyTrailingTemporaryDirectiveBlocks()
+    {
+        var input = string.Join("\n",
+            "mov eax, ecx",
+            "ret",
+            "    .size BurstMethod, .-BurstMethod",
+            ".Ltmp99:",
+            "    .quad 1",
+            ".Ltmp100:",
+            "    .asciz \"debug\"");
+
+        var result = view_burst_asm.StripTrailingTemporaryLabelBlocks(input);
+
+        Assert.That(result, Is.EqualTo(string.Join("\n",
+            "mov eax, ecx",
+            "ret",
+            "    .size BurstMethod, .-BurstMethod")));
+    }
+
+    [Test]
+    public void ViewBurstAsmCleanup_PreservesMiddleAndInstructionTemporaryLabels()
+    {
+        var middleLabel = string.Join("\n",
+            "mov eax, ecx",
+            ".Ltmp99:",
+            "add eax, 1",
+            "ret");
+        var instructionSuffix = string.Join("\n",
+            "mov eax, ecx",
+            ".Ltmp100:",
+            "ret");
+
+        Assert.That(view_burst_asm.StripTrailingTemporaryLabelBlocks(middleLabel), Is.EqualTo(middleLabel));
+        Assert.That(view_burst_asm.StripTrailingTemporaryLabelBlocks(instructionSuffix), Is.EqualTo(instructionSuffix));
+    }
+
+    [Test]
     public void GetDependencies_PatternWithSingleMatchMatchesExactOutput()
     {
         var exact = find_references_to.GetDependencies(SourceAsset);
@@ -1713,6 +1823,29 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
+    static BurstTarget[] CreateBurstAsmTargets() =>
+        new[]
+        {
+            new BurstTarget(
+                "Gameplay.Motion.MoveJob - (IJob)",
+                "Execute",
+                "Unity.Jobs.IJobExtensions.JobStruct`1",
+                "Gameplay.Motion.MoveJob"
+            ),
+            new BurstTarget(
+                "Gameplay.Motion.MoveParticlesJob - (IJob)",
+                "Execute",
+                "Unity.Jobs.IJobExtensions.JobStruct`1",
+                "Gameplay.Motion.MoveParticlesJob"
+            ),
+            new BurstTarget(
+                "Gameplay.Rendering.RenderChunkJob - (IJob)",
+                "Execute",
+                "Unity.Jobs.IJobExtensions.JobStruct`1",
+                "Gameplay.Rendering.RenderChunkJob"
+            ),
+        };
+
     static string CreateTemporaryMaterialAssetCopy()
     {
         var assetPath = GetTempAssetPath("UnitTests", $"Material_{Guid.NewGuid():N}.mat");
@@ -1920,6 +2053,13 @@ sealed class ConduitCaptureProbeWindow : EditorWindow
     void OnEnable() => titleContent = new("Conduit Capture Probe");
 
     void OnGUI() => GUILayout.Label("Conduit Capture Probe");
+}
+
+sealed class BurstInspectorOptionsFixture
+{
+    public bool EnableBurstSafetyChecks { get; set; } = true;
+    public bool ForceEnableBurstSafetyChecks { get; set; } = true;
+    public bool EnableBurstDebug { get; set; } = true;
 }
 
 sealed class ConduitCustomShowAsset : ScriptableObject
