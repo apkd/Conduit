@@ -203,7 +203,10 @@ public sealed class UnityTools
 
     [McpServerTool(Name = CMD.RefreshAssetDatabase)]
     [Description(
-        """Triggers AssetDatabase.Refresh for the project and waits for the editor to become stable again"""
+        """
+        Triggers AssetDatabase.Refresh for the project and waits for the editor to become stable again.
+        Never call AssetDatabase.Refresh manually. ALWAYS use refresh_asset_database instead.
+        """
     )]
     public static Task<string> RefreshAssetDatabase(
         [Description("Project path")] string projectPath,
