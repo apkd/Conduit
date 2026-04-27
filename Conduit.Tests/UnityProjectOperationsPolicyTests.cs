@@ -93,7 +93,7 @@ public sealed class UnityProjectOperationsPolicyTests
     public async Task ViewBurstAsmCommandPolicy_IsRegistered()
     {
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ViewBurstAsm)).IsEqualTo(BridgeCommandKind.ViewBurstAsm);
-        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(10));
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(5));
     }
 
     [Test]
