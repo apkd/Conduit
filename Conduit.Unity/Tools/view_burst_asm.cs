@@ -3,6 +3,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -13,6 +14,7 @@ namespace Conduit
     {
         const int MaxCandidates = 10;
         const int ClearMatchGap = 25;
+        const int LargeOutputLineThreshold = 1000;
         static readonly Regex tempLabel = new(@"^\s*\.Ltmp\d+:\s*(?:[#;].*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex burstError = new(@"^.*\(\d+,\d+\):\sBurst\serror", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex sourceLocation = new(@"^(?<prefix>\s*#\s+)(?<file>.+?)\((?<line>\d+),\s*\d+\)(?<rest>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -103,7 +105,7 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(disassembly))
                 return Error($"Burst returned empty assembly for '{target.DisplayName}'.");
 
-            return Success($"{target.DisplayName}\n{disassembly}");
+            return CompleteOutput(target, disassembly);
         }
 
         static string BuildOptions(BurstTarget target)
@@ -264,6 +266,20 @@ namespace Conduit
             return Join(lines, lines.Length);
         }
 
+        internal static string BuildOutput(BurstTarget target, string disassembly) =>
+            $"{CleanDisplayName(target.DisplayName)}\n{disassembly}";
+
+        internal static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly)
+        {
+            var output = BuildOutput(target, disassembly);
+            if (CountLines(output) <= LargeOutputLineThreshold)
+                return Success(output);
+
+            var path = SaveLargeOutput(target, output);
+            var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
+            return Success($"Output very large ({kilobytes} KB); saved to {path}");
+        }
+
         static List<int> Find(IReadOnlyList<BurstTarget> targets, Func<BurstTarget, bool> predicate)
         {
             var matches = new List<int>();
@@ -392,6 +408,9 @@ namespace Conduit
             return LimitGuidIds(CleanQuotedSymbols(line));
         }
 
+        static string CleanDisplayName(string displayName) =>
+            LimitGuidIds(CleanSymbol(displayName.Trim()));
+
         static string CleanQuotedSymbols(string line)
         {
             var firstQuote = line.IndexOf('"');
@@ -507,7 +526,8 @@ namespace Conduit
                     continue;
                 }
 
-                if (TryReadMetadataGenericArguments(symbol, afterArity, out var afterArguments, out var arguments))
+                if (TryReadMetadataGenericArguments(symbol, afterArity, out var afterArguments, out var arguments)
+                    || TryReadSimpleGenericArguments(symbol, afterArity, out afterArguments, out arguments))
                 {
                     builder.Append('<');
                     for (var argumentIndex = 0; argumentIndex < arguments.Count; argumentIndex++)
@@ -585,6 +605,46 @@ namespace Conduit
                 }
 
                 return false;
+            }
+
+            return false;
+        }
+
+        static bool TryReadSimpleGenericArguments(string symbol, int start, out int end, out List<string> arguments)
+        {
+            end = start;
+            arguments = new();
+            if (start >= symbol.Length || symbol[start] != '[')
+                return false;
+
+            var argumentStart = start + 1;
+            var depth = 0;
+            for (var i = argumentStart; i < symbol.Length; i++)
+            {
+                if (symbol[i] == '[')
+                {
+                    depth++;
+                    continue;
+                }
+
+                if (symbol[i] == ']')
+                {
+                    if (depth > 0)
+                    {
+                        depth--;
+                        continue;
+                    }
+
+                    arguments.Add(symbol[argumentStart..i]);
+                    end = i + 1;
+                    return true;
+                }
+
+                if (symbol[i] != ',' || depth != 0)
+                    continue;
+
+                arguments.Add(symbol[argumentStart..i]);
+                argumentStart = i + 1;
             }
 
             return false;
@@ -675,10 +735,14 @@ namespace Conduit
                 common = reduced;
             }
 
-            return common is { Length: > 0 }
-                ? string.Join(".", common) + "."
-                : string.Empty;
+            if (common is not { Length: > 0 } || IsBroadRootNamespace(common))
+                return string.Empty;
+
+            return string.Join(".", common) + ".";
         }
+
+        static bool IsBroadRootNamespace(string[] segments) =>
+            segments.Length == 1 && segments[0] is "Unity" or "System" or "Microsoft";
 
         static string[] NamespaceSegments(string typeName)
         {
@@ -692,6 +756,42 @@ namespace Conduit
             var searchEnd = nestedIndex < 0 ? typeName.Length - 1 : nestedIndex - 1;
             var dot = typeName.LastIndexOf('.', searchEnd);
             return dot < 0 ? typeName : typeName[(dot + 1)..];
+        }
+
+        static int CountLines(string text)
+        {
+            if (text.Length == 0)
+                return 0;
+
+            var lines = 1;
+            foreach (var character in text)
+                if (character == '\n')
+                    lines++;
+
+            return lines;
+        }
+
+        static string SaveLargeOutput(BurstTarget target, string output)
+        {
+            var path = Path.Combine("Temp", SafeFileName(target.MethodName.Length > 0 ? target.MethodName : target.DisplayName) + ".txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, output);
+            return path.Replace('\\', '/');
+        }
+
+        static string SafeFileName(string fileName)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var builder = new StringBuilder(fileName.Length);
+            foreach (var character in fileName)
+            {
+                if (Array.IndexOf(invalid, character) >= 0)
+                    builder.Append('_');
+                else if (!char.IsWhiteSpace(character))
+                    builder.Append(character);
+            }
+
+            return builder.Length == 0 ? "burst_asm" : builder.ToString();
         }
 
         static string Join(string[] lines, int endExclusive)

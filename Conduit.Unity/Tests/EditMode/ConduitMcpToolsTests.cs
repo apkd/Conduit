@@ -274,6 +274,53 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmOutput_SimplifiesHeaderLine()
+    {
+        var target = new BurstTarget(
+            "UnityEngine.Rendering.Universal.ShadowUtility.GenerateInteriorMesh(Unity.Collections.NativeArray`1[UnityEngine.Rendering.Universal.ShadowUtility.ShadowMeshVertex]&, Unity.Collections.NativeArray`1[System.Int32]&, UnityEngine.Rendering.Universal.ShadowEdge&, System.Int32&)",
+            "GenerateInteriorMesh",
+            "",
+            ""
+        );
+
+        var output = view_burst_asm.BuildOutput(target, "ret");
+
+        Assert.That(output, Is.EqualTo(
+            "GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)\nret"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_SavesLargeOutputToTempFile()
+    {
+        var target = new BurstTarget("Example.GenerateInteriorMesh()", "GenerateInteriorMesh", "", "");
+        var path = Path.Combine("Temp", "GenerateInteriorMesh.txt");
+        try
+        {
+            var builder = new System.Text.StringBuilder();
+            for (var i = 0; i < 1000; i++)
+            {
+                if (i > 0)
+                    builder.Append('\n');
+
+                builder.Append("nop");
+            }
+
+            var result = view_burst_asm.CompleteOutput(target, builder.ToString());
+
+            Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+            Assert.That(result.return_value, Does.StartWith("Output very large ("));
+            Assert.That(result.return_value, Does.EndWith(" KB); saved to Temp/GenerateInteriorMesh.txt"));
+            Assert.That(File.Exists(path), Is.True);
+            Assert.That(File.ReadAllText(path), Does.StartWith("GenerateInteriorMesh()\nnop"));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Test]
     public void GetDependencies_PatternWithSingleMatchMatchesExactOutput()
     {
         var exact = find_references_to.GetDependencies(SourceAsset);
