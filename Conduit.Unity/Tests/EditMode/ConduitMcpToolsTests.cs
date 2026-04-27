@@ -220,6 +220,60 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmCleanup_CompactsManagedSymbolsAndSourceLocations()
+    {
+        const string hash = "7435d70d723590c51e89202ae2f9be71";
+        const string testAssembly = "BurstCanvasProject.Tests.RuntimeCommon, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string runtimeAssembly = "BurstCanvas.Runtime, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        var jumpSymbol =
+            "BurstCanvas.BurstBrainRuntimeTraversal`2" +
+            "[[BurstCanvas.TrackedGraphTestActionBlock+Wrapper, " + testAssembly + "]," +
+            "[BurstCanvas.TrackedGraphTestConditionBlock+Wrapper, " + testAssembly + "]], " +
+            runtimeAssembly +
+            ".AbortFsmState(" +
+            "BurstCanvas.NativeBurstBrainProgram&, " + runtimeAssembly + " program, " +
+            "BurstCanvas.NativeBurstBrainInstance&, " + runtimeAssembly + " instance, " +
+            "BurstCanvas.FsmStateRuntimeNode&, " + runtimeAssembly + " node, " +
+            "BurstCanvas.RawExecutionContext&, " + runtimeAssembly + " context) -> " +
+            "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089_" +
+            hash +
+            " from " +
+            runtimeAssembly +
+            "@@32";
+        var stringReferenceSymbol =
+            "BurstCanvas.BurstBrainRuntimeTraversal`2<" +
+            "BurstCanvas.TrackedGraphTestActionBlock.Wrapper," +
+            "BurstCanvas.TrackedGraphTestConditionBlock.Wrapper>" +
+            ".ExecuteFsmEnterHook(" +
+            "ref BurstCanvas.NativeBurstBrainProgram program, " +
+            "ref BurstCanvas.NativeBurstBrainInstance instance, " +
+            "ref BurstCanvas.FsmEnterHookRuntimeNode node, " +
+            "ref BurstCanvas.RawExecutionContext context) -> " +
+            "BurstCanvas.NodeResultValue_" +
+            hash +
+            " from " +
+            runtimeAssembly +
+            ".string.IL_0036";
+        var input = string.Join("\n",
+            "        # BurstString.cs(797, 1)                while (digPos < 0)",
+            "        .globl        burst.initialize.statics.660453e77e7446c547511a17e62a4458",
+            "        burst.initialize.statics.660453e77e7446c547511a17e62a4458:",
+            "        .ascii        \" /EXPORT:660453e77e7446c547511a17e62a4458\"",
+            "        jmp               \"" + jumpSymbol + "\"",
+            "        lea               rcx, [rip + \"" + stringReferenceSymbol + "\"+2]");
+
+        var result = view_burst_asm.CleanDisassembly(input);
+
+        Assert.That(result, Is.EqualTo(string.Join("\n",
+            "# BurstString.cs:797                while (digPos < 0)",
+            ".globl        burst.initialize.statics.660453e7",
+            "burst.initialize.statics.660453e7:",
+            ".ascii        \" /EXPORT:660453e7\"",
+            "jmp               \"BurstBrainRuntimeTraversal<TrackedGraphTestActionBlock+Wrapper,TrackedGraphTestConditionBlock+Wrapper>.AbortFsmState(NativeBurstBrainProgram& program, NativeBurstBrainInstance& instance, FsmStateRuntimeNode& node, RawExecutionContext& context) -> bool\"",
+            "lea               rcx, [rip + \"BurstBrainRuntimeTraversal<TrackedGraphTestActionBlock.Wrapper,TrackedGraphTestConditionBlock.Wrapper>.ExecuteFsmEnterHook(ref NativeBurstBrainProgram program, ref NativeBurstBrainInstance instance, ref FsmEnterHookRuntimeNode node, ref RawExecutionContext context) -> NodeResultValue.string.IL_0036\"+2]")));
+    }
+
+    [Test]
     public void GetDependencies_PatternWithSingleMatchMatchesExactOutput()
     {
         var exact = find_references_to.GetDependencies(SourceAsset);

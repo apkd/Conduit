@@ -15,6 +15,11 @@ namespace Conduit
         const int ClearMatchGap = 25;
         static readonly Regex tempLabel = new(@"^\s*\.Ltmp\d+:\s*(?:[#;].*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex burstError = new(@"^.*\(\d+,\d+\):\sBurst\serror", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex sourceLocation = new(@"^(?<prefix>\s*#\s+)(?<file>.+?)\((?<line>\d+),\s*\d+\)(?<rest>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex assemblyQualifier = new(@",\s*[^,\]\)>]+,\s*Version=[0-9.]+,\s*Culture=[^,\]\)>\s]+,\s*PublicKeyToken=(?:null|[0-9a-fA-F]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex builtInTypeName = new(@"\b(?:System\.)?(?:Void|Boolean|Byte|SByte|Char|Decimal|Double|Single|Int32|UInt32|Int64|UInt64|Int16|UInt16|Object|String|IntPtr|UIntPtr)\b", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex qualifiedTypeName = new(@"\b(?:[A-Z_][A-Za-z0-9_]*\.)+[A-Z_][A-Za-z0-9_]*(?:\+[A-Z_][A-Za-z0-9_]*)*", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex guidId = new(@"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         public static BridgeCommandResult ViewBurstAsm(string targetName)
         {
@@ -93,7 +98,7 @@ namespace Conduit
             if (IsBurstError(rawDisassembly))
                 return Error(rawDisassembly.Trim());
 
-            var disassembly = StripTrailingTemporaryLabelBlocks(RenderEnhancedDisassembly(rawDisassembly).TrimStart('\n'));
+            var disassembly = StripTrailingTemporaryLabelBlocks(CleanDisassembly(RenderEnhancedDisassembly(rawDisassembly).TrimStart('\n')));
 
             if (string.IsNullOrWhiteSpace(disassembly))
                 return Error($"Burst returned empty assembly for '{target.DisplayName}'.");
@@ -250,6 +255,15 @@ namespace Conduit
             return Join(lines, keep);
         }
 
+        internal static string CleanDisassembly(string assembly)
+        {
+            var lines = assembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+                lines[i] = CleanLine(lines[i]).TrimStart();
+
+            return Join(lines, lines.Length);
+        }
+
         static List<int> Find(IReadOnlyList<BurstTarget> targets, Func<BurstTarget, bool> predicate)
         {
             var matches = new List<int>();
@@ -366,6 +380,318 @@ namespace Conduit
                    || text.StartsWith("//", StringComparison.Ordinal)
                    || text.StartsWith(";", StringComparison.Ordinal)
                    || text.StartsWith(".", StringComparison.Ordinal) && text.IndexOf(':') < 0;
+        }
+
+        static string CleanLine(string line)
+        {
+            line = sourceLocation.Replace(
+                line,
+                match => $"{match.Groups["prefix"].Value}{match.Groups["file"].Value}:{match.Groups["line"].Value}{match.Groups["rest"].Value}"
+            );
+
+            return LimitGuidIds(CleanQuotedSymbols(line));
+        }
+
+        static string CleanQuotedSymbols(string line)
+        {
+            var firstQuote = line.IndexOf('"');
+            if (firstQuote < 0)
+                return line;
+
+            var builder = new StringBuilder(line.Length);
+            var offset = 0;
+            while (offset < line.Length)
+            {
+                var start = line.IndexOf('"', offset);
+                if (start < 0)
+                {
+                    builder.Append(line, offset, line.Length - offset);
+                    break;
+                }
+
+                var end = FindClosingQuote(line, start + 1);
+                if (end < 0)
+                {
+                    builder.Append(line, offset, line.Length - offset);
+                    break;
+                }
+
+                builder.Append(line, offset, start - offset + 1);
+                var symbol = line.Substring(start + 1, end - start - 1);
+                builder.Append(ShouldCleanSymbol(symbol) ? CleanSymbol(symbol) : symbol);
+                builder.Append('"');
+                offset = end + 1;
+            }
+
+            return builder.ToString();
+        }
+
+        static int FindClosingQuote(string text, int start)
+        {
+            for (var i = start; i < text.Length; i++)
+            {
+                if (text[i] == '\\')
+                {
+                    i++;
+                    continue;
+                }
+
+                if (text[i] == '"')
+                    return i;
+            }
+
+            return -1;
+        }
+
+        static bool ShouldCleanSymbol(string symbol) =>
+            symbol.IndexOf("Version=", StringComparison.Ordinal) >= 0
+            || symbol.IndexOf("PublicKeyToken=", StringComparison.Ordinal) >= 0
+            || symbol.IndexOf(" -> ", StringComparison.Ordinal) >= 0
+            || symbol.IndexOf('`') >= 0
+            || symbol.IndexOf("System.", StringComparison.Ordinal) >= 0;
+
+        static string CleanSymbol(string symbol)
+        {
+            symbol = RemoveBurstLabelSuffix(symbol);
+            symbol = assemblyQualifier.Replace(symbol, string.Empty);
+            symbol = SimplifyMetadataGenerics(symbol);
+            symbol = ReplaceBuiltInTypeNames(symbol);
+            symbol = StripNamespaces(symbol);
+            symbol = ReplaceBuiltInTypeNames(symbol);
+            return symbol;
+        }
+
+        static string RemoveBurstLabelSuffix(string symbol)
+        {
+            var fromIndex = symbol.LastIndexOf(" from ", StringComparison.Ordinal);
+            if (fromIndex < 0)
+                return StripHashSuffix(symbol);
+
+            var signature = StripHashSuffix(symbol[..fromIndex]);
+            var suffix = symbol[(fromIndex + " from ".Length)..];
+            var stringLabelIndex = suffix.IndexOf(".string.IL_", StringComparison.Ordinal);
+            return stringLabelIndex < 0
+                ? signature
+                : signature + suffix[stringLabelIndex..];
+        }
+
+        static string StripHashSuffix(string text)
+        {
+            var underscore = text.LastIndexOf('_');
+            if (underscore < 0 || text.Length - underscore != 33)
+                return text;
+
+            for (var i = underscore + 1; i < text.Length; i++)
+                if (!IsHex(text[i]))
+                    return text;
+
+            return text[..underscore];
+        }
+
+        static bool IsHex(char character) =>
+            character is >= '0' and <= '9'
+            || character is >= 'a' and <= 'f'
+            || character is >= 'A' and <= 'F';
+
+        static string LimitGuidIds(string line) =>
+            guidId.Replace(line, match => match.Value[..8]);
+
+        static string SimplifyMetadataGenerics(string symbol)
+        {
+            var builder = new StringBuilder(symbol.Length);
+            for (var i = 0; i < symbol.Length; i++)
+            {
+                if (symbol[i] != '`' || !TryReadGenericArity(symbol, i + 1, out var afterArity))
+                {
+                    builder.Append(symbol[i]);
+                    continue;
+                }
+
+                if (TryReadMetadataGenericArguments(symbol, afterArity, out var afterArguments, out var arguments))
+                {
+                    builder.Append('<');
+                    for (var argumentIndex = 0; argumentIndex < arguments.Count; argumentIndex++)
+                    {
+                        if (argumentIndex > 0)
+                            builder.Append(',');
+
+                        builder.Append(SimplifyMetadataGenerics(arguments[argumentIndex]));
+                    }
+
+                    builder.Append('>');
+                    i = afterArguments - 1;
+                    continue;
+                }
+
+                i = afterArity - 1;
+            }
+
+            return builder.ToString();
+        }
+
+        static bool TryReadGenericArity(string symbol, int start, out int end)
+        {
+            end = start;
+            while (end < symbol.Length && char.IsDigit(symbol[end]))
+                end++;
+
+            return end > start;
+        }
+
+        static bool TryReadMetadataGenericArguments(string symbol, int start, out int end, out List<string> arguments)
+        {
+            end = start;
+            arguments = new();
+            if (start + 1 >= symbol.Length || symbol[start] != '[' || symbol[start + 1] != '[')
+                return false;
+
+            var index = start + 1;
+            while (index < symbol.Length && symbol[index] == '[')
+            {
+                var argumentStart = ++index;
+                var depth = 0;
+                while (index < symbol.Length)
+                {
+                    if (symbol[index] == '[')
+                    {
+                        depth++;
+                    }
+                    else if (symbol[index] == ']')
+                    {
+                        if (depth == 0)
+                            break;
+
+                        depth--;
+                    }
+
+                    index++;
+                }
+
+                if (index >= symbol.Length)
+                    return false;
+
+                arguments.Add(symbol[argumentStart..index]);
+                index++;
+                if (index < symbol.Length && symbol[index] == ',')
+                {
+                    index++;
+                    continue;
+                }
+
+                if (index < symbol.Length && symbol[index] == ']')
+                {
+                    end = index + 1;
+                    return true;
+                }
+
+                return false;
+            }
+
+            return false;
+        }
+
+        static string ReplaceBuiltInTypeNames(string symbol) =>
+            builtInTypeName.Replace(symbol, match => BuiltInAlias(match.Value));
+
+        static string BuiltInAlias(string typeName)
+        {
+            if (typeName.StartsWith("System.", StringComparison.Ordinal))
+                typeName = typeName["System.".Length..];
+
+            return typeName switch
+            {
+                "Void"    => "void",
+                "Boolean" => "bool",
+                "Byte"    => "byte",
+                "SByte"   => "sbyte",
+                "Char"    => "char",
+                "Decimal" => "decimal",
+                "Double"  => "double",
+                "Single"  => "float",
+                "Int32"   => "int",
+                "UInt32"  => "uint",
+                "Int64"   => "long",
+                "UInt64"  => "ulong",
+                "Int16"   => "short",
+                "UInt16"  => "ushort",
+                "Object"  => "object",
+                "String"  => "string",
+                "IntPtr"  => "nint",
+                "UIntPtr" => "nuint",
+                _         => typeName,
+            };
+        }
+
+        static string StripNamespaces(string symbol)
+        {
+            var names = new List<string>();
+            foreach (Match match in qualifiedTypeName.Matches(symbol))
+                names.Add(match.Value);
+
+            if (names.Count == 0)
+                return symbol;
+
+            var commonPrefix = CommonNamespacePrefix(names);
+            return qualifiedTypeName.Replace(symbol, match =>
+            {
+                var name = match.Value;
+                return commonPrefix.Length > 0 && name.StartsWith(commonPrefix, StringComparison.Ordinal)
+                    ? name[commonPrefix.Length..]
+                    : ShortTypeName(name);
+            });
+        }
+
+        static string CommonNamespacePrefix(IReadOnlyList<string> typeNames)
+        {
+            if (typeNames.Count < 2)
+                return string.Empty;
+
+            string[]? common = null;
+            foreach (var typeName in typeNames)
+            {
+                var segments = NamespaceSegments(typeName);
+                if (segments.Length == 0)
+                    continue;
+
+                if (common == null)
+                {
+                    common = segments;
+                    continue;
+                }
+
+                var shared = 0;
+                var length = Math.Min(common.Length, segments.Length);
+                while (shared < length && common[shared] == segments[shared])
+                    shared++;
+
+                if (shared == 0)
+                    return string.Empty;
+
+                if (shared == common.Length)
+                    continue;
+
+                var reduced = new string[shared];
+                Array.Copy(common, reduced, shared);
+                common = reduced;
+            }
+
+            return common is { Length: > 0 }
+                ? string.Join(".", common) + "."
+                : string.Empty;
+        }
+
+        static string[] NamespaceSegments(string typeName)
+        {
+            var dot = typeName.LastIndexOf('.');
+            return dot < 0 ? Array.Empty<string>() : typeName[..dot].Split('.');
+        }
+
+        static string ShortTypeName(string typeName)
+        {
+            var nestedIndex = typeName.IndexOf('+');
+            var searchEnd = nestedIndex < 0 ? typeName.Length - 1 : nestedIndex - 1;
+            var dot = typeName.LastIndexOf('.', searchEnd);
+            return dot < 0 ? typeName : typeName[(dot + 1)..];
         }
 
         static string Join(string[] lines, int endExclusive)
