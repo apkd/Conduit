@@ -773,10 +773,25 @@ namespace Conduit
 
         static string SaveLargeOutput(BurstTarget target, string output)
         {
-            var path = Path.Combine("Temp", SafeFileName(target.MethodName.Length > 0 ? target.MethodName : target.DisplayName) + ".txt");
+            var path = Path.Combine("Temp", SafeFileName(OutputFileName(target)) + ".txt");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, output);
             return path.Replace('\\', '/');
+        }
+
+        static string OutputFileName(BurstTarget target)
+        {
+            var name = CleanDisplayName(target.DisplayName);
+            TrimAt(" - ");
+            TrimAt("(");
+            return name.Length > 0 ? name : target.MethodName;
+
+            void TrimAt(string marker)
+            {
+                var index = name.IndexOf(marker, StringComparison.Ordinal);
+                if (index >= 0)
+                    name = name[..index].Trim();
+            }
         }
 
         static string SafeFileName(string fileName)
