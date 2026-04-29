@@ -31,11 +31,17 @@ var versionOption = new Option<bool>("--version")
     Description = "Print the Conduit server version and exit.",
 };
 
+var updateOption = new Option<bool>("--update", "-U")
+{
+    Description = "Download the latest GitHub release executable and replace the current one.",
+};
+
 var rootCommand = new RootCommand("Conduit MCP server")
 {
     httpOption,
     urlOption,
     portOption,
+    updateOption,
     versionOption,
 };
 
@@ -45,6 +51,21 @@ rootCommand.SetAction(async parseResult =>
         {
             Console.Out.WriteLine(ConduitServerMetadata.GetDisplayVersion());
             return 0;
+        }
+
+        if (parseResult.GetValue(updateOption))
+        {
+            try
+            {
+                var result = await SelfUpdater.UpdateAsync(CancellationToken.None);
+                Console.Out.WriteLine(result.Message);
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"Update failed: {exception.Message}");
+                return 1;
+            }
         }
 
         var http = parseResult.GetValue(httpOption);

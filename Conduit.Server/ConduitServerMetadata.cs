@@ -8,4 +8,8 @@ static class ConduitServerMetadata
         => typeof(ConduitServerMetadata).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
            ?? typeof(ConduitServerMetadata).Assembly.GetName().Version?.ToString()
            ?? "0.0.0";
+
+    public static string GetPackageVersion()
+        => typeof(ConduitServerMetadata).Assembly.GetName().Version?.ToString()
+           ?? "0.0.0";
 }
