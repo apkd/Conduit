@@ -34,4 +34,22 @@ public sealed class UnityBridgeClientTests
 
         await firstProbe;
     }
+
+    [Test]
+    public async Task ProbeTreatsProcessIdHintAsAHintNotAFatalLivenessCheck()
+    {
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var projectPath = $"/tmp/conduit-stale-pid-{Guid.NewGuid():N}";
+
+        var result = await client.ProbeAsync(
+            projectPath,
+            processIdHint: int.MaxValue,
+            timeout: TimeSpan.FromMilliseconds(50),
+            CancellationToken.None
+        );
+
+        await Assert.That(result.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ConnectTimedOut);
+        await Assert.That(result.FailureDiagnostic).Contains("Could not establish a Unity connection");
+        await Assert.That(result.FailureDiagnostic).DoesNotContain("exited");
+    }
 }

@@ -37,7 +37,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
             var connectResult = await TryConnectUntilReadyAsync(
                 normalizedProjectPath,
-                processIdHint,
                 DateTimeOffset.UtcNow + timeout,
                 timeoutCts.Token,
                 ct
@@ -96,7 +95,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
                 var connectResult = await TryConnectUntilReadyAsync(
                     normalizedProjectPath,
-                    processIdHint,
                     DateTimeOffset.UtcNow + effectiveInitialWindow,
                     initialWindowCts.Token,
                     ct
@@ -115,7 +113,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 requestId,
                 command.CommandType,
                 timeout,
-                processIdHint,
                 ct,
                 command
             );
@@ -151,13 +148,10 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         string requestId,
         string commandType,
         TimeSpan timeout,
-        int? processIdHint,
         CancellationToken ct,
         BridgeCommand? commandToSend
     )
     {
-        var monitoredProcessId = handshake.EditorProcessId > 0 ? handshake.EditorProcessId : processIdHint;
-
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
         var effectiveToken = timeoutCts.Token;
@@ -173,38 +167,27 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 commandSent = true;
 
                 var startWaitTask = connection.WaitForCommandStartedAsync(requestId, commandType, commandSent, commandStartTimeout, effectiveToken, ct);
-                if (monitoredProcessId is not > 0)
+                if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
                 {
-                    var startOutcome = await startWaitTask;
-                    if (startOutcome.Failure is { } startFailure)
-                        return startFailure;
-
-                    if (startOutcome.FinalResult is { } earlyResult)
-                        return earlyResult;
+                    var completedStartTask = await Task.WhenAny(startWaitTask, processExitStartTask);
+                    if (ReferenceEquals(completedStartTask, processExitStartTask) && await processExitStartTask is { } processFailure)
+                        return processFailure;
                 }
-                else
-                {
-                    var processExitTask = WaitForProcessExitAsync(monitoredProcessId.Value, commandType, commandSent, effectiveToken);
-                    var completedStartTask = await Task.WhenAny(startWaitTask, processExitTask);
-                    if (ReferenceEquals(completedStartTask, processExitTask) && await processExitTask is { } processFailure)
-                        return processFailure.WithHandshake(handshake);
 
-                    var startOutcome = await startWaitTask;
-                    if (startOutcome.Failure is { } startFailure)
-                        return startFailure;
+                var startOutcome = await startWaitTask;
+                if (startOutcome.Failure is { } startFailure)
+                    return startFailure;
 
-                    if (startOutcome.FinalResult is { } earlyResult)
-                        return earlyResult;
-                }
+                if (startOutcome.FinalResult is { } earlyResult)
+                    return earlyResult;
             }
 
             var waitForResultTask = connection.WaitForResultAsync(requestId, commandType, timeout, commandSent, effectiveToken, ct);
-            if (monitoredProcessId is > 0)
+            if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitResultTask)
             {
-                var processExitTask = WaitForProcessExitAsync(monitoredProcessId.Value, commandType, commandSent, effectiveToken);
-                var completedTask = await Task.WhenAny((Task)waitForResultTask, processExitTask);
-                if (ReferenceEquals(completedTask, processExitTask) && await processExitTask is { } processFailure)
-                    return processFailure.WithHandshake(handshake);
+                var completedTask = await Task.WhenAny((Task)waitForResultTask, processExitResultTask);
+                if (ReferenceEquals(completedTask, processExitResultTask) && await processExitResultTask is { } processFailure)
+                    return processFailure;
             }
 
             return await waitForResultTask;
@@ -229,7 +212,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
     async Task<(BridgeClientConnection? Connection, BridgeClientResult Result)> TryConnectUntilReadyAsync(
         string projectPath,
-        int? processIdHint,
         DateTimeOffset deadline,
         CancellationToken timeoutToken,
         CancellationToken callerToken
@@ -241,9 +223,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         {
             while (!timeoutToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
             {
-                if (TryCreateProcessExitFailure(processIdHint, context: null, commandSent: false) is { } processFailure)
-                    return (null, processFailure);
-
                 var connectResult = await TryConnectAsync(projectPath, timeoutToken);
                 if (connectResult.Connection is not null)
                     return connectResult;
@@ -387,16 +366,35 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         }
     }
 
-    static async Task<BridgeClientResult?> WaitForProcessExitAsync(int processId, string? context, bool commandSent, CancellationToken ct)
+    static Task<BridgeClientResult?>? CreateProcessExitTask(
+        BridgeProjectHandshake handshake,
+        string commandType,
+        bool commandSent,
+        CancellationToken ct
+    )
     {
+        if (handshake.EditorProcessId is not > 0)
+            return null;
+
+        return WaitForProcessExitAsync(handshake, commandType, commandSent, ct);
+    }
+
+    static async Task<BridgeClientResult?> WaitForProcessExitAsync(
+        BridgeProjectHandshake handshake,
+        string context,
+        bool commandSent,
+        CancellationToken ct
+    )
+    {
+        var processId = handshake.EditorProcessId;
         var process = ConduitUtility.TryGetProcess(processId);
         if (process is null)
-            return ProcessExited(processId, context, commandSent);
+            return ProcessExited(handshake, context, commandSent);
 
         try
         {
             await process.WaitForExitAsync(ct);
-            return ProcessExited(processId, context, commandSent);
+            return ProcessExited(handshake, context, commandSent);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -408,20 +406,11 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         }
     }
 
-    static BridgeClientResult? TryCreateProcessExitFailure(int? processId, string? context, bool commandSent)
-    {
-        if (processId is not > 0)
-            return null;
-
-        using var process = ConduitUtility.TryGetProcess(processId.Value);
-        return process is null ? ProcessExited(processId.Value, context, commandSent) : null;
-    }
-
-    static BridgeClientResult ProcessExited(int processId, string? context, bool commandSent) =>
+    static BridgeClientResult ProcessExited(BridgeProjectHandshake handshake, string context, bool commandSent) =>
         BridgeClientResult.Failure(
-            handshake: null,
+            handshake,
             BridgeRuntimeFailureKind.ProcessExited,
-            $"Unity editor process {processId} exited {(string.IsNullOrWhiteSpace(context) ? "while running the command" : $"while '{context}' was running")}.",
+            $"Unity editor process {handshake.EditorProcessId} exited while '{context}' was running.",
             commandSent
         );
 
