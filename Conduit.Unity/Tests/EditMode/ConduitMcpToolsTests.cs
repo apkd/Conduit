@@ -404,6 +404,28 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Show_PersistentObjectNameMatchingAssetFilenameOmitsRedundantName()
+    {
+        var assetName = $"RedundantName_{Guid.NewGuid():N}";
+        var assetPath = GetTempAssetPath("UnitTests", $"{assetName}.asset");
+        var target = ScriptableObject.CreateInstance<ConduitShowFormatAsset>();
+        try
+        {
+            target.name = assetName;
+            AssetDatabase.CreateAsset(target, assetPath);
+
+            var output = show.Show(assetPath);
+
+            Assert.That(output, Does.Contain($"Main Object: ConduitShowFormatAsset({assetPath})"));
+            Assert.That(output, Does.Not.Contain($"ConduitShowFormatAsset(\"{assetName}\", {assetPath})"));
+        }
+        finally
+        {
+            DeleteTemporaryAsset(assetPath);
+        }
+    }
+
+    [Test]
     public void ToJson_ReturnsPrettyJsonForExactObject()
     {
         var camera = Camera.main;
@@ -2166,4 +2188,8 @@ sealed class BurstInspectorOptionsFixture
 sealed class ConduitCustomShowAsset : ScriptableObject
 {
     string ToStringForMCP() => "Custom MCP show output";
+}
+
+sealed class ConduitShowFormatAsset : ScriptableObject
+{
 }

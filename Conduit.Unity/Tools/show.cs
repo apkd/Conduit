@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -1107,7 +1108,7 @@ namespace Conduit
                 GameObject gameObject                        => FormatObjectDescription(nameof(GameObject), ConduitUtility.BuildHierarchyPath(gameObject.transform), assetPath),
                 Component component                          => FormatObjectDescription(component.GetType().Name, ConduitUtility.BuildHierarchyPath(component.transform), assetPath),
                 MonoScript when assetPath is { Length: > 0 } => $"Script({assetPath})",
-                _ when assetPath is { Length: > 0 }          => $"{target.GetType().Name}(\"{target.name}\", {assetPath})",
+                _ when assetPath is { Length: > 0 }          => FormatObjectDescription(target.GetType().Name, target.name, assetPath),
                 _                                            => $"{target.GetType().Name}(\"{target.name}\")",
             };
         }
@@ -1115,7 +1116,12 @@ namespace Conduit
         static string FormatObjectDescription(string typeName, string identifier, string assetPath)
             => string.IsNullOrWhiteSpace(assetPath)
                 ? $"{typeName}(\"{identifier}\")"
-                : $"{typeName}(\"{identifier}\", {assetPath})";
+                : IsRedundantAssetIdentifier(identifier, assetPath)
+                    ? $"{typeName}({assetPath})"
+                    : $"{typeName}(\"{identifier}\", {assetPath})";
+
+        static bool IsRedundantAssetIdentifier(string identifier, string assetPath)
+            => string.Equals(identifier, Path.GetFileNameWithoutExtension(assetPath), Ordinal);
 
         static string FormatSceneName(Scene scene)
             => ConduitUtility.FormatScenePath(scene, "unsaved scene");
