@@ -234,13 +234,13 @@ public sealed class UnityTools
     [McpServerTool(Name = CMD.ViewBurstAsm)]
     [Description(
         """
-        Returns Burst Inspector-style assembly for a fuzzy-matched Burst compilation target.
-        Uses assembly output equivalent to Enhanced With Minimal Debug Information, safety checks disabled, and Auto target CPU.
+        Shows low-level optimization statistics and assembly for a Burst compilation target.
+        Use this for job optimization and for validating and debugging Burst compilation. 
         """
     )]
     public static Task<string> ViewBurstAsm(
         [Description("Project path")] string projectPath,
-        [Description("Burst compilation target or method name to fuzzy match")]
+        [Description("Burst compilation target (job/method) name or partial name")]
         string target,
         UnityProjectOperations operations,
         CancellationToken ct

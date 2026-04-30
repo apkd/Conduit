@@ -3,6 +3,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -14,6 +15,7 @@ namespace Conduit
     {
         const int MaxCandidates = 10;
         const int ClearMatchGap = 25;
+        const int MaxTopInstructions = 20;
         const int LargeOutputLineThreshold = 1000;
         static readonly Regex tempLabel = new(@"^\s*\.Ltmp\d+:\s*(?:[#;].*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex burstError = new(@"^.*\(\d+,\d+\):\sBurst\serror", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -96,14 +98,18 @@ namespace Conduit
 
         static BridgeCommandResult Compile(BurstTarget target)
         {
+            DirtyBurstAssemblyCache();
             var rawDisassembly = GetInspectorDisassembly(target.Method!, BuildOptions(target));
             if (IsBurstError(rawDisassembly))
                 return Error(rawDisassembly.Trim());
 
+            if (string.IsNullOrWhiteSpace(rawDisassembly))
+                return Error(BuildEmptyDisassemblyDiagnostic(target));
+
             var disassembly = StripTrailingTemporaryLabelBlocks(CleanDisassembly(RenderEnhancedDisassembly(rawDisassembly).TrimStart('\n')));
 
             if (string.IsNullOrWhiteSpace(disassembly))
-                return Error($"Burst returned empty assembly for '{target.DisplayName}'.");
+                return Error(BuildEmptyDisassemblyDiagnostic(target));
 
             return CompleteOutput(target, disassembly);
         }
@@ -131,11 +137,50 @@ namespace Conduit
             return BuildInspectorOptions((string?)args[1] ?? string.Empty);
         }
 
-        static string GetInspectorDisassembly(MethodInfo method, string options) =>
-            (string?)Type.GetType("Unity.Burst.Editor.BurstInspectorGUI, Unity.Burst.Editor", true)!
-                .GetMethod("GetDisassembly", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!
-                .Invoke(null, new object[] { method, options })
-            ?? string.Empty;
+        static string GetInspectorDisassembly(MethodInfo method, string options)
+        {
+            try
+            {
+                var result = (string?)Type.GetType("Unity.Burst.LowLevel.BurstCompilerService, UnityEngine.CoreModule", true)!
+                    .GetMethod("GetDisassembly", BindingFlags.Static | BindingFlags.Public)!
+                    .Invoke(null, new object[] { method, options })
+                    ?? string.Empty;
+
+                if (result.IndexOf('\t') >= 0)
+                    result = result.Replace("\t", "        ");
+
+                if (!result.Contains("Burst timings"))
+                    return result;
+
+                var index = result.IndexOf("While compiling", StringComparison.Ordinal);
+                return index > 0 ? result[index..] : result;
+            }
+            catch (Exception exception)
+            {
+                return "Failed to compile:\n" + Unwrap(exception);
+            }
+        }
+
+        static void DirtyBurstAssemblyCache()
+        {
+            try
+            {
+                var optionsType = Type.GetType("Unity.Burst.BurstCompilerOptions, Unity.Burst", false);
+                var command = (string?)optionsType
+                    ?.GetField("CompilerCommandDirtyAllAssemblies", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?.GetValue(null);
+                if (string.IsNullOrWhiteSpace(command))
+                    return;
+
+                Type.GetType("Unity.Burst.BurstCompiler, Unity.Burst", false)
+                    ?.GetMethod("SendCommandToCompiler", BindingFlags.Static | BindingFlags.NonPublic)
+                    ?.Invoke(null, new object?[] { command, null });
+            }
+            catch (Exception)
+            {
+                // Older Burst versions may not expose this command; the Inspector disassembly call still works without it.
+            }
+        }
 
         static string RenderEnhancedDisassembly(string disassembly)
         {
@@ -266,8 +311,12 @@ namespace Conduit
             return Join(lines, lines.Length);
         }
 
-        internal static string BuildOutput(BurstTarget target, string disassembly) =>
-            $"{CleanDisplayName(target.DisplayName)}\n{disassembly}";
+        internal static string BuildOutput(BurstTarget target, string disassembly)
+        {
+            var displayName = CleanDisplayName(target.DisplayName);
+            var stats = AnalyzeAssembly(target, disassembly);
+            return $"{displayName}\n{FormatStats(stats)}\n\n{disassembly}";
+        }
 
         internal static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly)
         {
@@ -277,7 +326,428 @@ namespace Conduit
 
             var path = SaveLargeOutput(target, output);
             var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
-            return Success($"Output very large ({kilobytes} KB); saved to {path}");
+            return Success($"{CleanDisplayName(target.DisplayName)}\n{FormatStats(AnalyzeAssembly(target, disassembly))}\n\nAssembly output very large ({kilobytes} KB); saved to {path}");
+        }
+
+        static BurstAsmStats AnalyzeAssembly(BurstTarget target, string disassembly)
+        {
+            var lines = disassembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            var blocks = GetFunctionBlocks(lines);
+            if (blocks.Count == 0)
+                return AnalyzeLines(lines, 0, lines.Length);
+
+            var selected = SelectMainBlock(target, blocks);
+            return AnalyzeLines(lines, selected.Start, selected.End);
+        }
+
+        static List<BurstAsmFunctionBlock> GetFunctionBlocks(string[] lines)
+        {
+            var blocks = new List<BurstAsmFunctionBlock>();
+            var currentLabel = string.Empty;
+            var start = -1;
+            for (var index = 0; index < lines.Length; index++)
+            {
+                var line = lines[index].Trim();
+                if (IsSectionBoundary(line))
+                {
+                    Flush(index);
+                    continue;
+                }
+
+                if (!IsFunctionLabel(line, out var label))
+                    continue;
+
+                Flush(index);
+                currentLabel = label;
+                start = index + 1;
+            }
+
+            Flush(lines.Length);
+            return blocks;
+
+            void Flush(int end)
+            {
+                if (start < 0)
+                    return;
+
+                var instructionCount = CountInstructions(lines, start, end);
+                if (instructionCount > 0)
+                    blocks.Add(new(currentLabel, start, end, instructionCount));
+
+                currentLabel = string.Empty;
+                start = -1;
+            }
+        }
+
+        static bool IsSectionBoundary(string line) =>
+            line.StartsWith(".section", StringComparison.Ordinal)
+            || line.StartsWith(".text", StringComparison.Ordinal);
+
+        static bool IsFunctionLabel(string line, out string label)
+        {
+            label = string.Empty;
+            if (!line.EndsWith(":", StringComparison.Ordinal))
+                return false;
+
+            label = line[..^1].Trim();
+            if (label.Length == 0 || label.StartsWith(".L", StringComparison.Ordinal))
+                return false;
+
+            return !label.StartsWith(".seh", StringComparison.Ordinal)
+                   && !label.StartsWith(".cv", StringComparison.Ordinal);
+        }
+
+        static BurstAsmFunctionBlock SelectMainBlock(BurstTarget target, IReadOnlyList<BurstAsmFunctionBlock> blocks)
+        {
+            var best = blocks[0];
+            var bestScore = int.MinValue;
+            foreach (var block in blocks)
+            {
+                var score = ScoreFunctionBlock(target, block);
+                if (score <= bestScore)
+                    continue;
+
+                best = block;
+                bestScore = score;
+            }
+
+            return best;
+        }
+
+        static int ScoreFunctionBlock(BurstTarget target, BurstAsmFunctionBlock block)
+        {
+            var label = NormalizeAsmText(block.Label);
+            if (label.Length == 0)
+                return int.MinValue;
+
+            var score = block.InstructionCount;
+            if (IsExcludedFunctionLabel(label))
+                score -= 1000;
+
+            if (IsHexLabel(label))
+                score -= 50;
+
+            var displayName = NormalizeAsmText(CleanDisplayName(target.DisplayName));
+            if (displayName.Length > 0 && (label.Contains(displayName) || displayName.Contains(label)))
+                score += 300;
+
+            var jobType = target.JobTypeName.Length == 0 ? string.Empty : NormalizeAsmText(ShortTypeName(target.JobTypeName));
+            if (jobType.Length > 0 && label.Contains(jobType))
+                score += 180;
+
+            var declaringType = target.DeclaringTypeName.Length == 0 ? string.Empty : NormalizeAsmText(ShortTypeName(target.DeclaringTypeName));
+            if (declaringType.Length > 0 && label.Contains(declaringType))
+                score += 140;
+
+            var method = NormalizeAsmText(target.MethodName);
+            if (method.Length > 0 && label.Contains(method))
+                score += string.Equals(method, "execute", StringComparison.Ordinal) ? 20 : 100;
+
+            if (label.Contains("jobstruct"))
+                score += 20;
+
+            return score;
+        }
+
+        static bool IsExcludedFunctionLabel(string label) =>
+            label.StartsWith("burstinitialize", StringComparison.Ordinal)
+            || label == "feat00";
+
+        static bool IsHexLabel(string label)
+        {
+            if (label.Length is < 8 or > 32)
+                return false;
+
+            foreach (var character in label)
+                if (!IsHex(character))
+                    return false;
+
+            return true;
+        }
+
+        static string NormalizeAsmText(string value)
+        {
+            var builder = new StringBuilder(value.Length);
+            foreach (var character in value)
+                if (char.IsLetterOrDigit(character))
+                    builder.Append(char.ToLowerInvariant(character));
+
+            return builder.ToString();
+        }
+
+        static int CountInstructions(string[] lines, int start, int end)
+        {
+            var count = 0;
+            for (var index = start; index < end; index++)
+                if (TryParseInstruction(lines[index], out _, out _))
+                    count++;
+
+            return count;
+        }
+
+        static BurstAsmStats AnalyzeLines(string[] lines, int start, int end)
+        {
+            var stats = new BurstAsmStats();
+            for (var index = start; index < end; index++)
+            {
+                if (!TryParseInstruction(lines[index], out var mnemonic, out var operands))
+                    continue;
+
+                stats.InstructionCount++;
+                Increment(stats.InstructionCounts, mnemonic);
+
+                var lowerOperands = operands.ToLowerInvariant();
+                var hasXmm = ContainsRegisterPrefix(lowerOperands, "xmm");
+                var hasYmm = ContainsRegisterPrefix(lowerOperands, "ymm");
+                var hasZmm = ContainsRegisterPrefix(lowerOperands, "zmm");
+                var hasNeon = ContainsRegisterPrefix(lowerOperands, "v") || ContainsRegisterPrefix(lowerOperands, "q");
+                var hasSve = ContainsRegisterPrefix(lowerOperands, "z") || ContainsRegisterPrefix(lowerOperands, "p");
+
+                if (hasXmm)
+                    stats.XmmInstructionCount++;
+                if (hasYmm)
+                    stats.YmmInstructionCount++;
+                if (hasZmm)
+                    stats.ZmmInstructionCount++;
+                if (hasNeon)
+                    stats.NeonInstructionCount++;
+                if (hasSve)
+                    stats.SveInstructionCount++;
+
+                if (IsVectorInstruction(mnemonic, hasXmm, hasYmm, hasZmm, hasNeon, hasSve))
+                    stats.VectorInstructionCount++;
+
+                if (IsConditionalBranch(mnemonic))
+                    stats.ConditionalBranchCount++;
+                else if (IsUnconditionalBranch(mnemonic))
+                    stats.UnconditionalBranchCount++;
+                else if (IsCall(mnemonic))
+                    stats.CallCount++;
+                else if (IsReturn(mnemonic))
+                    stats.ReturnCount++;
+
+                if (!HasMemoryOperand(mnemonic, lowerOperands))
+                    continue;
+
+                stats.MemoryOperandInstructionCount++;
+                if (HasStackOrFrameOperand(lowerOperands))
+                    stats.StackFrameOperandInstructionCount++;
+            }
+
+            return stats;
+        }
+
+        static bool TryParseInstruction(string line, out string mnemonic, out string operands)
+        {
+            mnemonic = string.Empty;
+            operands = string.Empty;
+            var text = line.Trim();
+            if (text.Length == 0
+                || text[0] is '#' or ';'
+                || text.StartsWith("//", StringComparison.Ordinal)
+                || text[0] == '.'
+                || IsFunctionLabel(text, out _))
+                return false;
+
+            var firstEnd = ReadTokenEnd(text, 0);
+            if (firstEnd == 0)
+                return false;
+
+            var first = text[..firstEnd].ToLowerInvariant();
+            var operandStart = SkipWhitespace(text, firstEnd);
+            if (first is "lock" or "rep" or "repe" or "repne")
+            {
+                var secondEnd = ReadTokenEnd(text, operandStart);
+                if (secondEnd <= operandStart)
+                    return false;
+
+                mnemonic = $"{first} {text[operandStart..secondEnd].ToLowerInvariant()}";
+                operands = secondEnd < text.Length ? text[secondEnd..].Trim() : string.Empty;
+                return true;
+            }
+
+            mnemonic = first;
+            operands = operandStart < text.Length ? text[operandStart..].Trim() : string.Empty;
+            return true;
+        }
+
+        static int ReadTokenEnd(string text, int start)
+        {
+            var index = start;
+            while (index < text.Length)
+            {
+                var character = text[index];
+                if (!char.IsLetterOrDigit(character) && character is not '_' and not '.')
+                    break;
+
+                index++;
+            }
+
+            return index;
+        }
+
+        static int SkipWhitespace(string text, int start)
+        {
+            while (start < text.Length && char.IsWhiteSpace(text[start]))
+                start++;
+
+            return start;
+        }
+
+        static void Increment(Dictionary<string, int> counts, string key)
+        {
+            counts.TryGetValue(key, out var count);
+            counts[key] = count + 1;
+        }
+
+        static bool IsVectorInstruction(string mnemonic, bool hasXmm, bool hasYmm, bool hasZmm, bool hasNeon, bool hasSve)
+        {
+            if (hasYmm || hasZmm || hasNeon || hasSve)
+                return true;
+
+            if (hasXmm && !IsScalarSimdMnemonic(mnemonic))
+                return true;
+
+            return IsPackedVectorMnemonic(mnemonic);
+        }
+
+        static bool IsScalarSimdMnemonic(string mnemonic) =>
+            mnemonic.EndsWith("ss", StringComparison.Ordinal)
+            || mnemonic.EndsWith("sd", StringComparison.Ordinal);
+
+        static bool IsPackedVectorMnemonic(string mnemonic) =>
+            mnemonic.StartsWith("v", StringComparison.Ordinal) && !IsScalarSimdMnemonic(mnemonic)
+            || mnemonic.StartsWith("padd", StringComparison.Ordinal)
+            || mnemonic.StartsWith("psub", StringComparison.Ordinal)
+            || mnemonic.StartsWith("pmul", StringComparison.Ordinal)
+            || mnemonic.StartsWith("pand", StringComparison.Ordinal)
+            || mnemonic.StartsWith("por", StringComparison.Ordinal)
+            || mnemonic.StartsWith("pxor", StringComparison.Ordinal)
+            || mnemonic.EndsWith("ps", StringComparison.Ordinal)
+            || mnemonic.EndsWith("pd", StringComparison.Ordinal);
+
+        static bool IsConditionalBranch(string mnemonic)
+        {
+            if (mnemonic is "cbz" or "cbnz" or "tbz" or "tbnz")
+                return true;
+
+            if (mnemonic.StartsWith("loop", StringComparison.Ordinal))
+                return true;
+
+            if (mnemonic.StartsWith("b.", StringComparison.Ordinal))
+                return true;
+
+            return mnemonic.StartsWith("j", StringComparison.Ordinal) && mnemonic != "jmp";
+        }
+
+        static bool IsUnconditionalBranch(string mnemonic) =>
+            mnemonic is "jmp" or "b" or "br";
+
+        static bool IsCall(string mnemonic) =>
+            mnemonic is "call" or "bl" or "blr";
+
+        static bool IsReturn(string mnemonic) =>
+            mnemonic.StartsWith("ret", StringComparison.Ordinal);
+
+        static bool HasMemoryOperand(string mnemonic, string lowerOperands) =>
+            lowerOperands.IndexOf('[', StringComparison.Ordinal) >= 0 && lowerOperands.IndexOf(']', StringComparison.Ordinal) >= 0
+            || mnemonic is "ldr" or "ldp" or "ld1" or "str" or "stp" or "st1";
+
+        static bool HasStackOrFrameOperand(string lowerOperands) =>
+            ContainsRegister(lowerOperands, "rsp")
+            || ContainsRegister(lowerOperands, "rbp")
+            || ContainsRegister(lowerOperands, "esp")
+            || ContainsRegister(lowerOperands, "ebp")
+            || ContainsRegister(lowerOperands, "sp")
+            || ContainsRegister(lowerOperands, "fp")
+            || ContainsRegister(lowerOperands, "x29");
+
+        static bool ContainsRegisterPrefix(string text, string prefix)
+        {
+            foreach (var token in RegisterTokens(text))
+                if (token.StartsWith(prefix, StringComparison.Ordinal))
+                    if (token.Length > prefix.Length && char.IsDigit(token[prefix.Length]))
+                        return true;
+
+            return false;
+        }
+
+        static bool ContainsRegister(string text, string register)
+        {
+            foreach (var token in RegisterTokens(text))
+                if (token == register)
+                    return true;
+
+            return false;
+        }
+
+        static IEnumerable<string> RegisterTokens(string text)
+        {
+            var start = -1;
+            for (var index = 0; index <= text.Length; index++)
+            {
+                if (index < text.Length && char.IsLetterOrDigit(text[index]))
+                {
+                    if (start < 0)
+                        start = index;
+
+                    continue;
+                }
+
+                if (start < 0)
+                    continue;
+
+                yield return text[start..index];
+                start = -1;
+            }
+        }
+
+        static string FormatStats(BurstAsmStats stats)
+        {
+            var branches = stats.ConditionalBranchCount + stats.UnconditionalBranchCount;
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.Append($"- Instructions: {stats.InstructionCount}\n");
+            builder.Append($"- Vector instructions: {stats.VectorInstructionCount} ({Percent(stats.VectorInstructionCount, stats.InstructionCount)})\n");
+            builder.Append($"- Control flow: branches={branches}, conditional={stats.ConditionalBranchCount}, unconditional={stats.UnconditionalBranchCount}, calls={stats.CallCount}, returns={stats.ReturnCount}\n");
+            builder.Append($"- Memory operands: {stats.MemoryOperandInstructionCount} ({Percent(stats.MemoryOperandInstructionCount, stats.InstructionCount)}); stack/frame operands: {stats.StackFrameOperandInstructionCount}\n");
+            builder.Append($"- Vector width hints: xmm={stats.XmmInstructionCount}, ymm={stats.YmmInstructionCount}, zmm={stats.ZmmInstructionCount}, neon/simd={stats.NeonInstructionCount}, sve={stats.SveInstructionCount}\n");
+            builder.Append("- Top instructions: ");
+            AppendTopInstructions(builder, stats.InstructionCounts);
+            return builder.ToString();
+        }
+
+        static string Percent(int value, int total) =>
+            total == 0
+                ? "0%"
+                : (value * 100.0 / total).ToString("0.#", CultureInfo.InvariantCulture) + "%";
+
+        static void AppendTopInstructions(StringBuilder builder, Dictionary<string, int> counts)
+        {
+            if (counts.Count == 0)
+            {
+                builder.Append("<none>");
+                return;
+            }
+
+            var entries = new List<KeyValuePair<string, int>>(counts);
+            entries.Sort(static (left, right) =>
+            {
+                var count = right.Value.CompareTo(left.Value);
+                return count != 0
+                    ? count
+                    : string.Compare(left.Key, right.Key, StringComparison.Ordinal);
+            });
+
+            var count = Math.Min(entries.Count, MaxTopInstructions);
+            for (var index = 0; index < count; index++)
+            {
+                if (index > 0)
+                    builder.Append(", ");
+
+                builder.Append(entries[index].Key);
+                builder.Append('=');
+                builder.Append(entries[index].Value.ToString(CultureInfo.InvariantCulture));
+            }
         }
 
         static List<int> Find(IReadOnlyList<BurstTarget> targets, Func<BurstTarget, bool> predicate)
@@ -827,6 +1297,9 @@ namespace Conduit
             disassembly.StartsWith("Failed to compile:", StringComparison.Ordinal)
             || burstError.IsMatch(disassembly);
 
+        internal static string BuildEmptyDisassemblyDiagnostic(BurstTarget target)
+            => $"Failed to compile '{CleanDisplayName(target.DisplayName)}': Burst returned no assembly or diagnostic text.";
+
         static void SetBool(object target, string name, bool value)
         {
             var property = target.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -860,15 +1333,27 @@ namespace Conduit
             };
 
         static BridgeCommandResult NoMatch(string query, IReadOnlyList<BurstTarget> targets, int[] indexes) =>
-            Error(Candidates($"No Burst compile target matched '{query?.Trim() ?? string.Empty}'.", targets, indexes));
+            Error(NoMatchDiagnostic(query, targets, indexes));
+
+        internal static string NoMatchDiagnostic(string query, IReadOnlyList<BurstTarget> targets, int[] indexes)
+        {
+            var trimmed = query?.Trim() ?? string.Empty;
+            return Candidates(
+                trimmed.Length == 0 ? string.Empty : $"No Burst compile target matched '{trimmed}'.",
+                targets,
+                indexes
+            );
+        }
 
         static string Candidates(string header, IReadOnlyList<BurstTarget> targets, int[] indexes)
         {
-            var builder = new StringBuilder(header);
-            if (indexes.Length == 0)
-                return builder.ToString();
+            var builder = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(header))
+                builder.AppendLine(header);
 
-            builder.AppendLine();
+            if (indexes.Length == 0)
+                return builder.ToString().TrimEnd();
+
             builder.AppendLine("Candidates:");
             foreach (var index in indexes)
                 builder.AppendLine($"- {targets[index].DisplayName}");
@@ -966,5 +1451,39 @@ namespace Conduit
             Index = index;
             Score = score;
         }
+    }
+
+    readonly struct BurstAsmFunctionBlock
+    {
+        public readonly string Label;
+        public readonly int Start;
+        public readonly int End;
+        public readonly int InstructionCount;
+
+        public BurstAsmFunctionBlock(string label, int start, int end, int instructionCount)
+        {
+            Label = label;
+            Start = start;
+            End = end;
+            InstructionCount = instructionCount;
+        }
+    }
+
+    sealed class BurstAsmStats
+    {
+        public readonly Dictionary<string, int> InstructionCounts = new(StringComparer.Ordinal);
+        public int InstructionCount;
+        public int VectorInstructionCount;
+        public int ConditionalBranchCount;
+        public int UnconditionalBranchCount;
+        public int CallCount;
+        public int ReturnCount;
+        public int MemoryOperandInstructionCount;
+        public int StackFrameOperandInstructionCount;
+        public int XmmInstructionCount;
+        public int YmmInstructionCount;
+        public int ZmmInstructionCount;
+        public int NeonInstructionCount;
+        public int SveInstructionCount;
     }
 }

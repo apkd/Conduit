@@ -165,6 +165,19 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmNoMatch_EmptyQueryShowsOnlyCandidates()
+    {
+        var targets = CreateBurstAsmTargets();
+
+        var diagnostic = view_burst_asm.NoMatchDiagnostic(string.Empty, targets, new[] { 0, 1 });
+
+        Assert.That(diagnostic, Does.StartWith("Candidates:"));
+        Assert.That(diagnostic, Does.Not.Contain("No Burst compile target matched"));
+        Assert.That(diagnostic, Does.Contain("- Gameplay.Motion.MoveJob - (IJob)"));
+        Assert.That(diagnostic, Does.Contain("- Gameplay.Motion.MoveParticlesJob - (IJob)"));
+    }
+
+    [Test]
     public void ViewBurstAsmOptions_UseInspectorDefaults()
     {
         var fixture = new BurstInspectorOptionsFixture();
@@ -179,7 +192,20 @@ public sealed class ConduitMcpToolsTests
         Assert.That(options, Does.Contain("--disable-warnings=BC1370;BC1322"));
         Assert.That(options, Does.Contain("--target=Auto"));
         Assert.That(options, Does.Contain("--debug=2"));
+        Assert.That(options, Does.Not.Contain("--disable-function-caching"));
+        Assert.That(options, Does.Not.Contain("--disable-assembly-caching"));
         Assert.That(options, Does.EndWith("--dump=Asm"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_EmptyDisassemblyReportsCompileFailure()
+    {
+        var target = new BurstTarget("Example.BrokenJob - (IJob)", "Execute", "Example", "Example.BrokenJob");
+
+        var diagnostic = view_burst_asm.BuildEmptyDisassemblyDiagnostic(target);
+
+        Assert.That(diagnostic, Is.EqualTo("Failed to compile 'BrokenJob - (IJob)': Burst returned no assembly or diagnostic text."));
+        Assert.That(diagnostic, Does.Not.Contain("Burst Inspector"));
     }
 
     [Test]
@@ -286,7 +312,80 @@ public sealed class ConduitMcpToolsTests
         var output = view_burst_asm.BuildOutput(target, "ret");
 
         Assert.That(output, Is.EqualTo(
-            "GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)\nret"));
+            "GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)\n" +
+            "- Instructions: 1\n" +
+            "- Vector instructions: 0 (0%)\n" +
+            "- Control flow: branches=0, conditional=0, unconditional=0, calls=0, returns=1\n" +
+            "- Memory operands: 0 (0%); stack/frame operands: 0\n" +
+            "- Vector width hints: xmm=0, ymm=0, zmm=0, neon/simd=0, sve=0\n" +
+            "- Top instructions: ret=1\n\n" +
+            "ret"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_ReportsMainCodeOptimizationStats()
+    {
+        var target = new BurstTarget(
+            "Gameplay.Motion.MoveJob - (IJob)",
+            "Execute",
+            "Unity.Jobs.IJobExtensions.JobStruct`1",
+            "Gameplay.Motion.MoveJob"
+        );
+        var disassembly = string.Join("\n",
+            ".text",
+            "660453e7:",
+            "push              rbp",
+            "call              \"JobStruct<MoveJob>.Execute(ref MoveJob data) -> void\"",
+            "ret",
+            "",
+            "burst.initialize:",
+            "push              rbp",
+            "ret",
+            "",
+            "\"JobStruct<MoveJob>.Execute(ref MoveJob data) -> void\":",
+            "push              rbp",
+            "mov               rbp, rsp",
+            "vmovups           ymm0, ymmword ptr [rcx]",
+            "vaddps            ymm0, ymm0, ymmword ptr [rdx]",
+            "vaddss            xmm1, xmm1, dword ptr [rsp + 4]",
+            "jne               .LBB0_1",
+            "call              helper",
+            "ret",
+            ".section        .debug$S,\"dr\"",
+            ".long        4");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("MoveJob - (IJob)\n- Instructions: 8\n"));
+        Assert.That(output, Does.Contain("- Vector instructions: 2 (25%)"));
+        Assert.That(output, Does.Contain("- Control flow: branches=1, conditional=1, unconditional=0, calls=1, returns=1"));
+        Assert.That(output, Does.Contain("- Memory operands: 3 (37.5%); stack/frame operands: 1"));
+        Assert.That(output, Does.Contain("- Vector width hints: xmm=1, ymm=2, zmm=0, neon/simd=0, sve=0"));
+        Assert.That(output, Does.Contain("call=1"));
+        Assert.That(output, Does.Contain("vaddps=1"));
+        Assert.That(output, Does.Not.Contain("Analyzed:"));
+        Assert.That(output, Does.Not.Contain("Top source lines:"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_ReportsArmStyleOptimizationStats()
+    {
+        var target = new BurstTarget("Example.Execute()", "Execute", "Example", "Example");
+        var disassembly = string.Join("\n",
+            "Execute:",
+            "ldr               q0, [x0]",
+            "fmla              v0.4s, v1.4s, v2.4s",
+            "cbz               x0, .Ldone",
+            "bl                helper",
+            "ret");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("- Instructions: 5"));
+        Assert.That(output, Does.Contain("- Vector instructions: 2 (40%)"));
+        Assert.That(output, Does.Contain("- Control flow: branches=1, conditional=1, unconditional=0, calls=1, returns=1"));
+        Assert.That(output, Does.Contain("- Memory operands: 1 (20%); stack/frame operands: 0"));
+        Assert.That(output, Does.Contain("- Vector width hints: xmm=0, ymm=0, zmm=0, neon/simd=2, sve=0"));
     }
 
     [Test]
@@ -308,10 +407,12 @@ public sealed class ConduitMcpToolsTests
             var result = view_burst_asm.CompleteOutput(target, builder.ToString());
 
             Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
-            Assert.That(result.return_value, Does.StartWith("Output very large ("));
+            Assert.That(result.return_value, Does.StartWith("GenerateInteriorMesh()\n- Instructions: 1000"));
+            Assert.That(result.return_value, Does.Contain("Assembly output very large ("));
             Assert.That(result.return_value, Does.EndWith(" KB); saved to Temp/GenerateInteriorMesh.txt"));
             Assert.That(File.Exists(path), Is.True);
-            Assert.That(File.ReadAllText(path), Does.StartWith("GenerateInteriorMesh()\nnop"));
+            Assert.That(File.ReadAllText(path), Does.StartWith("GenerateInteriorMesh()\n- Instructions: 1000"));
+            Assert.That(File.ReadAllText(path), Does.Contain("\n\nnop\nnop"));
         }
         finally
         {
