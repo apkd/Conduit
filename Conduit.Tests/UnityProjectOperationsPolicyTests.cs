@@ -120,6 +120,31 @@ public sealed class UnityProjectOperationsPolicyTests
         await Assert.That(diagnostic).DoesNotContain("Editor.log activity");
     }
 
+    [Test]
+    public async Task ExecuteCodePolicyRejectsAssetDatabaseRefresh()
+    {
+        await Assert.That(UnityProjectOperations.CallsAssetDatabaseRefresh("UnityEditor.AssetDatabase.Refresh();")).IsTrue();
+    }
+
+    [Test]
+    public async Task ExecuteCodePolicyRejectsImportedAssetDatabaseRefresh()
+    {
+        await Assert.That(UnityProjectOperations.CallsAssetDatabaseRefresh("AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);")).IsTrue();
+    }
+
+    [Test]
+    public async Task ExecuteCodePolicyRejectsAssetDatabaseRefreshWithWhitespace()
+    {
+        await Assert.That(UnityProjectOperations.CallsAssetDatabaseRefresh("UnityEditor . AssetDatabase . Refresh ();")).IsTrue();
+    }
+
+    [Test]
+    public async Task ExecuteCodePolicyAllowsUnrelatedSnippets()
+    {
+        await Assert.That(UnityProjectOperations.CallsAssetDatabaseRefresh("Debug.Log(42);")).IsFalse();
+        await Assert.That(UnityProjectOperations.AssetDatabaseRefreshDiagnostic).Contains("`refresh_asset_database` tool instead");
+    }
+
     static BridgeClientResult Failure(BridgeRuntimeFailureKind failureKind, bool commandSent) =>
         BridgeClientResult.Failure(handshake, failureKind, "diagnostic", commandSent);
 }

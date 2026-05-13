@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,6 +17,14 @@ public sealed class UnityProjectOperations(
     ILoggerFactory loggerFactory)
 {
     static readonly TimeSpan recentReachablePreflightBypassWindow = TimeSpan.FromSeconds(10);
+    static readonly Regex assetDatabaseRefreshCallPattern = new(
+        @"\b(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?AssetDatabase\s*\.\s*Refresh\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant
+    );
+
+    internal static readonly string AssetDatabaseRefreshDiagnostic =
+        "`AssetDatabase.Refresh` should not be called via `execute_code`. Use the `refresh_asset_database` tool instead.";
+
     readonly ILogger<UnityProjectOperations> logger = loggerFactory.CreateLogger<UnityProjectOperations>();
 
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
@@ -151,11 +160,27 @@ public sealed class UnityProjectOperations(
     }
 
     public Task<ToolExecutionResult> ExecuteCodeAsync(string projectPath, string snippet, CT ct)
-        => EnqueueAsync(
+    {
+        if (CallsAssetDatabaseRefresh(snippet))
+        {
+            return Task.FromResult(
+                new ToolExecutionResult
+                {
+                    Outcome = ToolOutcome.Exception,
+                    Diagnostic = AssetDatabaseRefreshDiagnostic,
+                }
+            );
+        }
+
+        return EnqueueAsync(
             projectPath: projectPath,
             command: new() { CommandType = BridgeCommandTypes.ExecuteCode, Snippet = snippet },
             ct: ct
         );
+    }
+
+    internal static bool CallsAssetDatabaseRefresh(string? snippet) =>
+        !string.IsNullOrEmpty(snippet) && assetDatabaseRefreshCallPattern.IsMatch(snippet);
 
     public Task<ToolExecutionResult> ViewBurstAsmAsync(string projectPath, string target, CT ct)
         => EnqueueAsync(
