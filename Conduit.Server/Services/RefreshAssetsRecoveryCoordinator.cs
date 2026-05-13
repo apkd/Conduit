@@ -24,11 +24,9 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
         var initialSnapshot = environmentInspector.Inspect(projectPath);
         var logPath = environmentInspector.ResolveEditorLogPath(initialSnapshot);
         var initialLogSnapshot = environmentInspector.GetEditorLogSnapshot(logPath);
-        var recoveryStartUtc = DateTimeOffset.UtcNow;
         bool reachable = false;
 
         var initialExecution = await ExecuteAndTrackAsync(requestId, command, commandTimeout);
-        var lastHandshake = initialExecution.Handshake;
         if (initialExecution.Result is { } directResult)
             return CompleteWith(directResult);
 
@@ -64,18 +62,13 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
             if (probe.FailureKind is BridgeRuntimeFailureKind.ProcessExited)
                 return FailWith(command.CommandType, probe, reconnectWindow);
 
-            if (probe.Handshake is not { } recoveryHandshake)
+            if (probe.Handshake is null)
             {
                 SetLastStatusIssue(probe.FailureDiagnostic ?? "Bridge probe returned no handshake during refresh recovery.");
                 await DelayUntilNextProbeAsync();
                 continue;
             }
 
-            const bool sawReconnect = true; // todo: const?
-            bool domainReloadDetected = lastHandshake is { SessionInstanceId: { Length: > 0 } }
-                                        && lastHandshake.SessionInstanceId != recoveryHandshake.SessionInstanceId;
-
-            lastHandshake = recoveryHandshake;
             await ApplyHandshakeAsync(probe);
 
             var pingExecution = await ExecuteAndTrackAsync(
@@ -129,7 +122,7 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
 
             var replayExecution = await ExecuteAndTrackAsync(requestId, command, commandTimeout);
             if (replayExecution.Result is { } replayResult)
-                return CompleteWith(AddRecoveryDiagnostic(replayResult, domainReloadDetected, sawReconnect));
+                return CompleteWith(replayResult);
 
             if (replayExecution.FailureKind is BridgeRuntimeFailureKind.ProcessExited)
                 return FailWith(command.CommandType, replayExecution, commandTimeout);
@@ -161,24 +154,6 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
 
             await ApplyHandshakeAsync(execution);
             return execution;
-        }
-
-        ToolExecutionResult AddRecoveryDiagnostic(
-            ToolExecutionResult result,
-            bool domainReloadDetected,
-            bool sawReconnect
-        )
-        {
-            if (result.Outcome != ToolOutcome.Success || !string.IsNullOrWhiteSpace(result.Diagnostic))
-                return result;
-
-            result.Diagnostic = BuildRecoveryDiagnostic(
-                elapsed: DateTimeOffset.UtcNow - recoveryStartUtc,
-                domainReloadDetected: domainReloadDetected,
-                sawReconnect: sawReconnect
-            );
-
-            return result;
         }
 
         RefreshAssetDatabaseRecoveryResult CompleteWith(ToolExecutionResult result) =>
@@ -241,21 +216,6 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
 
             logger.ZLogWarning($"Refresh recovery status issue for project {projectPath}: {issue}");
         }
-    }
-
-    static string BuildRecoveryDiagnostic(
-        TimeSpan elapsed,
-        bool domainReloadDetected,
-        bool sawReconnect
-    )
-    {
-        if (domainReloadDetected)
-            return $"Domain reload detected; bridge reconnected after {elapsed.TotalSeconds:0.0} seconds.";
-
-        if (sawReconnect)
-            return $"Bridge connection recovered after {elapsed.TotalSeconds:0.0} seconds following '{BridgeCommandTypes.RefreshAssetDatabase}'.";
-
-        return $"'{BridgeCommandTypes.RefreshAssetDatabase}' completed after {elapsed.TotalSeconds:0.0} seconds.";
     }
 
     internal static bool IsRefreshStillBusy(UnityPingSnapshot pingSnapshot) =>

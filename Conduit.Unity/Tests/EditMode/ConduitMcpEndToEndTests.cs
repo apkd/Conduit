@@ -644,7 +644,7 @@ public sealed class ConduitMcpEndToEndTests
         );
 
         Assert.That(result.IsError, Is.False, result.Text);
-        AssertTextContainsAny(result.Text, "Success", "completed after", "recovered after");
+        AssertTextContainsAny(result.Text, "Success");
 
         var importedAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(assetPath);
         Assert.That(importedAsset, Is.Not.Null, $"Asset '{assetPath}' was not imported after refresh.");
@@ -664,7 +664,7 @@ public sealed class ConduitMcpEndToEndTests
 
         var elapsed = DateTime.UtcNow - startedAt;
         Assert.That(result.IsError, Is.False, result.Text);
-        AssertTextContainsAny(result.Text, "Success", "completed after", "recovered after");
+        AssertTextContainsAny(result.Text, "Success");
         Assert.That(elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), $"No-op refresh took {elapsed.TotalSeconds:0.000}s.");
     }
 
@@ -696,7 +696,7 @@ public sealed class ConduitMcpEndToEndTests
 
             var elapsed = DateTime.UtcNow - startedAt;
             Assert.That(result.IsError, Is.False, result.Text);
-            AssertTextContainsAny(result.Text, "Success", "completed after", "recovered after");
+            AssertTextContainsAny(result.Text, "Success");
             Assert.That(elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), $"Play-mode no-op refresh took {elapsed.TotalSeconds:0.000}s.");
         }
         finally
