@@ -32,6 +32,9 @@ namespace Conduit
 
         static void StartReimport()
         {
+            if (TryCompleteReimportPlayModeBlock())
+                return;
+
             InstallReimportHooks();
             ResetReimportSettlementState();
             AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
@@ -75,6 +78,28 @@ namespace Conduit
 
             return true;
         }
+
+        static bool TryCompleteReimportPlayModeBlock()
+        {
+            if (!ShouldBlockReimportForPlayMode(EditorApplication.isPlaying))
+                return false;
+
+            _ = CompleteCurrentAsync(
+                new()
+                {
+                    outcome = ToolOutcome.Exception,
+                    diagnostic = BuildReimportPlayModeDiagnostic(),
+                }
+            );
+
+            return true;
+        }
+
+        internal static bool ShouldBlockReimportForPlayMode(bool isPlaying)
+            => isPlaying;
+
+        internal static string BuildReimportPlayModeDiagnostic()
+            => "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'play' to return to edit mode first.";
 
         static bool TryCompleteBusyTestStartBlock(string? commandType)
         {

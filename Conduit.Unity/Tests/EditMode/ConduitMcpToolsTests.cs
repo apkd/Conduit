@@ -1852,6 +1852,15 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void RefreshAssetDatabasePlayModeGuard_BlocksPlayMode()
+    {
+        Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(false), Is.False);
+        Assert.That(ConduitToolRunner.BuildReimportPlayModeDiagnostic(), Is.EqualTo(
+            "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'play' to return to edit mode first."));
+    }
+
+    [Test]
     public void PlayPersistedOperation_RestoresTargetMode()
     {
         var pendingOperation = new PendingOperationState

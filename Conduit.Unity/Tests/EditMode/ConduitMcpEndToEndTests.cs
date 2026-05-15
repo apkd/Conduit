@@ -670,7 +670,7 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(102)]
-    public async Task RefreshAssetDatabase_PlayModeNoChangesReturnsPromptly()
+    public async Task RefreshAssetDatabase_PlayModeRefusesPromptly()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
         var originalOptions = EditorSettings.enterPlayModeOptions;
@@ -695,9 +695,8 @@ public sealed class ConduitMcpEndToEndTests
             );
 
             var elapsed = DateTime.UtcNow - startedAt;
-            Assert.That(result.IsError, Is.False, result.Text);
-            AssertTextContainsAny(result.Text, "Success");
-            Assert.That(elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), $"Play-mode no-op refresh took {elapsed.TotalSeconds:0.000}s.");
+            AssertTextContainsAny(result.Text, "Cannot run 'refresh_asset_database' while Unity is in play mode");
+            Assert.That(elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), $"Play-mode refresh refusal took {elapsed.TotalSeconds:0.000}s.");
         }
         finally
         {
