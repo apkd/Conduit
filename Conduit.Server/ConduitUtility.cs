@@ -174,49 +174,10 @@ public static partial class ConduitUtility
     }
 
     /// <summary>
-    /// Replaces double quotes in user-facing text to keep JSON output compact and readable.
+    /// Canonicalizes user-facing text line endings without rewriting content.
     /// </summary>
-    public static string? NormalizeUserFacingText(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-            return value;
-
-        var needsNormalization = false;
-        foreach (var character in value)
-        {
-            if (character is '"' or '\r')
-            {
-                needsNormalization = true;
-                break;
-            }
-        }
-
-        if (!needsNormalization)
-            return value;
-
-        using var builder = ZString.CreateStringBuilder();
-        for (var index = 0; index < value.Length; index++)
-        {
-            var character = value[index];
-            switch (character)
-            {
-                case '"':
-                    builder.Append('\'');
-                    break;
-                case '\r':
-                    if (index + 1 < value.Length && value[index + 1] == '\n')
-                        continue;
-
-                    builder.Append('\n');
-                    break;
-                default:
-                    builder.Append(character);
-                    break;
-            }
-        }
-
-        return builder.ToString();
-    }
+    public static string? NormalizeUserFacingText(string? value) =>
+        NormalizePayloadText(value);
 
     /// <summary>
     /// Normalizes optional user-facing text and drops empty values.

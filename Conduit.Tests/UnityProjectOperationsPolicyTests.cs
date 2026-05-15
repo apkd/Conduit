@@ -83,6 +83,62 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task UnexpectedStatusFailureReportsMissingPackageWhenNoPackageSignalExists()
+    {
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            "/mnt/b/src/SampleProject",
+            isUnityProject: true,
+            editorVersion: "6000.4.0f1",
+            lockfileState: UnityProjectLockfileState.Missing,
+            runningUnityProcessCount: 0,
+            matchedProcess: null
+        );
+
+        var result = UnityProjectOperations.BuildUnexpectedStatusFailureResult(
+            snapshot.ProjectPath,
+            snapshot,
+            hasConduitPackageSignal: false,
+            "Status probing failed unexpectedly."
+        );
+
+        await Assert.That(result.Outcome).IsEqualTo(ToolOutcome.NotConnected);
+        await Assert.That(result.Diagnostic).IsEqualTo(
+            $"{UnityProjectOfflinePreflight.MissingPackageDiagnostic} Status probing failed unexpectedly."
+        );
+    }
+
+    [Test]
+    public async Task CommandFailureReportsMissingPackageWhenConnectionTimesOutWithoutPackageSignal()
+    {
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            "/mnt/b/src/SampleProject",
+            isUnityProject: true,
+            editorVersion: "6000.4.0f1",
+            lockfileState: UnityProjectLockfileState.Missing,
+            runningUnityProcessCount: 0,
+            matchedProcess: null
+        );
+        var connectionFailure = BridgeClientResult.Failure(
+            handshake: null,
+            ConnectTimedOut,
+            "Could not establish a Unity connection.",
+            commandSent: false
+        );
+
+        var result = UnityProjectOperations.ToToolExecutionResult(
+            snapshot.ProjectPath,
+            BridgeCommandTypes.RefreshAssetDatabase,
+            connectionFailure,
+            TimeSpan.FromSeconds(5),
+            new UnityProjectEnvironmentInspector(),
+            snapshot
+        );
+
+        await Assert.That(result.Outcome).IsEqualTo(ToolOutcome.NotConnected);
+        await Assert.That(result.Diagnostic).IsEqualTo(UnityProjectOfflinePreflight.MissingPackageDiagnostic);
+    }
+
+    [Test]
     public async Task ProbeStatusRequiresAnActualCommandResult()
     {
         await Assert.That(UnityProjectOperations.ShouldUseProbeExecutionForStatus(BridgeClientResult.Connected(handshake))).IsFalse();

@@ -77,13 +77,15 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
-    [Arguments(false, false, UnityProjectOfflinePreflight.InvalidProjectDiagnostic)]
-    [Arguments(true, false, UnityProjectOfflinePreflight.OfflineDiagnostic)]
-    [Arguments(true, true, UnityProjectOfflinePreflight.MissingPackageDiagnostic)]
-    [Arguments(true, true, UnityProjectOfflinePreflight.UnresponsiveBridgeDiagnostic)]
+    [Arguments(false, false, false, UnityProjectOfflinePreflight.InvalidProjectDiagnostic)]
+    [Arguments(true, false, false, UnityProjectOfflinePreflight.MissingPackageDiagnostic)]
+    [Arguments(true, false, true, UnityProjectOfflinePreflight.OfflineDiagnostic)]
+    [Arguments(true, true, false, UnityProjectOfflinePreflight.MissingPackageDiagnostic)]
+    [Arguments(true, true, true, UnityProjectOfflinePreflight.UnresponsiveBridgeDiagnostic)]
     public async Task BlockedPreflightDistinguishesProjectProcessAndPackageState(
         bool isUnityProject,
         bool hasMatchedProcess,
+        bool hasConduitPackageSignal,
         string expectedDiagnostic
     )
     {
@@ -104,8 +106,6 @@ public sealed class UnityRestartAndPreflightPolicyTests
             "timeout",
             commandSent: false
         );
-
-        var hasConduitPackageSignal = expectedDiagnostic == UnityProjectOfflinePreflight.UnresponsiveBridgeDiagnostic;
 
         var blockedDiagnostic = UnityProjectOfflinePreflight.ResolveBlockedDiagnostic(
             snapshot,

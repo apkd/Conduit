@@ -379,7 +379,8 @@ public sealed class UnityProjectOperations(
                        queuedCommand.Session.ProjectPath,
                        queuedCommand.Command.CommandType,
                        execution,
-                       commandTimeout
+                       commandTimeout,
+                       environmentInspector
                    );
         }
         finally
@@ -490,6 +491,34 @@ public sealed class UnityProjectOperations(
             : ToolExecutionResult.NotConnected(projectPath, diagnostic);
     }
 
+    internal static ToolExecutionResult ToToolExecutionResult(
+        string projectPath,
+        string commandType,
+        BridgeClientResult execution,
+        TimeSpan timeout,
+        UnityProjectEnvironmentInspector environmentInspector,
+        UnityProjectEnvironmentSnapshot? snapshot = null
+    )
+    {
+        var fallback = ToToolExecutionResult(projectPath, commandType, execution, timeout);
+        if (execution.Result is not null || execution.Handshake is not null || execution.FailureKind is null)
+            return fallback;
+
+        var diagnostic = UnityProjectOfflinePreflight.ResolveBlockedDiagnostic(
+            environmentInspector,
+            projectPath,
+            execution,
+            snapshot
+        );
+
+        if (string.IsNullOrWhiteSpace(diagnostic) || diagnostic == fallback.Diagnostic)
+            return fallback;
+
+        return fallback.Outcome == ToolOutcome.Timeout
+            ? ToolExecutionResult.Timeout(timeout, diagnostic)
+            : ToolExecutionResult.NotConnected(projectPath, diagnostic);
+    }
+
     public static bool ShouldReplayRequest(BridgeClientResult execution) =>
         execution.Handshake is not null
         && execution.FailureKind is BridgeRuntimeFailureKind.SendFailed
@@ -567,7 +596,14 @@ public sealed class UnityProjectOperations(
             if (!ShouldReportReachableStatus(execution))
                 return environmentInspector.FormatPingFailure(
                     currentSnapshot,
-                    ToToolExecutionResult(normalizedProjectPath, BridgeCommandTypes.Status, execution, statusTimeout ?? UnityToolTimeouts.StatusCommand)
+                    ToToolExecutionResult(
+                        normalizedProjectPath,
+                        BridgeCommandTypes.Status,
+                        execution,
+                        statusTimeout ?? UnityToolTimeouts.StatusCommand,
+                        environmentInspector,
+                        currentSnapshot
+                    )
                 );
 
             return environmentInspector.FormatPingReachable(
@@ -643,9 +679,11 @@ public sealed class UnityProjectOperations(
         string diagnostic
     )
     {
-        var effectiveDiagnostic = snapshot.MatchedProcess is not null && hasConduitPackageSignal
-            ? $"{UnityProjectOfflinePreflight.UnresponsiveBridgeDiagnostic} {diagnostic}"
-            : diagnostic;
+        var effectiveDiagnostic = diagnostic;
+        if (snapshot.MatchedProcess is not null && hasConduitPackageSignal)
+            effectiveDiagnostic = $"{UnityProjectOfflinePreflight.UnresponsiveBridgeDiagnostic} {diagnostic}";
+        else if (snapshot.IsUnityProject && !hasConduitPackageSignal)
+            effectiveDiagnostic = $"{UnityProjectOfflinePreflight.MissingPackageDiagnostic} {diagnostic}";
 
         return ToolExecutionResult.NotConnected(normalizedProjectPath, effectiveDiagnostic);
     }

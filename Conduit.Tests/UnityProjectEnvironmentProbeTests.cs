@@ -6,6 +6,68 @@ namespace Conduit;
 public sealed class UnityProjectEnvironmentProbeTests
 {
     [Test]
+    public async Task HasConduitPackageSignalReturnsFalseWhenPackageIsAbsent()
+    {
+        var projectPath = CreateTempProject();
+        try
+        {
+            var probe = new UnityProjectEnvironmentProbe();
+
+            await Assert.That(probe.HasConduitPackageSignal(projectPath)).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task HasConduitPackageSignalDetectsManifestDependency()
+    {
+        var projectPath = CreateTempProject();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(projectPath, "Packages"));
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "Packages", "manifest.json"),
+                """
+                {
+                  "dependencies": {
+                    "dev.tryfinally.conduit": "https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release"
+                  }
+                }
+                """
+            );
+            var probe = new UnityProjectEnvironmentProbe();
+
+            await Assert.That(probe.HasConduitPackageSignal(projectPath)).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task HasConduitPackageSignalDetectsEmbeddedPackage()
+    {
+        var projectPath = CreateTempProject();
+        try
+        {
+            var embeddedPackagePath = Path.Combine(projectPath, "Packages", "dev.tryfinally.conduit");
+            Directory.CreateDirectory(embeddedPackagePath);
+            await File.WriteAllTextAsync(Path.Combine(embeddedPackagePath, "package.json"), "{}");
+            var probe = new UnityProjectEnvironmentProbe();
+
+            await Assert.That(probe.HasConduitPackageSignal(projectPath)).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Test]
     [Arguments("6000.4.0f1", "-projectPath \"{project}\" -logFile \"{absolute}\"", "{absolute}")]
     [Arguments("6000.4.0f1", "-projectPath \"{project}\" -logFile Logs/Custom.log", "{project}/Logs/Custom.log")]
     [Arguments("6000.4.0f1", null, "{legacy}")]
@@ -37,6 +99,19 @@ public sealed class UnityProjectEnvironmentProbeTests
 
     static string CreateProjectPath()
         => Path.GetFullPath(Path.Combine(Path.GetTempPath(), $"conduit-project-{Guid.NewGuid():N}"));
+
+    static string CreateTempProject()
+    {
+        var projectPath = CreateProjectPath();
+        Directory.CreateDirectory(Path.Combine(projectPath, "Assets"));
+        Directory.CreateDirectory(Path.Combine(projectPath, "Packages"));
+        Directory.CreateDirectory(Path.Combine(projectPath, "ProjectSettings"));
+        File.WriteAllText(
+            Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt"),
+            "m_EditorVersion: 6000.4.0f1"
+        );
+        return projectPath;
+    }
 
     static string? ReplaceTokens(string? value, string projectPath, string legacyLogPath, string absoluteLogPath)
     {

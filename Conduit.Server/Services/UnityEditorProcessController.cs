@@ -22,6 +22,9 @@ public sealed class UnityEditorProcessController(
             if (!snapshot.IsUnityProject)
                 return ToolExecutionResult.NotConnected(snapshot.ProjectPath, "The specified path is not a valid Unity project.");
 
+            if (!environmentInspector.HasConduitPackageSignal(snapshot.ProjectPath))
+                return ToolExecutionResult.NotConnected(snapshot.ProjectPath, UnityProjectOfflinePreflight.MissingPackageDiagnostic);
+
             var dirtySceneResult = await TryCreateDirtySceneBlockAsync(snapshot.ProjectPath, snapshot.MatchedProcess?.ProcessId, ct);
             if (dirtySceneResult is not null)
                 return dirtySceneResult;

@@ -15,6 +15,14 @@ public sealed class ToolExecutionResultSerializationTests
     }
 
     [Test]
+    public async Task NormalizeUserFacingTextPreservesJsonQuotes()
+    {
+        var normalized = ConduitUtility.NormalizeUserFacingText("\"dependencies\": {\r\n  \"dev.tryfinally.conduit\": \"url\",");
+
+        await Assert.That(normalized).IsEqualTo("\"dependencies\": {\n  \"dev.tryfinally.conduit\": \"url\",");
+    }
+
+    [Test]
     public async Task BridgeResultDropsEmptyOptionalFields()
     {
         var result = new BridgeCommandResult

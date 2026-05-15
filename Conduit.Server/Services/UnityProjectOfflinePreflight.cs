@@ -8,8 +8,14 @@ static class UnityProjectOfflinePreflight
     public const string OfflineDiagnostic
         = "No Unity editor process is running for this project. Use 'restart' to bring it online.";
 
-    public const string MissingPackageDiagnostic
-        = "A Unity editor process is running for this project, but the Conduit package does not appear to be installed.";
+    public const string MissingPackageDiagnostic =
+        """
+        The target Unity project does not have the Conduit package installed.
+        The manifest.json file should contain:
+
+        "dependencies": {
+          "dev.tryfinally.conduit": "https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release",
+        """;
 
     public const string UnresponsiveBridgeDiagnostic
         = "A Unity editor process is running for this project, but the Unity connection is not responding.";
@@ -57,6 +63,22 @@ static class UnityProjectOfflinePreflight
     }
 
     internal static string? ResolveBlockedDiagnostic(
+        UnityProjectEnvironmentInspector environmentInspector,
+        string normalizedProjectPath,
+        BridgeClientResult probeExecution,
+        UnityProjectEnvironmentSnapshot? snapshot = null
+    )
+    {
+        var currentSnapshot = snapshot ?? environmentInspector.Inspect(normalizedProjectPath);
+        return ResolveBlockedDiagnostic(
+            currentSnapshot,
+            probeExecution,
+            currentSnapshot.MatchedProcess is null ? null : environmentInspector.TryReadSafeModeDiagnostic(currentSnapshot),
+            environmentInspector.HasConduitPackageSignal(normalizedProjectPath)
+        );
+    }
+
+    internal static string? ResolveBlockedDiagnostic(
         UnityProjectEnvironmentSnapshot snapshot,
         BridgeClientResult probeExecution,
         string? safeModeDiagnostic,
@@ -69,18 +91,19 @@ static class UnityProjectOfflinePreflight
         if (!string.IsNullOrWhiteSpace(safeModeDiagnostic))
             return safeModeDiagnostic;
 
-        if (snapshot.MatchedProcess is null)
-            return OfflineDiagnostic;
-
         if (probeExecution.FailureKind is BridgeRuntimeFailureKind.InvalidHandshake
             or BridgeRuntimeFailureKind.ProjectMismatch
             or BridgeRuntimeFailureKind.HandshakeDisconnected
             or BridgeRuntimeFailureKind.ProcessExited)
             return probeExecution.FailureDiagnostic;
 
-        return hasConduitPackageSignal
-            ? UnresponsiveBridgeDiagnostic
-            : MissingPackageDiagnostic;
+        if (!hasConduitPackageSignal)
+            return MissingPackageDiagnostic;
+
+        if (snapshot.MatchedProcess is null)
+            return OfflineDiagnostic;
+
+        return UnresponsiveBridgeDiagnostic;
     }
 }
 

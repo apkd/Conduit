@@ -159,15 +159,22 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
         RefreshAssetDatabaseRecoveryResult CompleteWith(ToolExecutionResult result) =>
             new(result, monitoredProcessId, reachable);
 
-        RefreshAssetDatabaseRecoveryResult FailWith(string commandType, BridgeClientResult execution, TimeSpan timeout) =>
-            execution.FailureKind is BridgeRuntimeFailureKind.ProcessExited
+        RefreshAssetDatabaseRecoveryResult FailWith(string commandType, BridgeClientResult execution, TimeSpan timeout)
+        {
+            var result = UnityProjectOperations.ToToolExecutionResult(
+                projectPath,
+                commandType,
+                execution,
+                timeout,
+                environmentInspector
+            );
+
+            return execution.FailureKind is BridgeRuntimeFailureKind.ProcessExited
                 ? CompleteWith(
-                    BuildProcessExitResult(
-                        UnityProjectOperations.ToToolExecutionResult(projectPath, commandType, execution, timeout).Diagnostic
-                        ?? $"Unity exited before '{commandType}' could complete."
-                    )
+                    BuildProcessExitResult(result.Diagnostic ?? $"Unity exited before '{commandType}' could complete.")
                 )
-                : CompleteWith(UnityProjectOperations.ToToolExecutionResult(projectPath, commandType, execution, timeout));
+                : CompleteWith(result);
+        }
 
         ToolExecutionResult BuildProcessExitResult(string diagnostic)
         {
