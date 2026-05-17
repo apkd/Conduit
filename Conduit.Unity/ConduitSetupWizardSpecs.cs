@@ -61,9 +61,12 @@ namespace Conduit
                 BodyPath = "mcpServers",
                 TypeValue = "stdio",
                 RemoveKeys = new[] { "url" },
-                ResolveConfigPath = static context => UnityEngine.Application.platform == UnityEngine.RuntimePlatform.WindowsEditor
-                    ? Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude", "claude_desktop_config.json")
-                    : Combine(context.UserHome, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
+                ResolveConfigPath = static context => UnityEngine.Application.platform switch
+                {
+                    UnityEngine.RuntimePlatform.WindowsEditor => Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude", "claude_desktop_config.json"),
+                    UnityEngine.RuntimePlatform.OSXEditor => Combine(context.UserHome, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
+                    _ => null,
+                },
             },
             new()
             {
@@ -179,7 +182,9 @@ namespace Conduit
                 BodyPath = "servers",
                 TypeValue = "stdio",
                 RemoveKeys = new[] { "url" },
-                ResolveConfigPath = static context => Combine(context.ProjectRoot, ".vs", "mcp.json"),
+                ResolveConfigPath = static context => UnityEngine.Application.platform == UnityEngine.RuntimePlatform.WindowsEditor
+                    ? Combine(context.ProjectRoot, ".vs", "mcp.json")
+                    : null,
             },
             new()
             {

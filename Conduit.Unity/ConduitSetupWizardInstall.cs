@@ -35,6 +35,14 @@ namespace Conduit
                 return new() { State = ActionState.Disabled, Label = "Download MCP Server", Hint = reason };
 
             var executablePath = GetEffectiveExecutablePath(serverExecutablePath, configuredExecutablePath);
+            if (ShouldOfferServerReinstall(executablePath))
+                return new()
+                {
+                    State = ActionState.Enabled,
+                    Label = "Reinstall MCP Server",
+                    Hint = $"The installed server at {executablePath} could not report its version. Download a fresh copy."
+                };
+
             if (ShouldOfferServerUpdate(executablePath, out var installedVersion, out var packageVersion))
                 return new()
                 {
@@ -55,7 +63,7 @@ namespace Conduit
 
         public static string GetEffectiveExecutablePath(string serverExecutablePath, string configuredExecutablePath)
         {
-            if (serverExecutablePath.Length > 0)
+            if (serverExecutablePath.Length > 0 && File.Exists(serverExecutablePath))
                 return serverExecutablePath;
 
             if (configuredExecutablePath.Length > 0 && File.Exists(configuredExecutablePath))
@@ -63,6 +71,9 @@ namespace Conduit
 
             return TryGetInstalledExecutablePath(out var installedPath) ? installedPath : string.Empty;
         }
+
+        static bool ShouldOfferServerReinstall(string executablePath)
+            => executablePath.Length > 0 && !TryGetExecutableVersion(executablePath, out _);
 
         public static async Task<string> DownloadServerAsync()
         {
