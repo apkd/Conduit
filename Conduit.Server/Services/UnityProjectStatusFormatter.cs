@@ -26,7 +26,7 @@ static class UnityProjectStatusFormatter
             builder.Append("Bridge: ");
             builder.AppendLine(FormatBridgeStatus(bridgeResult));
             AppendProcessRuntime(ref builder, processRuntime, snapshot.MatchedProcess?.ProcessId);
-            builder.Append("Unity.exe processes running: ");
+            builder.Append("Unity editor processes running: ");
             builder.AppendLine(snapshot.RunningUnityProcessCount);
             if (!string.IsNullOrWhiteSpace(bridgeResult?.Diagnostic))
             {
@@ -70,7 +70,7 @@ static class UnityProjectStatusFormatter
             }
 
             AppendProcessRuntime(ref builder, processRuntime, handshake.EditorProcessId > 0 ? handshake.EditorProcessId : snapshot.MatchedProcess?.ProcessId);
-            builder.Append("Unity.exe processes running: ");
+            builder.Append("Unity editor processes running: ");
             builder.AppendLine(snapshot.RunningUnityProcessCount);
             if (!string.IsNullOrWhiteSpace(diagnostic))
             {

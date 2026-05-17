@@ -90,6 +90,29 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task StatusDiagnosticsUseNeutralUnityProcessLabel()
+    {
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            "/mnt/b/src/SampleProject",
+            isUnityProject: true,
+            editorVersion: "6000.4.0f1",
+            lockfileState: UnityProjectLockfileState.Locked,
+            runningUnityProcessCount: 1,
+            matchedProcess: new(1234, "/home/apk/Unity/Hub/Editor/6000.4.0f1/Editor/Unity", "Unity -projectPath \"/mnt/b/src/SampleProject\"")
+        );
+
+        var text = UnityProjectStatusFormatter.FormatPingFailure(
+            snapshot,
+            ToolExecutionResult.NotConnected(snapshot.ProjectPath, "offline"),
+            processRuntime: null,
+            CompilationDiagnosticSummary.Empty
+        );
+
+        await Assert.That(text).Contains("Unity editor processes running: 1");
+        await Assert.That(text).DoesNotContain("Unity.exe processes");
+    }
+
+    [Test]
     public async Task ViewBurstAsmCommandPolicy_IsRegistered()
     {
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ViewBurstAsm)).IsEqualTo(BridgeCommandKind.ViewBurstAsm);

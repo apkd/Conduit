@@ -2,12 +2,21 @@
 
 using System;
 using System.IO;
+using System.Text;
 using UnityEngine;
 
 namespace Conduit
 {
     static class ConduitProjectIdentity
     {
+        const string PipeNamePrefix = "unity-conduit-";
+        const int PipeNameMaxLength = 64;
+        const int PipeNamePrefixLength = 14;
+        const int PipeNameLegacySlugMaxLength = PipeNameMaxLength - PipeNamePrefixLength;
+        const int PipeNameSlugMaxLength = 32;
+        const ulong PipeNameHashOffset = 14695981039346656037UL;
+        const ulong PipeNameHashPrime = 1099511628211UL;
+
         public static string GetProjectPath()
             => NormalizeProjectPath(Path.GetFullPath(Path.Combine(Application.dataPath, "..")));
 
@@ -20,36 +29,81 @@ namespace Conduit
             if (normalizedPath is not { Length: > 0 })
                 return "unity-conduit-unknown";
 
-            var buffer = new char[normalizedPath.Length];
-            var count = 0;
+            var slug = CreatePipeNameSlug(normalizedPath, PipeNameLegacySlugMaxLength + 1);
+            if (slug.Length > 0 && slug.Length <= PipeNameLegacySlugMaxLength)
+                return PipeNamePrefix + slug;
+
+            if (slug.Length > PipeNameSlugMaxLength)
+                slug = TrimTrailingSeparator(slug[..PipeNameSlugMaxLength]);
+
+            var hash = CreatePipeNameHash(normalizedPath);
+            return slug.Length == 0
+                ? PipeNamePrefix + hash
+                : $"{PipeNamePrefix}{slug}-{hash}";
+        }
+
+        static string CreatePipeNameSlug(string normalizedPath, int maxLength)
+        {
+            var builder = new StringBuilder(Math.Min(normalizedPath.Length, maxLength));
             var previousWasSeparator = false;
 
             foreach (var character in normalizedPath)
             {
-                if (char.IsLetterOrDigit(character))
+                if (builder.Length >= maxLength)
+                    break;
+
+                if (IsAsciiLetterOrDigit(character))
                 {
-                    buffer[count++] = char.ToLowerInvariant(character);
+                    builder.Append(ToLowerAscii(character));
                     previousWasSeparator = false;
                     continue;
                 }
 
-                if (previousWasSeparator)
+                if (previousWasSeparator || builder.Length == 0)
                     continue;
 
-                buffer[count++] = '_';
+                builder.Append('_');
                 previousWasSeparator = true;
             }
 
-            var start = 0;
-            while (start < count && buffer[start] == '_')
-                start++;
+            if (builder.Length > 0 && builder[builder.Length - 1] == '_')
+                builder.Length--;
 
-            while (count > start && buffer[count - 1] == '_')
-                count--;
+            return builder.ToString();
+        }
 
-            return count == start
-                ? "unity-conduit-unknown"
-                : $"unity-conduit-{new string(buffer, start, count - start)}";
+        static string CreatePipeNameHash(string normalizedPath)
+        {
+            var hash = PipeNameHashOffset;
+
+            foreach (var character in normalizedPath)
+            {
+                hash ^= ToLowerAscii(character);
+                hash *= PipeNameHashPrime;
+            }
+
+            return hash.ToString("x16");
+        }
+
+        static string TrimTrailingSeparator(string value)
+        {
+            return value.Length > 0 && value[value.Length - 1] == '_'
+                ? value[..^1]
+                : value;
+        }
+
+        static bool IsAsciiLetterOrDigit(char character)
+        {
+            return character >= 'a' && character <= 'z'
+                || character >= 'A' && character <= 'Z'
+                || character >= '0' && character <= '9';
+        }
+
+        static char ToLowerAscii(char character)
+        {
+            return character >= 'A' && character <= 'Z'
+                ? (char)(character + ('a' - 'A'))
+                : character;
         }
 
         public static string NormalizeProjectPath(string path)
