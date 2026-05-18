@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Text;
 using UnityEditor;
@@ -22,6 +23,7 @@ namespace Conduit
         const int MaxStringLength = 256;
         const int MaxCollectionPreview = 4;
         static readonly ConcurrentDictionary<Type, FieldInfo[]> fieldCache = new();
+        static readonly ConcurrentDictionary<Type, IndexableAccess> indexableAccessCache = new();
 
         static readonly Dictionary<string, string> commonComponentIdentifiers
             = new(StringComparer.Ordinal)
@@ -582,9 +584,7 @@ namespace Conduit
                     hasAny = true;
                 }
 
-                var valueText = TryGetFieldValue(field, target, out var value)
-                    ? FormatValue(value, 0)
-                    : "<unavailable>";
+                TryFormatFieldValue(field, target, 0, out var valueText);
 
                 builder.Append(' ', indent + 2);
                 builder.AppendLine($"- {field.Name}: {valueText}");
@@ -815,16 +815,16 @@ namespace Conduit
             => field is { IsStatic: false, IsInitOnly: false, IsNotSerialized: false } &&
                (field.IsPublic || field.IsDefined(typeof(SerializeField), false) || field.IsDefined(typeof(SerializeReference), false));
 
-        static bool TryGetFieldValue(FieldInfo field, object target, out object? value)
+        static bool TryFormatFieldValue(FieldInfo field, object target, int depth, out string valueText)
         {
             try
             {
-                value = field.GetValue(target);
+                valueText = FormatValue(field.GetValue(target), depth);
                 return true;
             }
-            catch
+            catch (Exception exception)
             {
-                value = null;
+                valueText = FormatUnavailable(exception);
                 return false;
             }
         }
@@ -873,6 +873,9 @@ namespace Conduit
             if (value is Object unityObject)
                 return DescribeObject(unityObject);
 
+            if (TryFormatIndexable(value, depth + 1, out var indexableText))
+                return indexableText;
+
             if (value is IDictionary dictionary)
                 return FormatDictionary(dictionary, depth + 1);
 
@@ -886,6 +889,119 @@ namespace Conduit
             }
 
             return TrimCompact(value.ToString());
+        }
+
+        static bool TryFormatIndexable(object value, int depth, out string text)
+        {
+            var access = indexableAccessCache.GetOrAdd(value.GetType(), CreateIndexableAccess);
+            if (!access.Available)
+            {
+                text = string.Empty;
+                return false;
+            }
+
+            text = FormatIndexable(value, depth, access);
+            return true;
+        }
+
+        static IndexableAccess CreateIndexableAccess(Type type)
+        {
+            foreach (var candidate in type.GetInterfaces())
+            {
+                if (!candidate.IsGenericType
+                    || candidate.GetGenericTypeDefinition().FullName != "Unity.Collections.IIndexable`1")
+                    continue;
+
+                var elementType = candidate.GetGenericArguments()[0];
+                var lengthGetter = candidate.GetProperty("Length")?.GetMethod;
+                var elementAt = candidate.GetMethod("ElementAt", new[] { typeof(int) });
+                if (lengthGetter == null || elementAt == null)
+                    continue;
+
+                return new(
+                    true,
+                    elementType,
+                    CreateIndexableLengthAccessor(candidate, lengthGetter),
+                    CreateIndexableElementAccessor(candidate, elementAt, elementType)
+                );
+            }
+
+            return IndexableAccess.Unavailable;
+        }
+
+        static Func<object, int> CreateIndexableLengthAccessor(Type indexableType, MethodInfo lengthGetter)
+        {
+            var method = new DynamicMethod(
+                "GetIIndexableLength",
+                typeof(int),
+                new[] { typeof(object) },
+                typeof(show).Module,
+                true
+            );
+            var il = method.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Castclass, indexableType);
+            il.Emit(OpCodes.Callvirt, lengthGetter);
+            il.Emit(OpCodes.Ret);
+            return (Func<object, int>)method.CreateDelegate(typeof(Func<object, int>));
+        }
+
+        static Func<object, int, object?> CreateIndexableElementAccessor(Type indexableType, MethodInfo elementAt, Type elementType)
+        {
+            var method = new DynamicMethod(
+                "GetIIndexableElement",
+                typeof(object),
+                new[] { typeof(object), typeof(int) },
+                typeof(show).Module,
+                true
+            );
+            var il = method.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Castclass, indexableType);
+            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Callvirt, elementAt);
+            il.Emit(OpCodes.Ldobj, elementType);
+            if (elementType.IsValueType)
+                il.Emit(OpCodes.Box, elementType);
+
+            il.Emit(OpCodes.Ret);
+            return (Func<object, int, object?>)method.CreateDelegate(typeof(Func<object, int, object?>));
+        }
+
+        static string FormatIndexable(object value, int depth, IndexableAccess access)
+        {
+            var getLength = access.GetLength!;
+            var getElement = access.GetElement!;
+            var count = getLength(value);
+            if (count <= 0)
+                return access.ElementType == typeof(bool) ? string.Empty : "[]";
+
+            var previewCount = GetPreviewCount(access.ElementType);
+            if (access.ElementType == typeof(bool))
+            {
+                var bits = new StringBuilder();
+                var visibleCount = count <= previewCount ? count : previewCount - 1;
+                for (var index = 0; index < visibleCount; index++)
+                    bits.Append(getElement(value, index) is true ? '1' : '0');
+
+                if (count <= previewCount)
+                    return bits.ToString();
+
+                var lastBit = getElement(value, count - 1) is true ? '1' : '0';
+                return $"{bits}...{lastBit} (n={count})";
+            }
+
+            using var pooledPreview = ConduitUtility.GetPooledList<string>(out var previewItems);
+            var visibleItems = count <= previewCount ? count : previewCount - 1;
+            for (var index = 0; index < visibleItems; index++)
+                previewItems.Add(FormatValue(getElement(value, index), depth));
+
+            if (count <= previewCount)
+                return $"[{string.Join(", ", previewItems)}]";
+
+            previewItems.Add("...");
+            previewItems.Add(FormatValue(getElement(value, count - 1), depth));
+            return $"[{string.Join(", ", previewItems)}] (n={count})";
         }
 
         static string FormatEnumerable(IEnumerable enumerable, int depth, Type elementType)
@@ -1062,9 +1178,7 @@ namespace Conduit
                 if (!IsUnitySerializableField(field))
                     continue;
 
-                var fieldValue = TryGetFieldValue(field, value, out var resolvedValue)
-                    ? FormatValue(resolvedValue, depth)
-                    : "<unavailable>";
+                TryFormatFieldValue(field, value, depth, out var fieldValue);
 
                 parts.Add($"{field.Name}={fieldValue}");
                 if (parts.Count >= MaxCollectionPreview)
@@ -1189,6 +1303,38 @@ namespace Conduit
             return normalized.Length <= MaxStringLength
                 ? normalized
                 : $"{normalized[..MaxStringLength]}...";
+        }
+
+        static string FormatUnavailable(Exception exception)
+        {
+            var type = ConduitUtility.SimplifyTypeName(exception.GetType().FullName ?? exception.GetType().Name);
+            var message = TrimCompact(exception.Message);
+            return string.IsNullOrWhiteSpace(message)
+                ? $"<unavailable: {type}>"
+                : $"<unavailable: {type}: {message}>";
+        }
+
+        readonly struct IndexableAccess
+        {
+            public static readonly IndexableAccess Unavailable = new(false, typeof(object), null, null);
+
+            public IndexableAccess(
+                bool available,
+                Type elementType,
+                Func<object, int>? getLength,
+                Func<object, int, object?>? getElement
+            )
+            {
+                Available = available;
+                ElementType = elementType;
+                GetLength = getLength;
+                GetElement = getElement;
+            }
+
+            public bool Available { get; }
+            public Type ElementType { get; }
+            public Func<object, int>? GetLength { get; }
+            public Func<object, int, object?>? GetElement { get; }
         }
     }
 }
