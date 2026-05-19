@@ -22,6 +22,7 @@ namespace Conduit
         public const string RefreshAssetDatabase = "refresh_asset_database";
         public const string ExecuteCode = "execute_code";
         public const string ViewBurstAsm = "view_burst_asm";
+        public const string Reflect = "reflect";
         public const string RunTestsEditMode = "run_tests_editmode";
         public const string RunTestsPlayMode = "run_tests_playmode";
         public const string RunTestsPlayer = "run_tests_player";

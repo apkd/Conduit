@@ -119,6 +119,151 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ReflectCommand_Parses()
+    {
+        var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.Reflect);
+
+        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.Reflect));
+    }
+
+    [Test]
+    public void ReflectTypes_SearchesByTypeNameAndKind()
+    {
+        var result = reflect.Reflect(new[] { "classes", "ConduitReflectDerivedFixture", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("class ConduitReflectDerivedFixture"));
+        Assert.That(result.return_value, Does.Contain("Base: ConduitReflectBaseFixture"));
+        Assert.That(result.return_value, Does.Contain("Interfaces: ConduitReflectInterfaceFixture"));
+        Assert.That(result.return_value, Does.Not.Contain("Types:"));
+    }
+
+    [Test]
+    public void ReflectModes_AreCaseInsensitive()
+    {
+        var result = reflect.Reflect(new[] { "CLASSES", "ConduitReflectDerivedFixture", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("class ConduitReflectDerivedFixture"));
+    }
+
+    [Test]
+    public void ReflectTypes_FiltersStructsAndEnums()
+    {
+        var structResult = reflect.Reflect(new[] { "structs", "ConduitReflectStructFixture", string.Empty });
+        var enumResult = reflect.Reflect(new[] { "enums", "ConduitReflectEnumFixture", string.Empty });
+
+        Assert.That(structResult.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(structResult.return_value, Does.Contain("struct ConduitReflectStructFixture"));
+        Assert.That(enumResult.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(enumResult.return_value, Does.Contain("enum ConduitReflectEnumFixture"));
+    }
+
+    [Test]
+    public void ReflectTypes_FiltersInterfacesAndDelegates()
+    {
+        var interfaceResult = reflect.Reflect(new[] { "interfaces", "ConduitReflectInterfaceFixture", string.Empty });
+        var delegateResult = reflect.Reflect(new[] { "delegates", "ConduitReflectDelegateFixture", string.Empty });
+
+        Assert.That(interfaceResult.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(interfaceResult.return_value, Does.Contain("interface ConduitReflectInterfaceFixture"));
+        Assert.That(delegateResult.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(delegateResult.return_value, Does.Contain("delegate ConduitReflectDelegateFixture"));
+    }
+
+    [Test]
+    public void ReflectTypes_SearchesByDirectMemberName()
+    {
+        var result = reflect.Reflect(new[] { "types", string.Empty, "ReflectBaseOnlyMethod" });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("ConduitReflectBaseFixture"));
+        Assert.That(result.return_value, Does.Not.Contain("ConduitReflectDerivedFixture"));
+    }
+
+    [Test]
+    public void ReflectMembers_TargetTypeIncludesDeclaredAndInheritedMembers()
+    {
+        var result = reflect.Reflect(new[] { "members", "ConduitReflectDerivedFixture", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("Declared on ConduitReflectDerivedFixture"));
+        Assert.That(result.return_value, Does.Contain("private int derivedPrivateField"));
+        Assert.That(result.return_value, Does.Contain("public string DerivedProperty { get; private set; }"));
+        Assert.That(result.return_value, Does.Contain("public T GenericMethod<T>(ref int value, out string text, params T[] items)"));
+        Assert.That(result.return_value, Does.Contain("Inherited from ConduitReflectBaseFixture"));
+        Assert.That(result.return_value, Does.Contain("protected string ReflectBaseOnlyMethod()"));
+        Assert.That(result.return_value, Does.Contain("Interface ConduitReflectInterfaceFixture"));
+        Assert.That(result.return_value, Does.Not.Contain("System.Object"));
+    }
+
+    [Test]
+    public void ReflectMembers_WideSearchUsesDirectContainingTypeOnly()
+    {
+        var result = reflect.Reflect(new[] { "methods", string.Empty, "ReflectBaseOnlyMethod" });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("Containing Type: ConduitReflectBaseFixture"));
+        Assert.That(result.return_value, Does.Not.Contain("Containing Type: ConduitReflectDerivedFixture"));
+    }
+
+    [Test]
+    public void ReflectMembers_AmbiguousTypeReturnsCandidates()
+    {
+        var result = reflect.Reflect(new[] { "members", "ConduitReflectAmbiguous", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.AmbiguousTarget));
+        Assert.That(result.diagnostic, Does.Contain("Multiple types match"));
+        Assert.That(result.diagnostic, Does.Contain("ConduitReflectAmbiguousAlpha"));
+        Assert.That(result.diagnostic, Does.Contain("ConduitReflectAmbiguousBeta"));
+    }
+
+    [Test]
+    public void ReflectMembers_WideSearchTruncatesAtTwoHundredRows()
+    {
+        var result = reflect.Reflect(new[] { "members", string.Empty, "ToString" });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("showing 200"));
+        Assert.That(result.return_value, Does.Contain("Truncated:"));
+    }
+
+    [Test]
+    public void ReflectMembers_WideSearchRanksExactMatchesBeforeSubstringMatches()
+    {
+        var result = reflect.Reflect(new[] { "methods", string.Empty, "ReflectRank" });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        var exactIndex = result.return_value.IndexOf("public void ReflectRank()", StringComparison.Ordinal);
+        var looseIndex = result.return_value.IndexOf("public void PrefixReflectRankSuffix()", StringComparison.Ordinal);
+
+        Assert.That(exactIndex, Is.GreaterThanOrEqualTo(0), result.return_value);
+        Assert.That(looseIndex, Is.GreaterThanOrEqualTo(0), result.return_value);
+        Assert.That(exactIndex, Is.LessThan(looseIndex), result.return_value);
+    }
+
+    [Test]
+    public void ReflectMembers_NonTruncatedSearchOmitsHeaderAndNoMatchesAreExplicit()
+    {
+        var matched = reflect.Reflect(new[] { "methods", string.Empty, "ReflectBaseOnlyMethod" });
+        var noMatch = reflect.Reflect(new[] { "methods", string.Empty, "DefinitelyNotAConduitReflectMember" });
+
+        Assert.That(matched.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(matched.return_value, Does.Not.Contain("Members:"));
+        Assert.That(noMatch.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(noMatch.return_value, Is.EqualTo("No members matched."));
+    }
+
+    [Test]
+    public void ReflectTypes_NoMatchesAreExplicit()
+    {
+        var result = reflect.Reflect(new[] { "types", "DefinitelyNotAConduitReflectType", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Is.EqualTo("No types matched."));
+    }
+
+    [Test]
     public void ViewBurstAsmMatch_SelectsExactAndUniqueSubstringTargets()
     {
         var targets = CreateBurstAsmTargets();
@@ -2414,5 +2559,72 @@ sealed class ConduitNativeIndexableAsset : ScriptableObject
 }
 
 sealed class ConduitShowFormatAsset : ScriptableObject
+{
+}
+
+interface ConduitReflectInterfaceFixture
+{
+    void ReflectInterfaceMethod();
+}
+
+class ConduitReflectBaseFixture
+{
+    protected int baseProtectedField;
+
+    protected string ReflectBaseOnlyMethod() => string.Empty;
+
+    public virtual string ReflectVirtualMethod() => string.Empty;
+}
+
+sealed class ConduitReflectDerivedFixture : ConduitReflectBaseFixture, ConduitReflectInterfaceFixture
+{
+    int derivedPrivateField;
+
+    public string DerivedProperty { get; private set; } = string.Empty;
+
+    public ConduitReflectDerivedFixture() { }
+
+    static ConduitReflectDerivedFixture() { }
+
+    public T GenericMethod<T>(ref int value, out string text, params T[] items)
+    {
+        value += items.Length;
+        text = string.Empty;
+        return items.Length == 0 ? default! : items[0];
+    }
+
+    public override string ReflectVirtualMethod() => DerivedProperty;
+
+    public void ReflectInterfaceMethod() { }
+}
+
+struct ConduitReflectStructFixture
+{
+    public int Value;
+}
+
+enum ConduitReflectEnumFixture
+{
+    First,
+    Second,
+}
+
+delegate void ConduitReflectDelegateFixture();
+
+sealed class ConduitReflectExactRankFixture
+{
+    public void ReflectRank() { }
+}
+
+sealed class ConduitReflectLooseRankFixture
+{
+    public void PrefixReflectRankSuffix() { }
+}
+
+sealed class ConduitReflectAmbiguousAlpha
+{
+}
+
+sealed class ConduitReflectAmbiguousBeta
 {
 }

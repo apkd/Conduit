@@ -118,6 +118,7 @@ public sealed class ConduitMcpEndToEndTests
                      BridgeCommandTypes.DiscardScenes,
                      BridgeCommandTypes.RefreshAssetDatabase,
                      BridgeCommandTypes.ExecuteCode,
+                     BridgeCommandTypes.Reflect,
                  })
             Assert.That(tools, Has.Member(tool));
     }
@@ -295,6 +296,33 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(10)]
+    public async Task Reflect_ReturnsTypeAndMemberSummaries()
+    {
+        var typeResult = await client.CallToolAsync(
+            BridgeCommandTypes.Reflect,
+            Args(
+                ("projectPath", projectPath),
+                ("mode", "classes"),
+                ("type", "ConduitMcpEndToEndTests")
+            )
+        );
+
+        AssertSuccessful(typeResult, "class ConduitMcpEndToEndTests", "Members:");
+
+        var memberResult = await client.CallToolAsync(
+            BridgeCommandTypes.Reflect,
+            Args(
+                ("projectPath", projectPath),
+                ("mode", "methods"),
+                ("member", "Search_ReturnsSceneObjectMatchAndNoMatchFailure")
+            )
+        );
+
+        AssertSuccessful(memberResult, "Containing Type: ConduitMcpEndToEndTests", "Search_ReturnsSceneObjectMatchAndNoMatchFailure");
+    }
+
+    [Test]
+    [Order(11)]
     public async Task ToJson_ReturnsCameraJsonAndSceneGuidance()
     {
         OpenSampleScene();

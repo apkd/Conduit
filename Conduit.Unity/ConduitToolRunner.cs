@@ -67,6 +67,7 @@ namespace Conduit
             RefreshAssetDatabase,
             ExecuteCode,
             ViewBurstAsm,
+            Reflect,
             RunTestsEditMode,
             RunTestsPlayMode,
             RunTestsPlayer,
@@ -334,6 +335,9 @@ namespace Conduit
                     case ParsedBridgeCommandKind.ViewBurstAsm:
                         await ExecuteViewBurstAsmAsync(pendingOperation);
                         break;
+                    case ParsedBridgeCommandKind.Reflect:
+                        await ExecuteReflectAsync(pendingOperation);
+                        break;
                     case ParsedBridgeCommandKind.RunTestsEditMode:
                         StartTestRun(TestMode.EditMode, false, pendingOperation.test_filter);
                         break;
@@ -483,6 +487,7 @@ namespace Conduit
                 BridgeCommandTypes.RefreshAssetDatabase => new() { Kind = ParsedBridgeCommandKind.RefreshAssetDatabase },
                 BridgeCommandTypes.ExecuteCode          => new() { Kind = ParsedBridgeCommandKind.ExecuteCode },
                 BridgeCommandTypes.ViewBurstAsm         => new() { Kind = ParsedBridgeCommandKind.ViewBurstAsm },
+                BridgeCommandTypes.Reflect              => new() { Kind = ParsedBridgeCommandKind.Reflect },
                 BridgeCommandTypes.RunTestsEditMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsEditMode },
                 BridgeCommandTypes.RunTestsPlayMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayMode },
                 BridgeCommandTypes.RunTestsPlayer       => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayer },

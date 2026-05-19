@@ -78,6 +78,18 @@ namespace Conduit
             }
         }
 
+        static async Task ExecuteReflectAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(reflect.Reflect(operation.args));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
         static async Task ExecuteCommandAsync(Func<string> getResult)
         {
             try

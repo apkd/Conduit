@@ -17,6 +17,7 @@ namespace Conduit
             "help",
             BridgeCommandTypes.Play,
             BridgeCommandTypes.RefreshAssetDatabase,
+            BridgeCommandTypes.Reflect,
             "restart",
             BridgeCommandTypes.RunTestsEditMode,
             BridgeCommandTypes.RunTestsPlayer,

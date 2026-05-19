@@ -25,6 +25,12 @@ public sealed class UnityProjectOperations(
     internal static readonly string AssetDatabaseRefreshDiagnostic =
         "`AssetDatabase.Refresh` should not be called via `execute_code`. Use the `refresh_asset_database` tool instead.";
 
+    internal const string ReflectValidModes =
+        "types, classes, structs, enums, interfaces, delegates, members, fields, properties, methods, constructors";
+
+    internal static readonly string ReflectMissingModeDiagnostic =
+        $"`reflect` requires a mode. Valid modes: {ReflectValidModes}.";
+
     readonly ILogger<UnityProjectOperations> logger = loggerFactory.CreateLogger<UnityProjectOperations>();
 
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
@@ -188,6 +194,31 @@ public sealed class UnityProjectOperations(
             command: new() { CommandType = BridgeCommandTypes.ViewBurstAsm, Target = target },
             ct: ct
         );
+
+    public Task<ToolExecutionResult> ReflectAsync(string projectPath, string mode, string? type, string? member, CT ct)
+    {
+        if (ValidateReflectRequest(mode) is { } validationResult)
+            return Task.FromResult(validationResult);
+
+        return EnqueueAsync(
+            projectPath: projectPath,
+            command: new()
+            {
+                CommandType = BridgeCommandTypes.Reflect,
+                Args = [mode, type ?? string.Empty, member ?? string.Empty],
+            },
+            ct: ct
+        );
+    }
+
+    internal static ToolExecutionResult? ValidateReflectRequest(string mode)
+        => string.IsNullOrWhiteSpace(mode)
+            ? new()
+            {
+                Outcome = ToolOutcome.Exception,
+                Diagnostic = ReflectMissingModeDiagnostic,
+            }
+            : null;
 
     public Task<ToolExecutionResult> RunTestsEditModeAsync(string projectPath, string? testFilter, CT ct)
         => EnqueueAsync(

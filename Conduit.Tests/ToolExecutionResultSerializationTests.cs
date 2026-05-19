@@ -171,4 +171,20 @@ public sealed class ToolExecutionResultSerializationTests
         await Assert.That(payload).DoesNotContain("\"type\":\"\"");
         await Assert.That(payload).DoesNotContain("\"message\":\"\"");
     }
+
+    [Test]
+    public async Task BridgeCommandSerializesArgs()
+    {
+        var payload = JsonSerializer.Serialize(
+            new BridgeCommand
+            {
+                CommandType = BridgeCommandTypes.Reflect,
+                Args = ["methods", "ConduitReflectDerivedFixture", "GenericMethod"],
+            },
+            ConduitJsonContext.Default.BridgeCommand
+        );
+
+        await Assert.That(payload).Contains("\"command_type\":\"reflect\"");
+        await Assert.That(payload).Contains("\"args\":[\"methods\",\"ConduitReflectDerivedFixture\",\"GenericMethod\"]");
+    }
 }

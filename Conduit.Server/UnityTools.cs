@@ -132,7 +132,7 @@ public sealed class UnityTools
         $"""
         Universal Unity search tool that supports assets, prefabs, scene GameObjects, tests, and more.
         Prints each found object's name, asset path and ID.
-        After you find an object, you can use its ID with other commands, such as {CMD.Show}, {CMD.ToJson}, etc. 
+        After you find an object, you can use its ID with other commands, such as {CMD.Show}, {CMD.ToJson}, etc.
 
         Use the help command for more search tips.
         """
@@ -235,7 +235,7 @@ public sealed class UnityTools
     [Description(
         """
         Shows low-level optimization statistics and assembly for a Burst compilation target.
-        Use this for job optimization and for validating and debugging Burst compilation. 
+        Use this for job optimization and for validating and debugging Burst compilation.
         """
     )]
     public static Task<string> ViewBurstAsm(
@@ -245,6 +245,26 @@ public sealed class UnityTools
         UnityProjectOperations operations,
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, ct));
+
+    [McpServerTool(Name = CMD.Reflect)]
+    [Description(
+        """
+        Searches loaded assemblies for C# types and members.
+        You can search for types (based on either a `type` name query or a contained `member` name query)
+        or members (locally if you include the containing `type` name query or globally if you provide a `member` name query instead).
+        """
+    )]
+    public static Task<string> Reflect(
+        [Description("Project path")] string projectPath,
+        [Description("Search mode: types/classes/structs/enums/interfaces/delegates or members/fields/properties/methods/constructors")]
+        string mode,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Type name query. Use full type name or 'Full.Type.Name, AssemblyName' to disambiguate.")]
+        string? type = null,
+        [Description("Member name query")]
+        string? member = null
+    ) => ToPlainTextToolResponseAsync(operations.ReflectAsync(projectPath, mode, type, member, ct));
 
     [McpServerTool(Name = CMD.RunTestsEditMode)]
     [Description("Runs the edit mode test suite")]

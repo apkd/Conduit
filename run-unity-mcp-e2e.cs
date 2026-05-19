@@ -9,7 +9,7 @@ var repoRoot = ResolveRepoRoot(options.RepoRoot);
 var projectPath = ResolveProjectPath(repoRoot, options.ProjectPath);
 var resultsPath = ResolveResultsPath(options.ResultsPath);
 var logPath = ResolveLogPath(options.LogPath);
-var filter = string.IsNullOrWhiteSpace(options.Filter) ? "Conduit.ConduitMcpEndToEndTests" : options.Filter!;
+var filter = string.IsNullOrWhiteSpace(options.Filter) ? "ConduitMcpEndToEndTests" : options.Filter!;
 var unityTimeout = options.Timeout ?? TimeSpan.FromMinutes(10);
 
 try
@@ -504,7 +504,7 @@ static void PrintUsage()
     builder.AppendLine("  --repo <path>       Repository root. Defaults to walking up from the current directory.");
     builder.AppendLine("  --project <path>    Unity project path. Defaults to ../ConduitPlayground.");
     builder.AppendLine("  --unity <path>      Unity.exe path. Defaults to the version from ProjectVersion.txt.");
-    builder.AppendLine("  --filter <name>     Test filter. Defaults to Conduit.ConduitMcpEndToEndTests.");
+    builder.AppendLine("  --filter <name>     Test filter. Defaults to ConduitMcpEndToEndTests.");
     builder.AppendLine("  --results <path>    XML report path. Defaults to C:/Users/apk/AppData/LocalLow/apkd/UnityConduit_Unity/TestResults.xml.");
     builder.AppendLine("  --log <path>        Unity log path. Defaults to the platform temp directory.");
     builder.AppendLine("  --timeout <span>    Unity test timeout. Defaults to 00:10:00.");

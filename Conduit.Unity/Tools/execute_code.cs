@@ -58,8 +58,8 @@ namespace Conduit
                 var sourceFilePath = Path.Combine(snippetRootPath, sourceFileName);
                 var assemblyPath = Path.Combine(snippetRootPath, snippetArtifactId + ".dll");
 
-                Directory.CreateDirectory(snippetRootPath);
-                File.WriteAllText(
+                WriteSnippetSource(
+                    snippetRootPath,
                     sourceFilePath,
                     BuildSnippetSource(typeName, displaySourcePath, parsedSnippet)
                 );
@@ -74,7 +74,8 @@ namespace Conduit
                 if (TryInferMissingNamespaces(projectPath, snippetRootPath, parsedSnippet, compilerMessages, out var retryNamespaces))
                 {
                     inferredNamespaces = retryNamespaces;
-                    File.WriteAllText(
+                    WriteSnippetSource(
+                        snippetRootPath,
                         sourceFilePath,
                         BuildSnippetSource(typeName, displaySourcePath, parsedSnippet, retryNamespaces)
                     );
@@ -137,7 +138,6 @@ namespace Conduit
             }
 
             var projectPath = GetCurrentProjectPath();
-            DeleteDirectoryIfPresent(GetSnippetRootPath(projectPath));
             DeleteDirectoryIfPresent(Path.Combine(projectPath, "Library", "Conduit", "ExecuteCode"));
             DeleteDirectoryIfPresent(Path.Combine(projectPath, "Library", "Conduit", "ExecuteSnippet"));
         }
@@ -150,6 +150,12 @@ namespace Conduit
                     Directory.Delete(directoryPath, true);
             }
             catch { }
+        }
+
+        static void WriteSnippetSource(string snippetRootPath, string sourceFilePath, string source)
+        {
+            Directory.CreateDirectory(snippetRootPath);
+            File.WriteAllText(sourceFilePath, source);
         }
 
         static async Task<CompilerMessage[]> CompileAssemblyAsync(

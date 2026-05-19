@@ -133,6 +133,7 @@ tools.get_dependencies.approval_mode = "approve"
 tools.help.approval_mode = "approve"
 tools.play.approval_mode = "approve"
 tools.refresh_asset_database.approval_mode = "approve"
+tools.reflect.approval_mode = "approve"
 tools.restart.approval_mode = "approve"
 tools.run_tests_editmode.approval_mode = "approve"
 tools.run_tests_player.approval_mode = "approve"
@@ -916,6 +917,7 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 - ***`status`***: project and MCP connection state
 - ***`refresh_asset_database`***: imports modified assets, recompiles code
 - ***`execute_code`***: runs ad hoc C# code
+- ***`reflect`***: searches loaded C# types and members
 - ***`restart`***: starts or restarts Unity Editor
 
 #### Object search, reading, and editing:

@@ -146,10 +146,24 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
-    public async Task ViewBurstAsmCommandPolicy_IsRegistered()
+    public async Task BridgeCommandPolicies_AreRegistered()
     {
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ViewBurstAsm)).IsEqualTo(BridgeCommandKind.ViewBurstAsm);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(5));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.Reflect)).IsEqualTo(BridgeCommandKind.Reflect);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.Reflect)).IsEqualTo(TimeSpan.FromSeconds(90));
+    }
+
+    [Test]
+    public async Task ReflectValidation_RejectsMissingModeBeforeQueueingUnityWork()
+    {
+        var result = UnityProjectOperations.ValidateReflectRequest(" ");
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(result!.Outcome).IsEqualTo(ToolOutcome.Exception);
+        await Assert.That(result.Diagnostic).IsEqualTo(UnityProjectOperations.ReflectMissingModeDiagnostic);
+        await Assert.That(result.Diagnostic).Contains("interfaces");
+        await Assert.That(result.Diagnostic).Contains("delegates");
     }
 
     [Test]
