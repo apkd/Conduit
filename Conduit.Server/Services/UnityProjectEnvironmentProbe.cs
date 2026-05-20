@@ -370,6 +370,8 @@ sealed partial class UnityProjectEnvironmentProbe
             using var reader = new StreamReader(stream);
             var errors = ZString.CreateStringBuilder();
             var warnings = ZString.CreateStringBuilder();
+            var seenErrors = new HashSet<string>(StringComparer.Ordinal);
+            var seenWarnings = new HashSet<string>(StringComparer.Ordinal);
             var errorCount = 0;
             var warningCount = 0;
             var inBlock = false;
@@ -382,7 +384,16 @@ sealed partial class UnityProjectEnvironmentProbe
                     if (line.Contains("*** Tundra build", StringComparison.Ordinal))
                     {
                         sawTundraBlock = true;
-                        ResetCurrentBlock(ref errors, ref warnings, ref inBlock, ref burstBlockActive, ref errorCount, ref warningCount);
+                        ResetCurrentBlock(
+                            ref errors,
+                            ref warnings,
+                            seenErrors,
+                            seenWarnings,
+                            ref inBlock,
+                            ref burstBlockActive,
+                            ref errorCount,
+                            ref warningCount
+                        );
                         continue;
                     }
 
@@ -390,7 +401,16 @@ sealed partial class UnityProjectEnvironmentProbe
                         && (line.Contains("## Script Compilation Error", StringComparison.Ordinal)
                             || line.Contains("## Script Compilation Warning", StringComparison.Ordinal)))
                     {
-                        ResetCurrentBlock(ref errors, ref warnings, ref inBlock, ref burstBlockActive, ref errorCount, ref warningCount);
+                        ResetCurrentBlock(
+                            ref errors,
+                            ref warnings,
+                            seenErrors,
+                            seenWarnings,
+                            ref inBlock,
+                            ref burstBlockActive,
+                            ref errorCount,
+                            ref warningCount
+                        );
                         continue;
                     }
 
@@ -410,24 +430,20 @@ sealed partial class UnityProjectEnvironmentProbe
 
                     if (line.Contains(": error ", StringComparison.Ordinal))
                     {
-                        errors.AppendLine(line);
-                        errorCount++;
+                        AppendUniqueDiagnostic(ref errors, seenErrors, line, ref errorCount);
                         continue;
                     }
 
                     if (line.Contains(": warning ", StringComparison.Ordinal))
                     {
-                        warnings.AppendLine(line);
-                        warningCount++;
+                        AppendUniqueDiagnostic(ref warnings, seenWarnings, line, ref warningCount);
                         continue;
                     }
 
                     if (!IsBurstCompilationError(line))
                         continue;
 
-                    errors.AppendLine(line);
-                    errorCount++;
-                    burstBlockActive = true;
+                    burstBlockActive = AppendUniqueDiagnostic(ref errors, seenErrors, line, ref errorCount);
                 }
 
                 if (!inBlock)
@@ -455,6 +471,8 @@ sealed partial class UnityProjectEnvironmentProbe
     static void ResetCurrentBlock(
         ref Utf16ValueStringBuilder errors,
         ref Utf16ValueStringBuilder warnings,
+        HashSet<string> seenErrors,
+        HashSet<string> seenWarnings,
         ref bool inBlock,
         ref bool burstBlockActive,
         ref int errorCount,
@@ -469,8 +487,25 @@ sealed partial class UnityProjectEnvironmentProbe
         if (warnings.Length > 0)
             warnings.Remove(0, warnings.Length);
 
+        seenErrors.Clear();
+        seenWarnings.Clear();
         errorCount = 0;
         warningCount = 0;
+    }
+
+    static bool AppendUniqueDiagnostic(
+        ref Utf16ValueStringBuilder builder,
+        HashSet<string> seenDiagnostics,
+        string line,
+        ref int count
+    )
+    {
+        if (!seenDiagnostics.Add(line))
+            return false;
+
+        builder.AppendLine(line);
+        count++;
+        return true;
     }
 
     static bool IsBurstCompilationError(string line) =>

@@ -97,6 +97,69 @@ public sealed class UnityProjectEnvironmentProbeTests
             );
     }
 
+    [Test]
+    public async Task ReadCompilationDiagnosticsDeduplicatesRepeatedErrorsInLatestBlock()
+    {
+        const string duplicateError = @"Assets\ConduitManagedFieldBurstJob.cs(4,8): error CS1029: #error: 'CONDUIT_INTENTIONAL_SAFE_MODE_TEST'";
+        const string distinctError = @"Assets\Other.cs(10,12): error CS0103: The name 'Missing' does not exist in the current context";
+        var logPath = CreateTempLog(
+            $$"""
+            ## Script Compilation Error
+            {{duplicateError}}
+            *** Tundra build failed (0.66 seconds), 2 items updated, 636 evaluated
+            ## Script Compilation Error
+            {{duplicateError}}
+            {{distinctError}}
+            {{duplicateError}}
+            """
+        );
+
+        try
+        {
+            var diagnostics = new UnityProjectEnvironmentProbe().ReadLatestCompilationDiagnostics(logPath);
+            var lines = Lines(diagnostics.ErrorText);
+
+            await Assert.That(diagnostics.ErrorCount).IsEqualTo(2);
+            await Assert.That(lines.Length).IsEqualTo(2);
+            await Assert.That(lines[0]).IsEqualTo(duplicateError);
+            await Assert.That(lines[1]).IsEqualTo(distinctError);
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
+    [Test]
+    public async Task ReadCompilationDiagnosticsDeduplicatesRepeatedWarningsInLatestBlock()
+    {
+        const string duplicateWarning = @"Assets\Foo.cs(2,16): warning CS0168: The variable 'exception' is declared but never used";
+        const string distinctWarning = @"Assets\Bar.cs(5,13): warning CS0219: The variable 'unused' is assigned but its value is never used";
+        var logPath = CreateTempLog(
+            $$"""
+            ## Script Compilation Warning
+            {{duplicateWarning}}
+            {{duplicateWarning}}
+            {{distinctWarning}}
+            """
+        );
+
+        try
+        {
+            var diagnostics = new UnityProjectEnvironmentProbe().ReadLatestCompilationDiagnostics(logPath);
+            var lines = Lines(diagnostics.WarningText);
+
+            await Assert.That(diagnostics.WarningCount).IsEqualTo(2);
+            await Assert.That(lines.Length).IsEqualTo(2);
+            await Assert.That(lines[0]).IsEqualTo(duplicateWarning);
+            await Assert.That(lines[1]).IsEqualTo(distinctWarning);
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
     static string CreateProjectPath()
         => Path.GetFullPath(Path.Combine(Path.GetTempPath(), $"conduit-project-{Guid.NewGuid():N}"));
 
@@ -113,6 +176,22 @@ public sealed class UnityProjectEnvironmentProbeTests
         return projectPath;
     }
 
+    static string CreateTempLog(string content)
+    {
+        var directoryPath = Path.Combine(Path.GetTempPath(), "Conduit.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directoryPath);
+        var logPath = Path.Combine(directoryPath, "Editor.log");
+        File.WriteAllText(logPath, content);
+        return logPath;
+    }
+
+    static void DeleteTempLog(string logPath)
+    {
+        var directoryPath = Path.GetDirectoryName(logPath);
+        if (!string.IsNullOrWhiteSpace(directoryPath) && Directory.Exists(directoryPath))
+            Directory.Delete(directoryPath, recursive: true);
+    }
+
     static string? ReplaceTokens(string? value, string projectPath, string legacyLogPath, string absoluteLogPath)
     {
         if (value is null)
@@ -124,4 +203,7 @@ public sealed class UnityProjectEnvironmentProbeTests
             .Replace("{absolute}", absoluteLogPath, StringComparison.Ordinal)
             .Replace('/', Path.DirectorySeparatorChar);
     }
+
+    static string[] Lines(string? text) =>
+        text?.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? [];
 }
