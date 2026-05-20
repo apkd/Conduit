@@ -153,6 +153,7 @@ jobs:
         run: |
           sudo apt-get update -o Acquire::Retries=10
           sudo apt-get install -y --no-install-recommends binutils clang zlib1g-dev musl-tools
+          clang --version
           musl-gcc --version
 
       - name: Build server binary
