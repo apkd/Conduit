@@ -18,6 +18,7 @@ public sealed class ConduitSetupWizardTests
         tempRoot = Path.Combine(projectRoot, "Temp", "ConduitSetupWizardTests");
         Directory.CreateDirectory(tempRoot);
         ConduitSetupWizardUtility.ResetInstallStateForTests();
+        ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ => "0.3.12";
     }
 
     [Test]
@@ -130,8 +131,14 @@ public sealed class ConduitSetupWizardTests
         var configPath = ConduitSetupWizardUtility.GetConfigPath(spec);
         Assert.That(configPath, Is.Not.Null);
 
+        var installedExecutablePath = Application.platform == RuntimePlatform.WindowsEditor
+            ? Path.Combine(projectRoot, "Conduit", "conduit.exe")
+            : Path.Combine(projectRoot, "Conduit", "conduit");
         var missingExecutablePath = Path.Combine(tempRoot, "missing-conduit.exe");
+        using var installedScope = new FileScope(installedExecutablePath);
         using var scope = new FileScope(configPath!);
+        if (File.Exists(installedExecutablePath))
+            File.Delete(installedExecutablePath);
         Directory.CreateDirectory(Path.GetDirectoryName(configPath!)!);
         File.WriteAllText(
             configPath!,
@@ -211,6 +218,19 @@ public sealed class ConduitSetupWizardTests
 
         Assert.That(button.State, Is.EqualTo(ConduitSetupWizardUtility.ActionState.Success));
         Assert.That(button.Label, Is.EqualTo("MCP Server Downloaded"));
+    }
+
+    [Test]
+    public void BrokenExecutableVersionTurnsDownloadIntoReinstall()
+    {
+        var executablePath = CreateExecutable(Application.platform == RuntimePlatform.WindowsEditor ? "conduit.exe" : "conduit");
+        ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ => null;
+
+        var button = ConduitSetupWizardUtility.EvaluateDownloadButton(executablePath, string.Empty, false, false);
+
+        Assert.That(button.State, Is.EqualTo(ConduitSetupWizardUtility.ActionState.Enabled));
+        Assert.That(button.Label, Is.EqualTo("Reinstall MCP Server"));
+        Assert.That(button.Hint, Does.Contain("could not report its version"));
     }
 
     [Test]

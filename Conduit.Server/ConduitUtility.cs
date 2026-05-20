@@ -8,43 +8,89 @@ namespace Conduit;
 public static partial class ConduitUtility
 {
     const string TargetInvocationDiagnostic = "Exception has been thrown by the target of an invocation.";
+    const string PipeNamePrefix = "unity-conduit-";
+    const int PipeNameMaxLength = 64;
+    const int PipeNamePrefixLength = 14;
+    const int PipeNameLegacySlugMaxLength = PipeNameMaxLength - PipeNamePrefixLength;
+    const int PipeNameSlugMaxLength = 32;
+    const ulong PipeNameHashOffset = 14695981039346656037UL;
+    const ulong PipeNameHashPrime = 1099511628211UL;
 
     public static string GetPipeName(string? projectPath)
     {
         if (ProjectPathNormalizer.Normalize(projectPath) is not { Length: > 0 } normalizedPath)
             return "unity-conduit-unknown";
 
-        var buffer = new char[normalizedPath.Length];
-        var count = 0;
+        var slug = CreatePipeNameSlug(normalizedPath, PipeNameLegacySlugMaxLength + 1);
+        if (slug.Length is > 0 and <= PipeNameLegacySlugMaxLength)
+            return PipeNamePrefix + slug;
+
+        if (slug.Length > PipeNameSlugMaxLength)
+            slug = TrimTrailingSeparator(slug[..PipeNameSlugMaxLength]);
+
+        var hash = CreatePipeNameHash(normalizedPath);
+        return slug.Length == 0
+            ? PipeNamePrefix + hash
+            : $"{PipeNamePrefix}{slug}-{hash}";
+    }
+
+    static string CreatePipeNameSlug(string normalizedPath, int maxLength)
+    {
+        var builder = new StringBuilder(Math.Min(normalizedPath.Length, maxLength));
         var previousWasSeparator = false;
 
         foreach (var character in normalizedPath)
         {
-            if (char.IsLetterOrDigit(character))
+            if (builder.Length >= maxLength)
+                break;
+
+            if (IsAsciiLetterOrDigit(character))
             {
-                buffer[count++] = char.ToLowerInvariant(character);
+                builder.Append(ToLowerAscii(character));
                 previousWasSeparator = false;
                 continue;
             }
 
-            if (previousWasSeparator)
+            if (previousWasSeparator || builder.Length == 0)
                 continue;
 
-            buffer[count++] = '_';
+            builder.Append('_');
             previousWasSeparator = true;
         }
 
-        var start = 0;
-        while (start < count && buffer[start] == '_')
-            start++;
+        if (builder.Length > 0 && builder[^1] == '_')
+            builder.Length--;
 
-        while (count > start && buffer[count - 1] == '_')
-            count--;
-
-        return count == start
-            ? "unity-conduit-unknown"
-            : $"unity-conduit-{new string(buffer, start, count - start)}";
+        return builder.ToString();
     }
+
+    static string CreatePipeNameHash(string normalizedPath)
+    {
+        var hash = PipeNameHashOffset;
+
+        foreach (var character in normalizedPath)
+        {
+            hash ^= ToLowerAscii(character);
+            hash *= PipeNameHashPrime;
+        }
+
+        return hash.ToString("x16");
+    }
+
+    static string TrimTrailingSeparator(string value) =>
+        value.Length > 0 && value[^1] == '_'
+            ? value[..^1]
+            : value;
+
+    static bool IsAsciiLetterOrDigit(char character) =>
+        character is >= 'a' and <= 'z'
+        || character is >= 'A' and <= 'Z'
+        || character is >= '0' and <= '9';
+
+    static char ToLowerAscii(char character) =>
+        character is >= 'A' and <= 'Z'
+            ? (char)(character + ('a' - 'A'))
+            : character;
 
     /// <summary>
     /// Creates a compact bridge-safe request identifier.

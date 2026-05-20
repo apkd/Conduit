@@ -131,9 +131,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            rid: linux-x64
+            rid: linux-musl-x64
             publish_name: conduit-linux-x64
-            publish_source: Conduit.Server/publish/linux-x64/conduit
+            publish_source: Conduit.Server/publish/linux-musl-x64/conduit
             publish_target: conduit-linux-x64
           - os: windows-latest
             rid: win-x64
@@ -148,6 +148,13 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Install Linux NativeAOT prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -o Acquire::Retries=10
+          sudo apt-get install -y --no-install-recommends binutils clang zlib1g-dev musl-tools
+          musl-gcc --version
+
       - name: Build server binary
         shell: bash
         run: |
@@ -161,6 +168,19 @@ jobs:
             -p:Product="${{ github.event.repository.name }}"
           mkdir -p "$RUNNER_TEMP/release"
           cp "${{ matrix.publish_source }}" "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
+
+          if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
+            chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
+            "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
+            if readelf -l "$RUNNER_TEMP/release/${{ matrix.publish_target }}" | grep -q 'INTERP'; then
+              echo "Linux release artifact must not depend on a dynamic ELF interpreter."
+              exit 1
+            fi
+            docker run --rm \
+              -v "$RUNNER_TEMP/release:/release:ro" \
+              nixos/nix:latest \
+              /release/${{ matrix.publish_target }} --version
+          fi
 
       - uses: actions/upload-artifact@v6
         with:
