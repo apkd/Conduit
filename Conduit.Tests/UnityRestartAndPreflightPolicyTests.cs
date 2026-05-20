@@ -19,6 +19,241 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task NixOsLaunchPrefersUnityHubFhsEnvWrapper()
+    {
+        var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
+        var projectPath = Path.Combine(Path.GetTempPath(), "project");
+        var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
+        const string unityHubPath = "/run/current-system/sw/bin/unityhub";
+        const string unityHubFhsEnvPath = "/nix/store/hash-unityhub-fhs-env-3.16.2/bin/unityhub-fhs-env";
+        const string steamRunPath = "/run/current-system/sw/bin/steam-run";
+
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            editorPath,
+            projectPath,
+            logPath,
+            isLinux: true,
+            isNixOs: true,
+            findExecutableOnPath: FindExecutableOnPath,
+            readTextFile: static path => path == unityHubPath
+                ? $"exec -a \"unityhub\" \"{unityHubFhsEnvPath}\" /nix/store/hash-unityhub-bin \"$@\""
+                : null
+        );
+
+        await Assert.That(startInfo.FileName).IsEqualTo(unityHubFhsEnvPath);
+        await Assert.That(startInfo.Arguments).StartsWith($"\"{editorPath}\" ");
+        await Assert.That(startInfo.Arguments).Contains($"-projectPath \"{projectPath}\"");
+        await Assert.That(startInfo.Arguments).Contains($"-logFile \"{logPath}\"");
+        await Assert.That(startInfo.UseShellExecute).IsFalse();
+
+        static string? FindExecutableOnPath(string executableName) =>
+            executableName switch
+            {
+                "unityhub" => unityHubPath,
+                "steam-run" => steamRunPath,
+                _ => null,
+            };
+    }
+
+    [Test]
+    public async Task NixOsLaunchFallsBackToSteamRunWhenUnityHubFhsEnvIsUnavailable()
+    {
+        var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
+        var projectPath = Path.Combine(Path.GetTempPath(), "project");
+        var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
+        const string steamRunPath = "/run/current-system/sw/bin/steam-run";
+
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            editorPath,
+            projectPath,
+            logPath,
+            isLinux: true,
+            isNixOs: true,
+            findExecutableOnPath: static executableName => executableName == "steam-run" ? steamRunPath : null,
+            readTextFile: static _ => null
+        );
+
+        await Assert.That(startInfo.FileName).IsEqualTo(steamRunPath);
+        await Assert.That(startInfo.Arguments).StartsWith($"\"{editorPath}\" ");
+        await Assert.That(startInfo.Arguments).Contains($"-projectPath \"{projectPath}\"");
+        await Assert.That(startInfo.Arguments).Contains($"-logFile \"{logPath}\"");
+        await Assert.That(startInfo.UseShellExecute).IsFalse();
+    }
+
+    [Test]
+    public async Task NonNixLinuxLaunchUsesEditorDirectlyWithExplicitEnvironment()
+    {
+        var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
+        var projectPath = Path.Combine(Path.GetTempPath(), "project");
+        var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
+
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            editorPath,
+            projectPath,
+            logPath,
+            isLinux: true,
+            isNixOs: false,
+            findExecutableOnPath: static _ => "/run/current-system/sw/bin/steam-run",
+            readTextFile: static _ => null
+        );
+
+        await Assert.That(startInfo.FileName).IsEqualTo(editorPath);
+        await Assert.That(startInfo.Arguments).IsEqualTo(UnityEditorProcessController.BuildLaunchArguments(projectPath, logPath));
+        await Assert.That(startInfo.UseShellExecute).IsFalse();
+    }
+
+    [Test]
+    public async Task NonLinuxLaunchUsesEditorDirectlyThroughShellExecute()
+    {
+        var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
+        var projectPath = Path.Combine(Path.GetTempPath(), "project");
+        var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
+
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            editorPath,
+            projectPath,
+            logPath,
+            isLinux: false,
+            isNixOs: false,
+            findExecutableOnPath: static _ => "/run/current-system/sw/bin/steam-run",
+            readTextFile: static _ => null
+        );
+
+        await Assert.That(startInfo.FileName).IsEqualTo(editorPath);
+        await Assert.That(startInfo.Arguments).IsEqualTo(UnityEditorProcessController.BuildLaunchArguments(projectPath, logPath));
+        await Assert.That(startInfo.UseShellExecute).IsTrue();
+    }
+
+    [Test]
+    public async Task GraphicalSessionEnvironmentDoesNotOverwriteExistingValues()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment["DISPLAY"] = ":99";
+        startInfo.Environment["XDG_RUNTIME_DIR"] = "/tmp/conduit-existing-runtime";
+        startInfo.Environment["WAYLAND_DISPLAY"] = "wayland-existing";
+        startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/tmp/conduit-existing-bus";
+        startInfo.Environment["XAUTHORITY"] = "/tmp/conduit-existing-xauthority";
+
+        UnityEditorProcessController.ApplyGraphicalSessionEnvironment(startInfo);
+
+        await Assert.That(startInfo.Environment["DISPLAY"]).IsEqualTo(":99");
+        await Assert.That(startInfo.Environment["XDG_RUNTIME_DIR"]).IsEqualTo("/tmp/conduit-existing-runtime");
+        await Assert.That(startInfo.Environment["WAYLAND_DISPLAY"]).IsEqualTo("wayland-existing");
+        await Assert.That(startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"]).IsEqualTo("unix:path=/tmp/conduit-existing-bus");
+        await Assert.That(startInfo.Environment["XAUTHORITY"]).IsEqualTo("/tmp/conduit-existing-xauthority");
+    }
+
+    [Test]
+    public async Task RuntimeDirectoryResolverUsesConfiguredDirectoryFirst()
+    {
+        var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
+        var configuredPath = Path.Combine(runUserRootPath, "configured");
+        var currentUserPath = Path.Combine(runUserRootPath, "1000");
+        Directory.CreateDirectory(configuredPath);
+        Directory.CreateDirectory(currentUserPath);
+        try
+        {
+            await Assert.That(UnityEditorProcessController.ResolveRuntimeDirectoryPath(configuredPath, "1000", runUserRootPath))
+                .IsEqualTo(configuredPath);
+        }
+        finally
+        {
+            Directory.Delete(runUserRootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task RuntimeDirectoryResolverFallsBackToCurrentUserDirectory()
+    {
+        var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
+        var currentUserPath = Path.Combine(runUserRootPath, "1000");
+        Directory.CreateDirectory(currentUserPath);
+        try
+        {
+            await Assert.That(UnityEditorProcessController.ResolveRuntimeDirectoryPath(configuredPath: null, "1000", runUserRootPath))
+                .IsEqualTo(currentUserPath);
+        }
+        finally
+        {
+            Directory.Delete(runUserRootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task RuntimeDirectoryResolverDoesNotUseOtherUserDirectory()
+    {
+        var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(runUserRootPath, "2000"));
+        try
+        {
+            await Assert.That(UnityEditorProcessController.ResolveRuntimeDirectoryPath(configuredPath: null, "1000", runUserRootPath))
+                .IsNull();
+        }
+        finally
+        {
+            Directory.Delete(runUserRootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task X11DisplayResolverUsesLowestNumericSocketName()
+    {
+        var socketDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-x11-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(socketDirectoryPath);
+        try
+        {
+            File.WriteAllText(Path.Combine(socketDirectoryPath, "X2"), string.Empty);
+            File.WriteAllText(Path.Combine(socketDirectoryPath, "X0_"), string.Empty);
+            File.WriteAllText(Path.Combine(socketDirectoryPath, "X0"), string.Empty);
+
+            await Assert.That(UnityEditorProcessController.ResolveX11Display(socketDirectoryPath)).IsEqualTo(":0");
+        }
+        finally
+        {
+            Directory.Delete(socketDirectoryPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task WaylandDisplayResolverUsesFirstSocketName()
+    {
+        var runtimeDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(runtimeDirectoryPath);
+        try
+        {
+            File.WriteAllText(Path.Combine(runtimeDirectoryPath, "wayland-2"), string.Empty);
+            File.WriteAllText(Path.Combine(runtimeDirectoryPath, "wayland-1"), string.Empty);
+
+            await Assert.That(UnityEditorProcessController.ResolveWaylandDisplay(runtimeDirectoryPath)).IsEqualTo("wayland-1");
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectoryPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task SessionBusResolverUsesRuntimeBusPath()
+    {
+        var runtimeDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(runtimeDirectoryPath);
+        try
+        {
+            var busPath = Path.Combine(runtimeDirectoryPath, "bus");
+            File.WriteAllText(busPath, string.Empty);
+
+            await Assert.That(UnityEditorProcessController.ResolveSessionBusAddress(runtimeDirectoryPath)).IsEqualTo($"unix:path={busPath}");
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectoryPath, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task PrepareRestartLogPathClearsExistingLogContent()
     {
         var projectPath = CreateTempProject();

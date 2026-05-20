@@ -74,14 +74,10 @@ public sealed class UnityEditorProcessController(
             PrepareRestartLogPath(restartLogPath);
 
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
-            restartedProcess = Process.Start(
-                new ProcessStartInfo(editorPath)
-                {
-                    Arguments = BuildLaunchArguments(platformProjectPath, restartLogPath),
-                    WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
-                    UseShellExecute = true,
-                }
-            );
+            var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
+            if (!string.Equals(startInfo.FileName, editorPath, StringComparison.Ordinal))
+                builder.AppendLine($"Launching Unity through: {startInfo.FileName}");
+            restartedProcess = Process.Start(startInfo);
 
             if (restartedProcess == null)
             {
@@ -193,6 +189,301 @@ public sealed class UnityEditorProcessController(
 
     internal static string BuildLaunchArguments(string platformProjectPath, string logPath) =>
         $"-projectPath \"{platformProjectPath}\" -logFile \"{logPath}\"";
+
+    internal static ProcessStartInfo CreateLaunchStartInfo(string editorPath, string platformProjectPath, string restartLogPath)
+        => CreateLaunchStartInfo(
+            editorPath,
+            platformProjectPath,
+            restartLogPath,
+            OperatingSystem.IsLinux(),
+            File.Exists("/etc/NIXOS"),
+            FindExecutableOnPath,
+            TryReadAllText
+        );
+
+    internal static ProcessStartInfo CreateLaunchStartInfo(
+        string editorPath,
+        string platformProjectPath,
+        string restartLogPath,
+        bool isLinux,
+        bool isNixOs,
+        Func<string, string?> findExecutableOnPath,
+        Func<string, string?> readTextFile
+    )
+    {
+        var launchArguments = BuildLaunchArguments(platformProjectPath, restartLogPath);
+        if (isLinux && isNixOs && ResolveNixOsUnityWrapper(findExecutableOnPath, readTextFile) is { Length: > 0 } wrapperPath)
+        {
+            var wrapperStartInfo = new ProcessStartInfo(wrapperPath)
+            {
+                Arguments = $"{QuoteArgument(editorPath)} {launchArguments}",
+                WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
+                UseShellExecute = false,
+            };
+
+            ApplyGraphicalSessionEnvironment(wrapperStartInfo);
+            return wrapperStartInfo;
+        }
+
+        var startInfo = new ProcessStartInfo(editorPath)
+        {
+            Arguments = launchArguments,
+            WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
+            UseShellExecute = !isLinux,
+        };
+
+        if (isLinux)
+            ApplyGraphicalSessionEnvironment(startInfo);
+
+        return startInfo;
+    }
+
+    static string? ResolveNixOsUnityWrapper(Func<string, string?> findExecutableOnPath, Func<string, string?> readTextFile)
+    {
+        if (FindUnityHubFhsEnv(findExecutableOnPath, readTextFile) is { Length: > 0 } unityHubFhsEnvPath)
+            return unityHubFhsEnvPath;
+
+        return findExecutableOnPath("steam-run");
+    }
+
+    static string? FindUnityHubFhsEnv(Func<string, string?> findExecutableOnPath, Func<string, string?> readTextFile)
+    {
+        if (findExecutableOnPath("unityhub-fhs-env") is { Length: > 0 } directPath)
+            return directPath;
+
+        var unityHubPath = findExecutableOnPath("unityhub");
+        if (string.IsNullOrWhiteSpace(unityHubPath))
+            return null;
+
+        return TryExtractUnityHubFhsEnvPath(readTextFile(unityHubPath));
+    }
+
+    internal static string? TryExtractUnityHubFhsEnvPath(string? wrapperText)
+    {
+        if (string.IsNullOrWhiteSpace(wrapperText))
+            return null;
+
+        const string marker = "unityhub-fhs-env";
+        var searchStart = 0;
+        while (true)
+        {
+            var markerIndex = wrapperText.IndexOf(marker, searchStart, StringComparison.Ordinal);
+            if (markerIndex < 0)
+                return null;
+
+            var start = markerIndex;
+            while (start > 0 && !IsShellTokenBoundary(wrapperText[start - 1]))
+                start--;
+
+            var end = markerIndex + marker.Length;
+            while (end < wrapperText.Length && !IsShellTokenBoundary(wrapperText[end]))
+                end++;
+
+            var candidate = wrapperText[start..end];
+            if (candidate.EndsWith("/bin/unityhub-fhs-env", StringComparison.Ordinal)
+                || string.Equals(Path.GetFileName(candidate), "unityhub-fhs-env", StringComparison.Ordinal))
+                return candidate;
+
+            searchStart = markerIndex + marker.Length;
+        }
+    }
+
+    static bool IsShellTokenBoundary(char character) =>
+        char.IsWhiteSpace(character) || character is '"' or '\'';
+
+    static string? FindExecutableOnPath(string executableName)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var candidatePath = Path.Combine(directory, executableName);
+            if (File.Exists(candidatePath))
+                return candidatePath;
+        }
+
+        return null;
+    }
+
+    static string? TryReadAllText(string path)
+    {
+        try
+        {
+            return File.ReadAllText(path);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static void ApplyGraphicalSessionEnvironment(ProcessStartInfo startInfo)
+    {
+        var runtimeDirectoryPath = ResolveRuntimeDirectoryPath();
+
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_RUNTIME_DIR", runtimeDirectoryPath);
+        SetEnvironmentVariableIfMissing(startInfo, "DISPLAY", ResolveX11Display("/tmp/.X11-unix"));
+        SetEnvironmentVariableIfMissing(startInfo, "WAYLAND_DISPLAY", ResolveWaylandDisplay(runtimeDirectoryPath));
+        SetEnvironmentVariableIfMissing(startInfo, "DBUS_SESSION_BUS_ADDRESS", ResolveSessionBusAddress(runtimeDirectoryPath));
+        SetEnvironmentVariableIfMissing(startInfo, "XAUTHORITY", ResolveXAuthorityPath());
+    }
+
+    static void SetEnvironmentVariableIfMissing(ProcessStartInfo startInfo, string variableName, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+
+        if (startInfo.Environment.TryGetValue(variableName, out var existingValue) && !string.IsNullOrWhiteSpace(existingValue))
+            return;
+
+        startInfo.Environment[variableName] = value;
+    }
+
+    static string? ResolveRuntimeDirectoryPath()
+        => ResolveRuntimeDirectoryPath(
+            Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR"),
+            ResolveCurrentUserId(),
+            "/run/user"
+        );
+
+    internal static string? ResolveRuntimeDirectoryPath(string? configuredPath, string? currentUserId, string runUserRootPath)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath) && Directory.Exists(configuredPath))
+            return configuredPath;
+
+        if (string.IsNullOrWhiteSpace(currentUserId))
+            return null;
+
+        var runtimeDirectoryPath = Path.Combine(runUserRootPath, currentUserId);
+        return Directory.Exists(runtimeDirectoryPath) ? runtimeDirectoryPath : null;
+    }
+
+    static string? ResolveCurrentUserId()
+    {
+        if (TryReadCurrentUserIdFromProcStatus() is { Length: > 0 } procStatusUserId)
+            return procStatusUserId;
+
+        var environmentUserId = Environment.GetEnvironmentVariable("UID");
+        return IsUnixUserId(environmentUserId) ? environmentUserId : null;
+    }
+
+    static string? TryReadCurrentUserIdFromProcStatus()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/status"))
+            {
+                if (!line.StartsWith("Uid:", StringComparison.Ordinal))
+                    continue;
+
+                foreach (var value in line[4..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    if (IsUnixUserId(value))
+                        return value;
+                }
+
+                return null;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    static bool IsUnixUserId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        foreach (var character in value)
+        {
+            if (!char.IsAsciiDigit(character))
+                return false;
+        }
+
+        return true;
+    }
+
+    internal static string? ResolveX11Display(string socketDirectoryPath)
+    {
+        try
+        {
+            if (!Directory.Exists(socketDirectoryPath))
+                return null;
+
+            int? displayNumber = null;
+            foreach (var socketPath in Directory.EnumerateFileSystemEntries(socketDirectoryPath, "X*"))
+            {
+                var fileName = Path.GetFileName(socketPath);
+                if (fileName.Length <= 1 || !int.TryParse(fileName[1..], out var candidateNumber))
+                    continue;
+
+                if (displayNumber is null || candidateNumber < displayNumber)
+                    displayNumber = candidateNumber;
+            }
+
+            return displayNumber is { } resolvedDisplayNumber ? $":{resolvedDisplayNumber}" : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? ResolveWaylandDisplay(string? runtimeDirectoryPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(runtimeDirectoryPath) || !Directory.Exists(runtimeDirectoryPath))
+                return null;
+
+            string? displayName = null;
+            foreach (var socketPath in Directory.EnumerateFileSystemEntries(runtimeDirectoryPath, "wayland-*"))
+            {
+                var fileName = Path.GetFileName(socketPath);
+                if (string.IsNullOrWhiteSpace(fileName))
+                    continue;
+
+                if (displayName is null || string.CompareOrdinal(fileName, displayName) < 0)
+                    displayName = fileName;
+            }
+
+            return displayName;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? ResolveSessionBusAddress(string? runtimeDirectoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeDirectoryPath))
+            return null;
+
+        var busPath = Path.Combine(runtimeDirectoryPath, "bus");
+        return Path.Exists(busPath) ? $"unix:path={busPath}" : null;
+    }
+
+    static string? ResolveXAuthorityPath()
+    {
+        if (Environment.GetEnvironmentVariable("XAUTHORITY") is { Length: > 0 } configuredPath
+            && Path.Exists(configuredPath))
+            return configuredPath;
+
+        var homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(homePath))
+            return null;
+
+        var xAuthorityPath = Path.Combine(homePath, ".Xauthority");
+        return Path.Exists(xAuthorityPath) ? xAuthorityPath : null;
+    }
+
+    static string QuoteArgument(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 
     internal static void PrepareRestartLogPath(string restartLogPath)
     {

@@ -6,6 +6,8 @@
         <Nullable>enable</Nullable>
         <OutputType>Exe</OutputType>
         <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+        <ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
         <RootNamespace>Conduit.Tests</RootNamespace>
         <IsPublishable>false</IsPublishable>
     </PropertyGroup>
