@@ -46,6 +46,7 @@
     <PropertyGroup Condition=" '$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' == 'linux-musl-x64' ">
         <StaticExecutable>true</StaticExecutable>
         <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == ''">clang</CppCompilerAndLinker>
+        <LinkerFlavor Condition="'$(LinkerFlavor)' == ''">lld</LinkerFlavor>
     </PropertyGroup>
 
     <ItemGroup>

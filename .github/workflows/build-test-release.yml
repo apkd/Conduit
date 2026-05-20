@@ -152,8 +152,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -o Acquire::Retries=10
-          sudo apt-get install -y --no-install-recommends binutils clang zlib1g-dev musl-tools
+          sudo apt-get install -y --no-install-recommends binutils clang lld zlib1g-dev musl-tools
           clang --version
+          ld.lld --version
           musl-gcc --version
 
       - name: Build server binary
