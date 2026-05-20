@@ -22,6 +22,7 @@ namespace Conduit
                 platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
                 editor_process_id = editorProcessId,
                 uptime = FormatDuration(DateTimeOffset.UtcNow - editorStartedAtUtc),
+                editor_log_path = Application.consoleLogPath,
                 editor_mode = EditorApplication.isPlaying ? "play mode" : "edit mode",
                 is_paused = EditorApplication.isPaused,
                 is_compiling = EditorApplication.isCompiling,
@@ -106,6 +107,7 @@ namespace Conduit
             public string platform = string.Empty;
             public int editor_process_id;
             public string uptime = string.Empty;
+            public string editor_log_path = string.Empty;
             public string editor_mode = string.Empty;
             public bool is_paused;
             public bool is_compiling;

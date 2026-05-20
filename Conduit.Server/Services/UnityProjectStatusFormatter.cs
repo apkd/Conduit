@@ -8,7 +8,8 @@ static class UnityProjectStatusFormatter
         UnityProjectEnvironmentSnapshot snapshot,
         ToolExecutionResult? bridgeResult,
         UnityEditorProcessRuntimeInfo? processRuntime,
-        CompilationDiagnosticSummary compilationDiagnostics
+        CompilationDiagnosticSummary compilationDiagnostics,
+        string? editorLogPath
     )
     {
         var builder = ZString.CreateStringBuilder();
@@ -26,6 +27,7 @@ static class UnityProjectStatusFormatter
             builder.Append("Bridge: ");
             builder.AppendLine(FormatBridgeStatus(bridgeResult));
             AppendProcessRuntime(ref builder, processRuntime, snapshot.MatchedProcess?.ProcessId);
+            AppendEditorLogPath(ref builder, editorLogPath);
             builder.Append("Unity.exe processes running: ");
             builder.AppendLine(snapshot.RunningUnityProcessCount);
             if (!string.IsNullOrWhiteSpace(bridgeResult?.Diagnostic))
@@ -48,6 +50,7 @@ static class UnityProjectStatusFormatter
         BridgeProjectHandshake handshake,
         UnityEditorProcessRuntimeInfo? processRuntime,
         CompilationDiagnosticSummary compilationDiagnostics,
+        string? editorLogPath,
         string diagnostic
     )
     {
@@ -70,6 +73,7 @@ static class UnityProjectStatusFormatter
             }
 
             AppendProcessRuntime(ref builder, processRuntime, handshake.EditorProcessId > 0 ? handshake.EditorProcessId : snapshot.MatchedProcess?.ProcessId);
+            AppendEditorLogPath(ref builder, editorLogPath);
             builder.Append("Unity.exe processes running: ");
             builder.AppendLine(snapshot.RunningUnityProcessCount);
             if (!string.IsNullOrWhiteSpace(diagnostic))
@@ -87,7 +91,7 @@ static class UnityProjectStatusFormatter
         }
     }
 
-    public static string FormatPingReport(UnityPingSnapshot pingSnapshot)
+    public static string FormatPingReport(UnityPingSnapshot pingSnapshot, string? fallbackEditorLogPath = null)
     {
         var builder = ZString.CreateStringBuilder();
         try
@@ -103,6 +107,10 @@ static class UnityProjectStatusFormatter
 
             builder.AppendLine();
             AppendCachedRuntime(ref builder, pingSnapshot);
+            AppendEditorLogPath(
+                ref builder,
+                string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath) ? fallbackEditorLogPath : pingSnapshot.EditorLogPath
+            );
 
             builder.AppendLine("Scenes:");
             if (pingSnapshot.Scenes.Length == 0)
@@ -172,6 +180,15 @@ static class UnityProjectStatusFormatter
             builder.Append("Uptime: ");
             builder.AppendLine(pingSnapshot.Uptime);
         }
+    }
+
+    static void AppendEditorLogPath(ref Utf16ValueStringBuilder builder, string? editorLogPath)
+    {
+        if (string.IsNullOrWhiteSpace(editorLogPath))
+            return;
+
+        builder.Append("Editor log: ");
+        builder.AppendLine(editorLogPath);
     }
 
     static string BuildStatusLine(UnityPingSnapshot pingSnapshot)

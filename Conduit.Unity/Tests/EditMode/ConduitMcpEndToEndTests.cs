@@ -135,6 +135,7 @@ public sealed class ConduitMcpEndToEndTests
         Assert.That(reachable.IsError, Is.False, reachable.Text);
         AssertTextContainsAny(reachable.Text, "Bridge: reachable", "Status:");
         AssertTextContainsAny(reachable.Text, projectPath, "Unity ");
+        Assert.That(reachable.Text, Does.Contain("Editor log:"));
 
         var invalidProjectPath = CreateInvalidProjectPath();
         var invalidProject = await client.CallToolAsync(

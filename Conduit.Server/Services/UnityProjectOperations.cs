@@ -304,8 +304,13 @@ public sealed class UnityProjectOperations(
             ct
         );
 
-        if (!TryBuildPingReport(execution, out var report))
+        if (!TryParsePingSnapshot(execution, out var pingSnapshot))
             return null;
+
+        var fallbackEditorLogPath = string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath)
+            ? environmentInspector.ResolveEditorLogPath(environmentInspector.Inspect(normalizedProjectPath))
+            : null;
+        var report = environmentInspector.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
 
         await UpdateProjectRegistryAsync(normalizedProjectPath, execution.Handshake, ct);
         return report;
@@ -612,8 +617,13 @@ public sealed class UnityProjectOperations(
 
     string BuildStatusResponse(string normalizedProjectPath, BridgeClientResult execution, UnityProjectEnvironmentSnapshot? snapshot = null, TimeSpan? statusTimeout = null)
     {
-        if (TryBuildPingReport(execution, out var pingReport))
-            return pingReport;
+        if (TryParsePingSnapshot(execution, out var pingSnapshot))
+        {
+            var fallbackEditorLogPath = string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath)
+                ? environmentInspector.ResolveEditorLogPath(snapshot ?? environmentInspector.Inspect(normalizedProjectPath))
+                : null;
+            return environmentInspector.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
+        }
 
         var currentSnapshot = snapshot ?? environmentInspector.Inspect(normalizedProjectPath);
         var effectiveHandshake = execution.Handshake;
@@ -744,17 +754,17 @@ public sealed class UnityProjectOperations(
         return session.WasReachableRecently(DateTimeOffset.UtcNow, recentReachablePreflightBypassWindow);
     }
 
-    static bool TryBuildPingReport(BridgeClientResult execution, out string report)
+    static bool TryParsePingSnapshot(BridgeClientResult execution, out UnityPingSnapshot pingSnapshot)
     {
         if (execution.Result?.Outcome == ToolOutcome.Success
             && !string.IsNullOrWhiteSpace(execution.Result.ReturnValue)
-            && UnityPingSnapshotParser.TryParse(execution.Result.ReturnValue, out var pingSnapshot))
+            && UnityPingSnapshotParser.TryParse(execution.Result.ReturnValue, out var parsedSnapshot))
         {
-            report = UnityProjectStatusFormatter.FormatPingReport(pingSnapshot);
+            pingSnapshot = parsedSnapshot;
             return true;
         }
 
-        report = string.Empty;
+        pingSnapshot = new();
         return false;
     }
 }

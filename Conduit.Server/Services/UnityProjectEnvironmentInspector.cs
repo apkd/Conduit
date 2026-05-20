@@ -13,7 +13,13 @@ public sealed class UnityProjectEnvironmentInspector
     {
         var processRuntime = probe.TryReadProcessRuntime(snapshot.MatchedProcess?.ProcessId);
         var compilationDiagnostics = probe.ReadLatestCompilationDiagnostics(snapshot);
-        return UnityProjectStatusFormatter.FormatPingFailure(snapshot, bridgeResult, processRuntime, compilationDiagnostics);
+        return UnityProjectStatusFormatter.FormatPingFailure(
+            snapshot,
+            bridgeResult,
+            processRuntime,
+            compilationDiagnostics,
+            probe.ResolveEditorLogPath(snapshot)
+        );
     }
 
     internal string FormatPingReachable(
@@ -23,10 +29,17 @@ public sealed class UnityProjectEnvironmentInspector
         CompilationDiagnosticSummary compilationDiagnostics,
         string diagnostic
     ) =>
-        UnityProjectStatusFormatter.FormatPingReachable(snapshot, handshake, processRuntime, compilationDiagnostics, diagnostic);
+        UnityProjectStatusFormatter.FormatPingReachable(
+            snapshot,
+            handshake,
+            processRuntime,
+            compilationDiagnostics,
+            probe.ResolveEditorLogPath(snapshot),
+            diagnostic
+        );
 
-    internal string FormatPingReport(UnityPingSnapshot pingSnapshot) =>
-        UnityProjectStatusFormatter.FormatPingReport(pingSnapshot);
+    internal string FormatPingReport(UnityPingSnapshot pingSnapshot, string? fallbackEditorLogPath = null) =>
+        UnityProjectStatusFormatter.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
 
     internal string? ResolveUnityEditorPath(UnityProjectEnvironmentSnapshot snapshot, Process? process) =>
         probe.ResolveUnityEditorPath(snapshot, process);
