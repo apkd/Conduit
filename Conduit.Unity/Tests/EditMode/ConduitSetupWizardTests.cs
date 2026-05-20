@@ -18,6 +18,7 @@ public sealed class ConduitSetupWizardTests
         tempRoot = Path.Combine(projectRoot, "Temp", "ConduitSetupWizardTests");
         Directory.CreateDirectory(tempRoot);
         ConduitSetupWizardUtility.ResetInstallStateForTests();
+        ConduitSetupWizardUtility.GetCurrentPackageVersionOverride = static () => "0.3.12";
         ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ => "0.3.12";
     }
 
