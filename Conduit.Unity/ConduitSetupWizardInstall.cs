@@ -95,7 +95,7 @@ namespace Conduit
                 {
                     new DownloadTarget
                     {
-                        Url = "https://github.com/apkd/Conduit/releases/latest/download/conduit-linux-x64",
+                        Url = $"https://github.com/apkd/Conduit/releases/latest/download/{GetLinuxDownloadAssetName()}",
                         DestinationPath = GetInstalledLinuxExecutablePath(),
                         NeedsExecutableBit = true,
                     },
@@ -141,6 +141,70 @@ namespace Conduit
         static string GetInstalledWindowsExecutablePath() => Combine(GetInstallDirectoryPath(), "conduit.exe");
 
         static string GetInstalledLinuxExecutablePath() => Combine(GetInstallDirectoryPath(), "conduit");
+
+        internal static string GetLinuxDownloadAssetName() =>
+            IsNixOsLinux(
+                Application.platform == RuntimePlatform.LinuxEditor,
+                File.Exists,
+                File.ReadLines
+            )
+                ? "conduit-linux-musl-x64"
+                : "conduit-linux-x64";
+
+        internal static bool IsNixOsLinux(
+            bool isLinux,
+            Func<string, bool> fileExists,
+            Func<string, IEnumerable<string>> readLines)
+        {
+            if (!isLinux)
+                return false;
+
+            return OsReleaseIdentifiesNixOs("/etc/os-release")
+                   || OsReleaseIdentifiesNixOs("/usr/lib/os-release");
+
+            bool OsReleaseIdentifiesNixOs(string path)
+            {
+                if (!fileExists(path))
+                    return false;
+
+                try
+                {
+                    foreach (var line in readLines(path))
+                    {
+                        var trimmed = line.Trim();
+                        if (trimmed.Length == 0 || trimmed.StartsWith("#", StringComparison.Ordinal))
+                            continue;
+
+                        var separatorIndex = trimmed.IndexOf('=');
+                        if (separatorIndex <= 0)
+                            continue;
+
+                        var key = trimmed[..separatorIndex].Trim();
+                        if (key is not ("ID" or "ID_LIKE"))
+                            continue;
+
+                        var value = trimmed[(separatorIndex + 1)..].Trim().Trim('"', '\'');
+                        if (key == "ID" && string.Equals(value, "nixos", StringComparison.OrdinalIgnoreCase))
+                            return true;
+
+                        if (key == "ID_LIKE")
+                            foreach (var token in value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                                if (string.Equals(token, "nixos", StringComparison.OrdinalIgnoreCase))
+                                    return true;
+                    }
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return false;
+                }
+
+                return false;
+            }
+        }
 
         static bool TryGetInstalledExecutablePath(out string executablePath)
         {

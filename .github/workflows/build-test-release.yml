@@ -131,10 +131,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            rid: linux-musl-x64
+            rid: linux-x64
             publish_name: conduit-linux-x64
-            publish_source: Conduit.Server/publish/linux-musl-x64/conduit
+            publish_source: Conduit.Server/publish/linux-x64/conduit
             publish_target: conduit-linux-x64
+          - os: ubuntu-latest
+            rid: linux-musl-x64
+            publish_name: conduit-linux-musl-x64
+            publish_source: Conduit.Server/publish/linux-musl-x64/conduit
+            publish_target: conduit-linux-musl-x64
           - os: windows-latest
             rid: win-x64
             publish_name: conduit-win-x64
@@ -171,11 +176,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/release"
           cp "${{ matrix.publish_source }}" "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
 
-          if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
             chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
             "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
+          fi
+
+          if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
             if readelf -l "$RUNNER_TEMP/release/${{ matrix.publish_target }}" | grep -q 'INTERP'; then
-              echo "Linux release artifact must not depend on a dynamic ELF interpreter."
+              echo "Linux musl release artifact must not depend on a dynamic ELF interpreter."
               exit 1
             fi
             docker run --rm \

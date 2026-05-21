@@ -278,6 +278,67 @@ public sealed class ConduitSetupWizardTests
         Assert.That(stoppedPath, Is.EqualTo(Path.GetFullPath(destinationPath)));
     }
 
+    [Test]
+    public void IsNixOsLinuxDetectsNixOsReleaseId()
+    {
+        var files = new System.Collections.Generic.Dictionary<string, string[]>
+        {
+            ["/etc/os-release"] = new[]
+            {
+                "NAME=\"NixOS\"",
+                "ID=nixos",
+            },
+        };
+
+        Assert.That(
+            ConduitSetupWizardUtility.IsNixOsLinux(
+                isLinux: true,
+                files.ContainsKey,
+                path => files[path]
+            ),
+            Is.True
+        );
+    }
+
+    [Test]
+    public void IsNixOsLinuxRejectsRegularDistrosAndNonLinux()
+    {
+        var files = new System.Collections.Generic.Dictionary<string, string[]>
+        {
+            ["/etc/os-release"] = new[]
+            {
+                "NAME=\"Ubuntu\"",
+                "ID=ubuntu",
+                "ID_LIKE=debian",
+            },
+        };
+
+        Assert.That(
+            ConduitSetupWizardUtility.IsNixOsLinux(
+                isLinux: true,
+                files.ContainsKey,
+                path => files[path]
+            ),
+            Is.False
+        );
+        Assert.That(
+            ConduitSetupWizardUtility.IsNixOsLinux(
+                isLinux: false,
+                files.ContainsKey,
+                path => files[path]
+            ),
+            Is.False
+        );
+        Assert.That(
+            ConduitSetupWizardUtility.IsNixOsLinux(
+                isLinux: true,
+                _ => true,
+                _ => throw new IOException("blocked")
+            ),
+            Is.False
+        );
+    }
+
     string CreateExecutable(string fileName)
     {
         var executablePath = Path.Combine(tempRoot, fileName);
