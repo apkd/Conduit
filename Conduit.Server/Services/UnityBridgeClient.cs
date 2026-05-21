@@ -253,23 +253,21 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         var pipeName = ConduitUtility.GetPipeName(normalizedProjectPath);
         BridgeTransport? transport = null;
-        StreamReader? reader = null;
 
         try
         {
             transport = await BridgeTransport.ConnectAsync(pipeName, connectAttemptTimeout, ct);
-            reader = new(transport.Stream, utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
 
             try
             {
                 var hello = BridgeMessage.CreateHello(new() { ProjectPath = normalizedProjectPath });
 
-                await WritePayloadAsync(transport.Stream, BridgeProtocol.Serialize(hello), ct);
+                await transport.WritePayloadAsync(BridgeProtocol.Serialize(hello), ct);
             }
             catch (IOException exception)
             {
                 logger.ZLogDebug($"Unity connection disconnected while sending the hello handshake for '{normalizedProjectPath}'.", exception);
-                await DisposeConnectionAsync(transport, reader);
+                await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
@@ -280,7 +278,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             catch (ObjectDisposedException exception)
             {
                 logger.ZLogDebug($"Unity connection disposed the pipe while sending the hello handshake for '{normalizedProjectPath}'.", exception);
-                await DisposeConnectionAsync(transport, reader);
+                await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
@@ -289,10 +287,10 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 ));
             }
 
-            var payload = await reader.ReadLineAsync(ct);
+            var payload = await transport.ReadLineAsync(ct);
             if (payload is null)
             {
-                await DisposeConnectionAsync(transport, reader);
+                await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.HandshakeDisconnected,
@@ -304,7 +302,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             var response = BridgeProtocol.Deserialize(payload);
             if (response?.MessageType != BridgeMessageTypes.Hello || response.Project is null)
             {
-                await DisposeConnectionAsync(transport, reader);
+                await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.InvalidHandshake,
@@ -316,7 +314,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             response.Project.ProjectPath = ProjectPathNormalizer.Normalize(response.Project.ProjectPath);
             if (!string.Equals(response.Project.ProjectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
             {
-                await DisposeConnectionAsync(transport, reader);
+                await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.ProjectMismatch,
@@ -325,11 +323,11 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 ));
             }
 
-            return (new(transport, reader, response.Project, logger), BridgeClientResult.Connected(response.Project));
+            return (new(transport, response.Project, logger), BridgeClientResult.Connected(response.Project));
         }
         catch (TimeoutException)
         {
-            await DisposeConnectionAsync(transport, reader);
+            await DisposeConnectionAsync(transport);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
@@ -340,7 +338,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         catch (IOException exception)
         {
             logger.ZLogDebug($"Unity connection attempt failed for '{normalizedProjectPath}'.", exception);
-            await DisposeConnectionAsync(transport, reader);
+            await DisposeConnectionAsync(transport);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
@@ -351,7 +349,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         catch (ObjectDisposedException exception)
         {
             logger.ZLogDebug($"Unity connection was disposed while connecting to '{normalizedProjectPath}'.", exception);
-            await DisposeConnectionAsync(transport, reader);
+            await DisposeConnectionAsync(transport);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
@@ -362,7 +360,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         catch (SocketException exception)
         {
             logger.ZLogDebug($"Unity socket connection attempt failed for '{normalizedProjectPath}'.", exception);
-            await DisposeConnectionAsync(transport, reader);
+            await DisposeConnectionAsync(transport);
             return (null, BridgeClientResult.Failure(
                 handshake: null,
                 BridgeRuntimeFailureKind.ConnectTimedOut,
@@ -372,7 +370,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         }
         catch
         {
-            await DisposeConnectionAsync(transport, reader);
+            await DisposeConnectionAsync(transport);
             throw;
         }
     }
@@ -424,14 +422,13 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             commandSent
         );
 
-    static async Task DisposeConnectionAsync(BridgeTransport? transport, StreamReader? reader)
+    static async Task DisposeConnectionAsync(BridgeTransport? transport)
     {
-        reader?.Dispose();
         if (transport is not null)
             await transport.DisposeAsync();
     }
 
-    static async Task WritePayloadAsync(Stream stream, string payload, CancellationToken ct)
+    static async Task WriteStreamPayloadAsync(Stream stream, string payload, CancellationToken ct)
     {
         var byteCount = utf8NoBom.GetByteCount(payload);
         var buffer = ArrayPool<byte>.Shared.Rent(byteCount);
@@ -449,12 +446,14 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         await stream.FlushAsync(ct);
     }
 
-    internal sealed class BridgeTransport(Stream stream, Func<bool> isConnected, Func<ValueTask> disposeAsync) : IAsyncDisposable
+    internal sealed class BridgeTransport(
+        Func<CancellationToken, ValueTask<string?>> readLineAsync,
+        Func<string, CancellationToken, Task> writePayloadAsync,
+        Func<bool> isConnected,
+        Func<ValueTask> disposeAsync) : IAsyncDisposable
     {
         const string DotNetUnixPipePrefix = "CoreFxPipe_";
         bool disposed;
-
-        public Stream Stream { get; } = stream;
 
         public bool IsConnected => !disposed && isConnected();
 
@@ -465,6 +464,10 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 : await ConnectUnixSocketAsync(pipeName, timeout, ct);
         }
 
+        public ValueTask<string?> ReadLineAsync(CancellationToken ct) => readLineAsync(ct);
+
+        public Task WritePayloadAsync(string payload, CancellationToken ct) => writePayloadAsync(payload, ct);
+
         public async ValueTask DisposeAsync()
         {
             if (disposed)
@@ -474,8 +477,25 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             await disposeAsync();
         }
 
+        internal static BridgeTransport FromStream(Stream stream, Func<bool> isConnected, Func<ValueTask> disposeAsync)
+        {
+            var reader = new StreamReader(stream, utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+            return new(
+                reader.ReadLineAsync,
+                (payload, ct) => WriteStreamPayloadAsync(stream, payload, ct),
+                isConnected,
+                () => DisposeStreamAsync(reader, disposeAsync)
+            );
+        }
+
         internal static string GetDotNetUnixPipePath(string pipeName) =>
             Path.Combine(Path.GetTempPath(), DotNetUnixPipePrefix + pipeName);
+
+        static async ValueTask DisposeStreamAsync(StreamReader reader, Func<ValueTask> disposeAsync)
+        {
+            reader.Dispose();
+            await disposeAsync();
+        }
 
         static async Task<BridgeTransport> ConnectNamedPipeAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
@@ -483,7 +503,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             try
             {
                 await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
-                return new(pipe, () => pipe.IsConnected, () => pipe.DisposeAsync());
+                return FromStream(pipe, () => pipe.IsConnected, () => pipe.DisposeAsync());
             }
             catch
             {
@@ -498,8 +518,13 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             try
             {
                 await ConnectSocketAsync(socket, GetDotNetUnixPipePath(pipeName), timeout, ct);
-                var socketStream = new NetworkStream(socket, ownsSocket: true);
-                return new(socketStream, static () => true, () => socketStream.DisposeAsync());
+                var lineReader = new UnixSocketLineReader(socket);
+                return new(
+                    lineReader.ReadLineAsync,
+                    (payload, writeToken) => WriteSocketPayloadAsync(socket, payload, writeToken),
+                    static () => true,
+                    () => DisposeSocketAsync(socket)
+                );
             }
             catch
             {
@@ -520,11 +545,121 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
             await connectTask;
         }
+
+        static ValueTask DisposeSocketAsync(Socket socket)
+        {
+            socket.Dispose();
+            return ValueTask.CompletedTask;
+        }
+
+        static async Task WriteSocketPayloadAsync(Socket socket, string payload, CancellationToken ct)
+        {
+            var byteCount = utf8NoBom.GetByteCount(payload);
+            var buffer = ArrayPool<byte>.Shared.Rent(byteCount + newline.Length);
+            try
+            {
+                var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+                newline.AsSpan().CopyTo(buffer.AsSpan(written));
+                await SendAllAsync(socket, buffer.AsMemory(0, written + newline.Length), ct);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        static async Task SendAllAsync(Socket socket, ReadOnlyMemory<byte> payload, CancellationToken ct)
+        {
+            while (!payload.IsEmpty)
+            {
+                var bytesSent = await socket.SendAsync(payload, SocketFlags.None, ct);
+                if (bytesSent <= 0)
+                    throw new IOException("Unity socket closed while writing.");
+
+                payload = payload[bytesSent..];
+            }
+        }
+
+        sealed class UnixSocketLineReader(Socket socket)
+        {
+            readonly byte[] receiveBuffer = new byte[8192];
+            byte[] pending = new byte[8192];
+            int pendingCount;
+
+            public async ValueTask<string?> ReadLineAsync(CancellationToken ct)
+            {
+                while (true)
+                {
+                    if (TryReadBufferedLine(out var bufferedLine))
+                        return bufferedLine;
+
+                    var bytesRead = await socket.ReceiveAsync(receiveBuffer, SocketFlags.None, ct);
+                    if (bytesRead == 0)
+                        return ReadRemainingLine();
+
+                    Append(receiveBuffer.AsSpan(0, bytesRead));
+                }
+            }
+
+            bool TryReadBufferedLine(out string? line)
+            {
+                var newlineIndex = pending.AsSpan(0, pendingCount).IndexOf((byte)'\n');
+                if (newlineIndex < 0)
+                {
+                    line = null;
+                    return false;
+                }
+
+                line = DecodeLine(newlineIndex);
+                var remaining = pendingCount - newlineIndex - 1;
+                if (remaining > 0)
+                    pending.AsSpan(newlineIndex + 1, remaining).CopyTo(pending);
+
+                pendingCount = remaining;
+                return true;
+            }
+
+            string? ReadRemainingLine()
+            {
+                if (pendingCount == 0)
+                    return null;
+
+                var line = DecodeLine(pendingCount);
+                pendingCount = 0;
+                return line;
+            }
+
+            string DecodeLine(int byteCount)
+            {
+                if (byteCount > 0 && pending[byteCount - 1] == '\r')
+                    byteCount--;
+
+                return utf8NoBom.GetString(pending, 0, byteCount);
+            }
+
+            void Append(ReadOnlySpan<byte> payload)
+            {
+                EnsureCapacity(pendingCount + payload.Length);
+                payload.CopyTo(pending.AsSpan(pendingCount));
+                pendingCount += payload.Length;
+            }
+
+            void EnsureCapacity(int required)
+            {
+                if (pending.Length >= required)
+                    return;
+
+                var size = pending.Length;
+                while (size < required)
+                    size *= 2;
+
+                Array.Resize(ref pending, size);
+            }
+        }
     }
 
     internal sealed class BridgeClientConnection(
         BridgeTransport transport,
-        StreamReader reader,
         BridgeProjectHandshake handshake,
         ILogger<UnityBridgeClient> logger) : IAsyncDisposable
     {
@@ -539,7 +674,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         {
             try
             {
-                await WritePayloadAsync(transport.Stream, BridgeProtocol.Serialize(BridgeMessage.CreateCommand(requestId, command)), ct);
+                await transport.WritePayloadAsync(BridgeProtocol.Serialize(BridgeMessage.CreateCommand(requestId, command)), ct);
                 return null;
             }
             catch (IOException exception)
@@ -580,7 +715,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
                 while (!startTimeoutCts.IsCancellationRequested)
                 {
-                    var payload = await reader.ReadLineAsync(startTimeoutCts.Token);
+                    var payload = await transport.ReadLineAsync(startTimeoutCts.Token);
                     if (payload is null)
                     {
                         return new(
@@ -666,7 +801,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    var payload = await reader.ReadLineAsync(ct);
+                    var payload = await transport.ReadLineAsync(ct);
                     if (payload is null)
                     {
                         return BridgeClientResult.Failure(
@@ -725,7 +860,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
         public async ValueTask DisposeAsync()
         {
-            reader.Dispose();
             await transport.DisposeAsync();
         }
 
