@@ -452,10 +452,11 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
     internal sealed class BridgeTransport(Stream stream, Func<bool> isConnected, Func<ValueTask> disposeAsync) : IAsyncDisposable
     {
         const string DotNetUnixPipePrefix = "CoreFxPipe_";
+        bool disposed;
 
         public Stream Stream { get; } = stream;
 
-        public bool IsConnected => isConnected();
+        public bool IsConnected => !disposed && isConnected();
 
         public static async Task<BridgeTransport> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
@@ -464,7 +465,14 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 : await ConnectUnixSocketAsync(pipeName, timeout, ct);
         }
 
-        public ValueTask DisposeAsync() => disposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            await disposeAsync();
+        }
 
         internal static string GetDotNetUnixPipePath(string pipeName) =>
             Path.Combine(Path.GetTempPath(), DotNetUnixPipePrefix + pipeName);
@@ -491,7 +499,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             {
                 await ConnectSocketAsync(socket, GetDotNetUnixPipePath(pipeName), timeout, ct);
                 var socketStream = new NetworkStream(socket, ownsSocket: true);
-                return new(socketStream, () => socket.Connected, () => socketStream.DisposeAsync());
+                return new(socketStream, static () => true, () => socketStream.DisposeAsync());
             }
             catch
             {

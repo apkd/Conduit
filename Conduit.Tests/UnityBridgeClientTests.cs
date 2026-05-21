@@ -77,5 +77,8 @@ public sealed class UnityBridgeClientTests
 
         await Assert.That(server.IsConnected).IsTrue();
         await Assert.That(transport.IsConnected).IsTrue();
+
+        await transport.DisposeAsync();
+        await Assert.That(transport.IsConnected).IsFalse();
     }
 }
