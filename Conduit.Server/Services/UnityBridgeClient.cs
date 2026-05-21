@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Sockets;
 using System.Text;
@@ -386,21 +387,20 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         if (handshake.EditorProcessId is not > 0)
             return null;
 
-        return WaitForProcessExitAsync(handshake, commandType, commandSent, ct);
+        var process = ConduitUtility.TryGetProcess(handshake.EditorProcessId);
+        return process is null
+            ? null
+            : WaitForProcessExitAsync(handshake, process, commandType, commandSent, ct);
     }
 
     static async Task<BridgeClientResult?> WaitForProcessExitAsync(
         BridgeProjectHandshake handshake,
+        Process process,
         string context,
         bool commandSent,
         CancellationToken ct
     )
     {
-        var processId = handshake.EditorProcessId;
-        var process = ConduitUtility.TryGetProcess(processId);
-        if (process is null)
-            return ProcessExited(handshake, context, commandSent);
-
         try
         {
             await process.WaitForExitAsync(ct);
@@ -578,7 +578,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 using var startTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 startTimeoutCts.CancelAfter(timeout);
 
-                while (!startTimeoutCts.IsCancellationRequested && transport.IsConnected)
+                while (!startTimeoutCts.IsCancellationRequested)
                 {
                     var payload = await reader.ReadLineAsync(startTimeoutCts.Token);
                     if (payload is null)
@@ -664,7 +664,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         {
             try
             {
-                while (!ct.IsCancellationRequested && transport.IsConnected)
+                while (!ct.IsCancellationRequested)
                 {
                     var payload = await reader.ReadLineAsync(ct);
                     if (payload is null)
