@@ -151,7 +151,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.201
 
       - name: Install Linux NativeAOT prerequisites
         if: runner.os == 'Linux'
@@ -159,8 +159,8 @@ jobs:
           sudo apt-get update -o Acquire::Retries=10
           sudo apt-get install -y --no-install-recommends binutils clang lld zlib1g-dev musl-tools
           clang --version
-          ld.lld --version
           musl-gcc --version
+          ld.bfd --version
 
       - name: Build server binary
         shell: bash
@@ -179,6 +179,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
             "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
+            dotnet run --file run-conduit-binary-smoke.cs -- "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
           fi
 
           if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
@@ -207,7 +208,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.201
 
       - name: Run TUnit tests
         id: dotnet-tests
