@@ -570,13 +570,20 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
         static async Task SendAllAsync(Socket socket, ReadOnlyMemory<byte> payload, CancellationToken ct)
         {
-            while (!payload.IsEmpty)
+            try
             {
-                var bytesSent = await socket.SendAsync(payload, SocketFlags.None, ct);
-                if (bytesSent <= 0)
-                    throw new IOException("Unity socket closed while writing.");
+                while (!payload.IsEmpty)
+                {
+                    var bytesSent = await socket.SendAsync(payload, SocketFlags.None, ct);
+                    if (bytesSent <= 0)
+                        throw new IOException("Unity socket closed while writing.");
 
-                payload = payload[bytesSent..];
+                    payload = payload[bytesSent..];
+                }
+            }
+            catch (SocketException exception)
+            {
+                throw new IOException("Unity socket closed while writing.", exception);
             }
         }
 
@@ -588,16 +595,23 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
             public async ValueTask<string?> ReadLineAsync(CancellationToken ct)
             {
-                while (true)
+                try
                 {
-                    if (TryReadBufferedLine(out var bufferedLine))
-                        return bufferedLine;
+                    while (true)
+                    {
+                        if (TryReadBufferedLine(out var bufferedLine))
+                            return bufferedLine;
 
-                    var bytesRead = await socket.ReceiveAsync(receiveBuffer, SocketFlags.None, ct);
-                    if (bytesRead == 0)
-                        return ReadRemainingLine();
+                        var bytesRead = await socket.ReceiveAsync(receiveBuffer, SocketFlags.None, ct);
+                        if (bytesRead == 0)
+                            return ReadRemainingLine();
 
-                    Append(receiveBuffer.AsSpan(0, bytesRead));
+                        Append(receiveBuffer.AsSpan(0, bytesRead));
+                    }
+                }
+                catch (SocketException exception)
+                {
+                    throw new IOException("Unity socket closed while reading.", exception);
                 }
             }
 

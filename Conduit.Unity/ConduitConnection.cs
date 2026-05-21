@@ -324,12 +324,14 @@ namespace Conduit
         static async Task<string?> ReadIncomingPayloadAsync(ClientSession session, CancellationToken cancellationToken)
         {
             var readTask = session.reader.ReadLineAsync();
-            if (ConduitToolRunner.HasOutstandingClientWork(session.id)
-                || ConduitToolRunner.HasReconnectableWorkForAnyClient())
+            if (ShouldKeepConnectionOpen(session.id))
                 return await readTask;
 
             var completedTask = await Task.WhenAny(readTask, Task.Delay(idleReceiveTimeout, cancellationToken));
             if (completedTask == readTask)
+                return await readTask;
+
+            if (ShouldKeepConnectionOpen(session.id))
                 return await readTask;
 
             ConduitDiagnostics.Warn($"Closing idle Unity MCP pipe connection after {idleReceiveTimeout.TotalSeconds:0} seconds without incoming messages.");
@@ -350,6 +352,10 @@ namespace Conduit
 
             return null;
         }
+
+        static bool ShouldKeepConnectionOpen(int clientId) =>
+            ConduitToolRunner.HasOutstandingClientWork(clientId)
+            || ConduitToolRunner.HasReconnectableWorkForAnyClient();
 
         static bool IsShuttingDown()
         {
