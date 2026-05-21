@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using ZLogger;
@@ -453,6 +454,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         Func<ValueTask> disposeAsync) : IAsyncDisposable
     {
         const string DotNetUnixPipePrefix = "CoreFxPipe_";
+        const int ErrorAgain = 11;
+        const int ErrorInterrupted = 4;
         bool disposed;
 
         public bool IsConnected => !disposed && isConnected();
@@ -588,6 +591,37 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             }
         }
 
+        static async ValueTask<int> ReceiveAsync(Socket socket, byte[] buffer, CancellationToken ct)
+        {
+            try
+            {
+                while (true)
+                {
+                    await WaitForSocketAsync(socket, SelectMode.SelectRead, ct);
+
+                    var bytesRead = PosixRead((int)socket.Handle, buffer, (nuint)buffer.Length);
+                    if (bytesRead >= 0)
+                        return (int)bytesRead;
+
+                    var errno = Marshal.GetLastPInvokeError();
+                    if (errno == ErrorInterrupted)
+                        continue;
+
+                    if (errno == ErrorAgain)
+                    {
+                        await Task.Yield();
+                        continue;
+                    }
+
+                    throw new IOException($"Unity socket read failed with errno {errno}.");
+                }
+            }
+            catch (SocketException exception)
+            {
+                throw new IOException("Unity socket closed while reading.", exception);
+            }
+        }
+
         static async ValueTask WaitForSocketAsync(Socket socket, SelectMode mode, CancellationToken ct)
         {
             while (!socket.Poll(100_000, mode))
@@ -598,6 +632,13 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
             ct.ThrowIfCancellationRequested();
         }
+
+#if CONDUIT_LINUX_MUSL
+        [DllImport("*", EntryPoint = "read", SetLastError = true)]
+#else
+        [DllImport("libc", EntryPoint = "read", SetLastError = true)]
+#endif
+        static extern nint PosixRead(int fd, byte[] buffer, nuint count);
 
         sealed class UnixSocketLineReader(Socket socket)
         {
@@ -614,8 +655,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                         if (TryReadBufferedLine(out var bufferedLine))
                             return bufferedLine;
 
-                        await WaitForSocketAsync(socket, SelectMode.SelectRead, ct);
-                        var bytesRead = socket.Receive(receiveBuffer, SocketFlags.None);
+                        var bytesRead = await ReceiveAsync(socket, receiveBuffer, ct);
                         if (bytesRead == 0)
                             return ReadRemainingLine();
 
