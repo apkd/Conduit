@@ -27,6 +27,8 @@ public sealed class UnityRestartAndPreflightPolicyTests
         const string unityHubPath = "/run/current-system/sw/bin/unityhub";
         const string unityHubFhsEnvPath = "/nix/store/hash-unityhub-fhs-env-3.16.2/bin/unityhub-fhs-env";
         const string steamRunPath = "/run/current-system/sw/bin/steam-run";
+        const string setsidPath = "/run/current-system/sw/bin/setsid";
+        const string bashPath = "/run/current-system/sw/bin/bash";
 
         var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
             editorPath,
@@ -40,10 +42,17 @@ public sealed class UnityRestartAndPreflightPolicyTests
                 : null
         );
 
-        await Assert.That(startInfo.FileName).IsEqualTo(unityHubFhsEnvPath);
-        await Assert.That(startInfo.Arguments).StartsWith($"\"{editorPath}\" ");
-        await Assert.That(startInfo.Arguments).Contains($"-projectPath \"{projectPath}\"");
-        await Assert.That(startInfo.Arguments).Contains($"-logFile \"{logPath}\"");
+        await Assert.That(startInfo.FileName).IsEqualTo(setsidPath);
+        await Assert.That(startInfo.Arguments).IsEmpty();
+        await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
+        await Assert.That(startInfo.ArgumentList[1]).IsEqualTo("-c");
+        await Assert.That(startInfo.ArgumentList[3]).IsEqualTo("conduit-unity-launch");
+        await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(unityHubFhsEnvPath);
+        await Assert.That(startInfo.ArgumentList[5]).IsEqualTo(editorPath);
+        await Assert.That(startInfo.ArgumentList[6]).IsEqualTo("-projectPath");
+        await Assert.That(startInfo.ArgumentList[7]).IsEqualTo(projectPath);
+        await Assert.That(startInfo.ArgumentList[8]).IsEqualTo("-logFile");
+        await Assert.That(startInfo.ArgumentList[9]).IsEqualTo(logPath);
         await Assert.That(startInfo.UseShellExecute).IsFalse();
 
         static string? FindExecutableOnPath(string executableName) =>
@@ -51,6 +60,8 @@ public sealed class UnityRestartAndPreflightPolicyTests
             {
                 "unityhub" => unityHubPath,
                 "steam-run" => steamRunPath,
+                "setsid" => setsidPath,
+                "bash" => bashPath,
                 _ => null,
             };
     }
@@ -62,6 +73,8 @@ public sealed class UnityRestartAndPreflightPolicyTests
         var projectPath = Path.Combine(Path.GetTempPath(), "project");
         var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
         const string steamRunPath = "/run/current-system/sw/bin/steam-run";
+        const string setsidPath = "/run/current-system/sw/bin/setsid";
+        const string bashPath = "/run/current-system/sw/bin/bash";
 
         var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
             editorPath,
@@ -69,23 +82,36 @@ public sealed class UnityRestartAndPreflightPolicyTests
             logPath,
             isLinux: true,
             isNixOs: true,
-            findExecutableOnPath: static executableName => executableName == "steam-run" ? steamRunPath : null,
+            findExecutableOnPath: static executableName => executableName switch
+            {
+                "steam-run" => steamRunPath,
+                "setsid" => setsidPath,
+                "bash" => bashPath,
+                _ => null,
+            },
             readTextFile: static _ => null
         );
 
-        await Assert.That(startInfo.FileName).IsEqualTo(steamRunPath);
-        await Assert.That(startInfo.Arguments).StartsWith($"\"{editorPath}\" ");
-        await Assert.That(startInfo.Arguments).Contains($"-projectPath \"{projectPath}\"");
-        await Assert.That(startInfo.Arguments).Contains($"-logFile \"{logPath}\"");
+        await Assert.That(startInfo.FileName).IsEqualTo(setsidPath);
+        await Assert.That(startInfo.Arguments).IsEmpty();
+        await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
+        await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(steamRunPath);
+        await Assert.That(startInfo.ArgumentList[5]).IsEqualTo(editorPath);
+        await Assert.That(startInfo.ArgumentList[6]).IsEqualTo("-projectPath");
+        await Assert.That(startInfo.ArgumentList[7]).IsEqualTo(projectPath);
+        await Assert.That(startInfo.ArgumentList[8]).IsEqualTo("-logFile");
+        await Assert.That(startInfo.ArgumentList[9]).IsEqualTo(logPath);
         await Assert.That(startInfo.UseShellExecute).IsFalse();
     }
 
     [Test]
-    public async Task NonNixLinuxLaunchUsesEditorDirectlyWithExplicitEnvironment()
+    public async Task NonNixLinuxLaunchUsesDetachedEditorWithExplicitEnvironment()
     {
         var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
         var projectPath = Path.Combine(Path.GetTempPath(), "project");
         var logPath = Path.Combine(projectPath, "Logs", "Editor.log");
+        const string setsidPath = "/run/current-system/sw/bin/setsid";
+        const string bashPath = "/run/current-system/sw/bin/bash";
 
         var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
             editorPath,
@@ -93,12 +119,25 @@ public sealed class UnityRestartAndPreflightPolicyTests
             logPath,
             isLinux: true,
             isNixOs: false,
-            findExecutableOnPath: static _ => "/run/current-system/sw/bin/steam-run",
+            findExecutableOnPath: static executableName => executableName switch
+            {
+                "setsid" => setsidPath,
+                "bash" => bashPath,
+                _ => null,
+            },
             readTextFile: static _ => null
         );
 
-        await Assert.That(startInfo.FileName).IsEqualTo(editorPath);
-        await Assert.That(startInfo.Arguments).IsEqualTo(UnityEditorProcessController.BuildLaunchArguments(projectPath, logPath));
+        await Assert.That(startInfo.FileName).IsEqualTo(setsidPath);
+        await Assert.That(startInfo.Arguments).IsEmpty();
+        await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
+        await Assert.That(startInfo.ArgumentList[1]).IsEqualTo("-c");
+        await Assert.That(startInfo.ArgumentList[3]).IsEqualTo("conduit-unity-launch");
+        await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(editorPath);
+        await Assert.That(startInfo.ArgumentList[5]).IsEqualTo("-projectPath");
+        await Assert.That(startInfo.ArgumentList[6]).IsEqualTo(projectPath);
+        await Assert.That(startInfo.ArgumentList[7]).IsEqualTo("-logFile");
+        await Assert.That(startInfo.ArgumentList[8]).IsEqualTo(logPath);
         await Assert.That(startInfo.UseShellExecute).IsFalse();
     }
 

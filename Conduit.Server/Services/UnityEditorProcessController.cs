@@ -215,28 +215,41 @@ public sealed class UnityEditorProcessController(
     )
     {
         var launchArguments = BuildLaunchArguments(platformProjectPath, restartLogPath);
-        if (isLinux && isNixOs && ResolveNixOsUnityWrapper(findExecutableOnPath, readTextFile) is { Length: > 0 } wrapperPath)
+        if (isLinux)
         {
-            var wrapperStartInfo = new ProcessStartInfo(wrapperPath)
-            {
-                Arguments = $"{QuoteArgument(editorPath)} {launchArguments}",
-                WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
-                UseShellExecute = false,
-            };
+            var launchExecutablePath = isNixOs && ResolveNixOsUnityWrapper(findExecutableOnPath, readTextFile) is { Length: > 0 } wrapperPath
+                ? wrapperPath
+                : editorPath;
 
-            ApplyGraphicalSessionEnvironment(wrapperStartInfo);
-            return wrapperStartInfo;
+            var linuxStartInfo = CreateDetachedLinuxStartInfo(
+                launchExecutablePath,
+                editorPath,
+                platformProjectPath,
+                restartLogPath,
+                findExecutableOnPath
+            );
+            if (linuxStartInfo is null)
+            {
+                linuxStartInfo = new(launchExecutablePath)
+                {
+                    Arguments = string.Equals(launchExecutablePath, editorPath, StringComparison.Ordinal)
+                        ? launchArguments
+                        : $"{QuoteArgument(editorPath)} {launchArguments}",
+                    WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
+                    UseShellExecute = false,
+                };
+            }
+
+            ApplyGraphicalSessionEnvironment(linuxStartInfo);
+            return linuxStartInfo;
         }
 
         var startInfo = new ProcessStartInfo(editorPath)
         {
             Arguments = launchArguments,
             WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
-            UseShellExecute = !isLinux,
+            UseShellExecute = true,
         };
-
-        if (isLinux)
-            ApplyGraphicalSessionEnvironment(startInfo);
 
         return startInfo;
     }
@@ -247,6 +260,53 @@ public sealed class UnityEditorProcessController(
             return unityHubFhsEnvPath;
 
         return findExecutableOnPath("steam-run");
+    }
+
+    static ProcessStartInfo? CreateDetachedLinuxStartInfo(
+        string launchExecutablePath,
+        string editorPath,
+        string platformProjectPath,
+        string restartLogPath,
+        Func<string, string?> findExecutableOnPath
+    )
+    {
+        var shellPath = ResolveExecutablePath("bash", findExecutableOnPath, "/bin/bash", "/usr/bin/bash")
+                        ?? ResolveExecutablePath("sh", findExecutableOnPath, "/bin/sh", "/usr/bin/sh");
+        if (string.IsNullOrWhiteSpace(shellPath))
+            return null;
+
+        var startInfo = new ProcessStartInfo(ResolveExecutablePath("setsid", findExecutableOnPath, "/usr/bin/setsid", "/bin/setsid") ?? shellPath)
+        {
+            WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
+            UseShellExecute = false,
+        };
+
+        if (!string.Equals(startInfo.FileName, shellPath, StringComparison.Ordinal))
+            startInfo.ArgumentList.Add(shellPath);
+
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("\"$@\" & child=$!; wait \"$child\"");
+        startInfo.ArgumentList.Add("conduit-unity-launch");
+        startInfo.ArgumentList.Add(launchExecutablePath);
+        if (!string.Equals(launchExecutablePath, editorPath, StringComparison.Ordinal))
+            startInfo.ArgumentList.Add(editorPath);
+        startInfo.ArgumentList.Add("-projectPath");
+        startInfo.ArgumentList.Add(platformProjectPath);
+        startInfo.ArgumentList.Add("-logFile");
+        startInfo.ArgumentList.Add(restartLogPath);
+        return startInfo;
+    }
+
+    static string? ResolveExecutablePath(string executableName, Func<string, string?> findExecutableOnPath, params string[] fallbackPaths)
+    {
+        if (findExecutableOnPath(executableName) is { Length: > 0 } path)
+            return path;
+
+        foreach (var fallbackPath in fallbackPaths)
+            if (File.Exists(fallbackPath))
+                return fallbackPath;
+
+        return null;
     }
 
     static string? FindUnityHubFhsEnv(Func<string, string?> findExecutableOnPath, Func<string, string?> readTextFile)
