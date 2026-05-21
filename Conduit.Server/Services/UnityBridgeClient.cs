@@ -574,7 +574,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             {
                 while (!payload.IsEmpty)
                 {
-                    var bytesSent = await socket.SendAsync(payload, SocketFlags.None, ct);
+                    await WaitForSocketAsync(socket, SelectMode.SelectWrite, ct);
+                    var bytesSent = socket.Send(payload.Span, SocketFlags.None);
                     if (bytesSent <= 0)
                         throw new IOException("Unity socket closed while writing.");
 
@@ -585,6 +586,17 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             {
                 throw new IOException("Unity socket closed while writing.", exception);
             }
+        }
+
+        static async ValueTask WaitForSocketAsync(Socket socket, SelectMode mode, CancellationToken ct)
+        {
+            while (!socket.Poll(100_000, mode))
+            {
+                ct.ThrowIfCancellationRequested();
+                await Task.Yield();
+            }
+
+            ct.ThrowIfCancellationRequested();
         }
 
         sealed class UnixSocketLineReader(Socket socket)
@@ -602,7 +614,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                         if (TryReadBufferedLine(out var bufferedLine))
                             return bufferedLine;
 
-                        var bytesRead = await socket.ReceiveAsync(receiveBuffer, SocketFlags.None, ct);
+                        await WaitForSocketAsync(socket, SelectMode.SelectRead, ct);
+                        var bytesRead = socket.Receive(receiveBuffer, SocketFlags.None);
                         if (bytesRead == 0)
                             return ReadRemainingLine();
 
