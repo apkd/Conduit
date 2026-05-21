@@ -459,14 +459,9 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
         public static async Task<BridgeTransport> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
-            try
-            {
-                return await ConnectNamedPipeAsync(pipeName, timeout, ct);
-            }
-            catch (Exception) when (!OperatingSystem.IsWindows() && !ct.IsCancellationRequested)
-            {
-                return await ConnectUnixSocketAsync(pipeName, timeout, ct);
-            }
+            return OperatingSystem.IsWindows()
+                ? await ConnectNamedPipeAsync(pipeName, timeout, ct)
+                : await ConnectUnixSocketAsync(pipeName, timeout, ct);
         }
 
         public ValueTask DisposeAsync() => disposeAsync();
