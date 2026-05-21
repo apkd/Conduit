@@ -459,21 +459,38 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
         public static async Task<BridgeTransport> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
-            if (OperatingSystem.IsWindows())
+            try
             {
-                var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-                try
-                {
-                    await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
-                    return new(pipe, () => pipe.IsConnected, () => pipe.DisposeAsync());
-                }
-                catch
-                {
-                    await pipe.DisposeAsync();
-                    throw;
-                }
+                return await ConnectNamedPipeAsync(pipeName, timeout, ct);
             }
+            catch (Exception) when (!OperatingSystem.IsWindows() && !ct.IsCancellationRequested)
+            {
+                return await ConnectUnixSocketAsync(pipeName, timeout, ct);
+            }
+        }
 
+        public ValueTask DisposeAsync() => disposeAsync();
+
+        internal static string GetDotNetUnixPipePath(string pipeName) =>
+            Path.Combine(Path.GetTempPath(), DotNetUnixPipePrefix + pipeName);
+
+        static async Task<BridgeTransport> ConnectNamedPipeAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
+        {
+            var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            try
+            {
+                await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
+                return new(pipe, () => pipe.IsConnected, () => pipe.DisposeAsync());
+            }
+            catch
+            {
+                await pipe.DisposeAsync();
+                throw;
+            }
+        }
+
+        static async Task<BridgeTransport> ConnectUnixSocketAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
+        {
             var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             try
             {
@@ -487,11 +504,6 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 throw;
             }
         }
-
-        public ValueTask DisposeAsync() => disposeAsync();
-
-        internal static string GetDotNetUnixPipePath(string pipeName) =>
-            Path.Combine(Path.GetTempPath(), DotNetUnixPipePrefix + pipeName);
 
         static async Task ConnectSocketAsync(Socket socket, string path, TimeSpan timeout, CancellationToken ct)
         {
