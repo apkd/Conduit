@@ -109,16 +109,37 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task ExecuteCommandReadsCoalescedUnixSocketResponses()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-coalesced-response-{Guid.NewGuid():N}";
+        await using var bridge = await FakeUnixBridge.StartAsync(projectPath, int.MaxValue, coalesceCommandResponses: true);
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+
+        var result = await client.ExecuteCommandAsync(
+            projectPath,
+            ConduitUtility.CreateRequestId(),
+            new() { CommandType = BridgeCommandTypes.Status },
+            TimeSpan.FromSeconds(2),
+            processIdHint: null,
+            CancellationToken.None
+        );
+
+        await Assert.That(result.FailureKind).IsNull();
+        await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
+    }
+
+    [Test]
     public async Task CommandStartWaitReadsPayloadWhenTransportLivenessProbeIsFalse()
     {
         var requestId = ConduitUtility.CreateRequestId();
         var payload = BridgeProtocol.Serialize(BridgeMessage.CreateCommandStarted(requestId));
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(payload + "\n"));
-        await using var transport = new UnityBridgeClient.BridgeTransport(stream, static () => false, static () => ValueTask.CompletedTask);
-        using var reader = new StreamReader(stream, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        await using var transport = UnityBridgeClient.BridgeTransport.FromStream(stream, static () => false, static () => ValueTask.CompletedTask);
         await using var connection = new UnityBridgeClient.BridgeClientConnection(
             transport,
-            reader,
             new()
             {
                 ProjectPath = "/tmp/conduit-readable-disconnected",
@@ -148,20 +169,22 @@ public sealed class UnityBridgeClientTests
         readonly CancellationTokenSource cts = new();
         readonly string projectPath;
         readonly int editorProcessId;
+        readonly bool coalesceCommandResponses;
         readonly string socketPath;
         readonly Socket listener;
         readonly Task serverTask;
 
-        FakeUnixBridge(string projectPath, int editorProcessId, string socketPath, Socket listener)
+        FakeUnixBridge(string projectPath, int editorProcessId, bool coalesceCommandResponses, string socketPath, Socket listener)
         {
             this.projectPath = projectPath;
             this.editorProcessId = editorProcessId;
+            this.coalesceCommandResponses = coalesceCommandResponses;
             this.socketPath = socketPath;
             this.listener = listener;
             serverTask = Task.Run(RunAsync);
         }
 
-        public static Task<FakeUnixBridge> StartAsync(string projectPath, int editorProcessId)
+        public static Task<FakeUnixBridge> StartAsync(string projectPath, int editorProcessId, bool coalesceCommandResponses = false)
         {
             var socketPath = UnityBridgeClient.BridgeTransport.GetDotNetUnixPipePath(ConduitUtility.GetPipeName(projectPath));
             try
@@ -173,7 +196,7 @@ public sealed class UnityBridgeClientTests
             var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             listener.Bind(new UnixDomainSocketEndPoint(socketPath));
             listener.Listen(16);
-            return Task.FromResult(new FakeUnixBridge(projectPath, editorProcessId, socketPath, listener));
+            return Task.FromResult(new FakeUnixBridge(projectPath, editorProcessId, coalesceCommandResponses, socketPath, listener));
         }
 
         async Task RunAsync()
@@ -212,13 +235,13 @@ public sealed class UnityBridgeClientTests
 
             var commandPayload = await reader.ReadLineAsync(cts.Token);
             var requestId = JsonNode.Parse(commandPayload!)?["request_id"]?.GetValue<string>() ?? "";
-            await WritePayloadAsync(stream, new JsonObject
+            var commandStarted = new JsonObject
             {
                 ["protocol_version"] = 2,
                 ["message_type"] = "command_started",
                 ["request_id"] = requestId,
-            }, cts.Token);
-            await WritePayloadAsync(stream, new JsonObject
+            };
+            var commandResult = new JsonObject
             {
                 ["protocol_version"] = 2,
                 ["message_type"] = "command_result",
@@ -229,13 +252,28 @@ public sealed class UnityBridgeClientTests
                     ["logs"] = "",
                     ["return_value"] = "",
                 },
-            }, cts.Token);
+            };
+
+            if (coalesceCommandResponses)
+                await WritePayloadsAsync(stream, cts.Token, commandStarted, commandResult);
+            else
+            {
+                await WritePayloadAsync(stream, commandStarted, cts.Token);
+                await WritePayloadAsync(stream, commandResult, cts.Token);
+            }
         }
 
         static async Task WritePayloadAsync(Stream stream, JsonObject payload, CancellationToken ct)
+            => await WritePayloadsAsync(stream, ct, payload);
+
+        static async Task WritePayloadsAsync(Stream stream, CancellationToken ct, params JsonObject[] payloads)
         {
-            await stream.WriteAsync(Utf8NoBom.GetBytes(payload.ToJsonString(new() { WriteIndented = false })), ct);
-            await stream.WriteAsync(Newline, ct);
+            foreach (var payload in payloads)
+            {
+                await stream.WriteAsync(Utf8NoBom.GetBytes(payload.ToJsonString(new() { WriteIndented = false })), ct);
+                await stream.WriteAsync(Newline, ct);
+            }
+
             await stream.FlushAsync(ct);
         }
 
