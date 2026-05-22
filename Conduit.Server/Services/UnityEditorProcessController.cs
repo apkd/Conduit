@@ -468,11 +468,52 @@ public sealed class UnityEditorProcessController(
         if (!string.IsNullOrWhiteSpace(configuredPath) && Directory.Exists(configuredPath))
             return configuredPath;
 
-        if (string.IsNullOrWhiteSpace(currentUserId))
-            return null;
+        if (!string.IsNullOrWhiteSpace(currentUserId))
+        {
+            var runtimeDirectoryPath = Path.Combine(runUserRootPath, currentUserId);
+            if (Directory.Exists(runtimeDirectoryPath))
+                return runtimeDirectoryPath;
+        }
 
-        var runtimeDirectoryPath = Path.Combine(runUserRootPath, currentUserId);
-        return Directory.Exists(runtimeDirectoryPath) ? runtimeDirectoryPath : null;
+        return ResolveAccessibleRuntimeDirectoryPath(runUserRootPath);
+    }
+
+    internal static string? ResolveAccessibleRuntimeDirectoryPath(string runUserRootPath)
+    {
+        try
+        {
+            if (!Directory.Exists(runUserRootPath))
+                return null;
+
+            foreach (var runtimeDirectoryPath in Directory.EnumerateDirectories(runUserRootPath))
+            {
+                if (!CanReadDirectory(runtimeDirectoryPath))
+                    continue;
+
+                if (Path.Exists(Path.Combine(runtimeDirectoryPath, "bus"))
+                    || Directory.EnumerateFileSystemEntries(runtimeDirectoryPath, "wayland-*").Any())
+                    return runtimeDirectoryPath;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static bool CanReadDirectory(string directoryPath)
+    {
+        try
+        {
+            Directory.EnumerateFileSystemEntries(directoryPath).FirstOrDefault();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     internal static string? ResolveCurrentUserId()

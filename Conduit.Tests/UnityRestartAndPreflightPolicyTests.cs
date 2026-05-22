@@ -309,6 +309,42 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task RuntimeDirectoryResolverFallsBackToAccessibleGraphicalDirectory()
+    {
+        var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
+        var currentUserPath = Path.Combine(runUserRootPath, "1000");
+        Directory.CreateDirectory(currentUserPath);
+        File.WriteAllText(Path.Combine(currentUserPath, "bus"), string.Empty);
+        try
+        {
+            await Assert.That(UnityEditorProcessController.ResolveRuntimeDirectoryPath(configuredPath: null, currentUserId: null, runUserRootPath))
+                .IsEqualTo(currentUserPath);
+        }
+        finally
+        {
+            Directory.Delete(runUserRootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task RuntimeDirectoryResolverFallsBackWhenResolvedUserDirectoryIsMissing()
+    {
+        var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
+        var actualUserPath = Path.Combine(runUserRootPath, "1000");
+        Directory.CreateDirectory(actualUserPath);
+        File.WriteAllText(Path.Combine(actualUserPath, "bus"), string.Empty);
+        try
+        {
+            await Assert.That(UnityEditorProcessController.ResolveRuntimeDirectoryPath(configuredPath: null, "0", runUserRootPath))
+                .IsEqualTo(actualUserPath);
+        }
+        finally
+        {
+            Directory.Delete(runUserRootPath, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task RuntimeDirectoryResolverDoesNotUseOtherUserDirectory()
     {
         var runUserRootPath = Path.Combine(Path.GetTempPath(), $"conduit-run-user-{Guid.NewGuid():N}");
