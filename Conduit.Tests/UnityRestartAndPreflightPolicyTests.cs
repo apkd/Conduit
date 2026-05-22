@@ -170,11 +170,16 @@ public sealed class UnityRestartAndPreflightPolicyTests
         {
             UseShellExecute = false,
         };
+        startInfo.Environment.Clear();
         startInfo.Environment["DISPLAY"] = ":99";
         startInfo.Environment["XDG_RUNTIME_DIR"] = "/tmp/conduit-existing-runtime";
         startInfo.Environment["WAYLAND_DISPLAY"] = "wayland-existing";
         startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/tmp/conduit-existing-bus";
         startInfo.Environment["XAUTHORITY"] = "/tmp/conduit-existing-xauthority";
+        startInfo.Environment["GIO_EXTRA_MODULES"] = "/tmp/conduit-existing-gio-modules";
+        startInfo.Environment["GIO_USE_VFS"] = "gvfs";
+        startInfo.Environment["GTK_USE_PORTAL"] = "1";
+        startInfo.Environment["GSETTINGS_BACKEND"] = "dconf";
 
         UnityEditorProcessController.ApplyGraphicalSessionEnvironment(startInfo);
 
@@ -183,6 +188,88 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.Environment["WAYLAND_DISPLAY"]).IsEqualTo("wayland-existing");
         await Assert.That(startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"]).IsEqualTo("unix:path=/tmp/conduit-existing-bus");
         await Assert.That(startInfo.Environment["XAUTHORITY"]).IsEqualTo("/tmp/conduit-existing-xauthority");
+        await Assert.That(startInfo.Environment["GIO_EXTRA_MODULES"]).IsEqualTo("/tmp/conduit-existing-gio-modules");
+        await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("gvfs");
+        await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("1");
+        await Assert.That(startInfo.Environment["GSETTINGS_BACKEND"]).IsEqualTo("dconf");
+    }
+
+    [Test]
+    public async Task DesktopSessionDefaultsDeriveWaylandHyprlandValuesFromRuntimeDirectory()
+    {
+        var runtimeDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(runtimeDirectoryPath, "hypr"));
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        try
+        {
+            UnityEditorProcessController.ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath, "wayland-1", ":0");
+
+            await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("wayland,x11");
+            await Assert.That(startInfo.Environment["NIXOS_OZONE_WL"]).IsEqualTo("1");
+            await Assert.That(startInfo.Environment["NO_AT_BRIDGE"]).IsEqualTo("1");
+            await Assert.That(startInfo.Environment["QT_QPA_PLATFORM"]).IsEqualTo("wayland;xcb");
+            await Assert.That(startInfo.Environment["XDG_CURRENT_DESKTOP"]).IsEqualTo("Hyprland");
+            await Assert.That(startInfo.Environment["XDG_SESSION_DESKTOP"]).IsEqualTo("Hyprland");
+            await Assert.That(startInfo.Environment["XDG_SESSION_TYPE"]).IsEqualTo("wayland");
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectoryPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task NixOsGraphicalSessionEnvironmentDerivesPortalAndGioModulesFromSystemProfile()
+    {
+        var systemProfilePath = Path.Combine(Path.GetTempPath(), $"conduit-system-profile-{Guid.NewGuid():N}");
+        var portalDirectoryPath = Path.Combine(systemProfilePath, "share", "xdg-desktop-portal", "portals");
+        var serviceDirectoryPath = Path.Combine(systemProfilePath, "share", "dbus-1", "services");
+        var dconfPackagePath = Path.Combine(systemProfilePath, "dconf");
+        var gioModulesPath = Path.Combine(dconfPackagePath, "lib", "gio", "modules");
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        Directory.CreateDirectory(portalDirectoryPath);
+        Directory.CreateDirectory(serviceDirectoryPath);
+        Directory.CreateDirectory(gioModulesPath);
+        File.WriteAllText(Path.Combine(portalDirectoryPath, "hyprland.portal"), string.Empty);
+        File.WriteAllText(
+            Path.Combine(serviceDirectoryPath, "ca.desrt.dconf.service"),
+            $"[D-BUS Service]{Environment.NewLine}Name=ca.desrt.dconf{Environment.NewLine}Exec={dconfPackagePath}/libexec/dconf-service"
+        );
+        try
+        {
+            UnityEditorProcessController.ApplyNixOsGraphicalSessionEnvironment(startInfo, systemProfilePath);
+
+            await Assert.That(startInfo.Environment["NIX_XDG_DESKTOP_PORTAL_DIR"]).IsEqualTo(portalDirectoryPath);
+            await Assert.That(startInfo.Environment["GIO_EXTRA_MODULES"]).IsEqualTo(gioModulesPath);
+        }
+        finally
+        {
+            Directory.Delete(systemProfilePath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task GraphicalSessionEnvironmentAppliesUnityGioMitigations()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+
+        UnityEditorProcessController.ApplyGraphicalSessionEnvironment(startInfo);
+
+        await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("local");
+        await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("0");
+        await Assert.That(startInfo.Environment["GSETTINGS_BACKEND"]).IsEqualTo("memory");
     }
 
     [Test]

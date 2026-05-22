@@ -385,12 +385,62 @@ public sealed class UnityEditorProcessController(
     internal static void ApplyGraphicalSessionEnvironment(ProcessStartInfo startInfo)
     {
         var runtimeDirectoryPath = ResolveRuntimeDirectoryPath();
+        var waylandDisplay = ResolveWaylandDisplay(runtimeDirectoryPath);
+        var x11Display = ResolveX11Display("/tmp/.X11-unix");
 
         SetEnvironmentVariableIfMissing(startInfo, "XDG_RUNTIME_DIR", runtimeDirectoryPath);
-        SetEnvironmentVariableIfMissing(startInfo, "DISPLAY", ResolveX11Display("/tmp/.X11-unix"));
-        SetEnvironmentVariableIfMissing(startInfo, "WAYLAND_DISPLAY", ResolveWaylandDisplay(runtimeDirectoryPath));
+        SetEnvironmentVariableIfMissing(startInfo, "DISPLAY", x11Display);
+        SetEnvironmentVariableIfMissing(startInfo, "WAYLAND_DISPLAY", waylandDisplay);
         SetEnvironmentVariableIfMissing(startInfo, "DBUS_SESSION_BUS_ADDRESS", ResolveSessionBusAddress(runtimeDirectoryPath));
         SetEnvironmentVariableIfMissing(startInfo, "XAUTHORITY", ResolveXAuthorityPath());
+
+        ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath, waylandDisplay, x11Display);
+        ApplyNixOsGraphicalSessionEnvironment(startInfo);
+        ApplyUnityLinuxGioMitigations(startInfo);
+    }
+
+    internal static void ApplyDesktopSessionDefaults(
+        ProcessStartInfo startInfo,
+        string? runtimeDirectoryPath,
+        string? waylandDisplay,
+        string? x11Display
+    )
+    {
+        if (!string.IsNullOrWhiteSpace(waylandDisplay))
+        {
+            SetEnvironmentVariableIfMissing(startInfo, "GDK_BACKEND", "wayland,x11");
+            SetEnvironmentVariableIfMissing(startInfo, "NIXOS_OZONE_WL", "1");
+            SetEnvironmentVariableIfMissing(startInfo, "QT_QPA_PLATFORM", "wayland;xcb");
+            SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_TYPE", "wayland");
+        }
+        else if (!string.IsNullOrWhiteSpace(x11Display))
+        {
+            SetEnvironmentVariableIfMissing(startInfo, "GDK_BACKEND", "x11");
+            SetEnvironmentVariableIfMissing(startInfo, "QT_QPA_PLATFORM", "xcb");
+            SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_TYPE", "x11");
+        }
+
+        SetEnvironmentVariableIfMissing(startInfo, "NO_AT_BRIDGE", "1");
+
+        var currentDesktop = ResolveCurrentDesktop(runtimeDirectoryPath);
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_CURRENT_DESKTOP", currentDesktop);
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_DESKTOP", currentDesktop);
+    }
+
+    internal static void ApplyNixOsGraphicalSessionEnvironment(ProcessStartInfo startInfo) =>
+        ApplyNixOsGraphicalSessionEnvironment(startInfo, "/run/current-system/sw");
+
+    internal static void ApplyNixOsGraphicalSessionEnvironment(ProcessStartInfo startInfo, string systemProfilePath)
+    {
+        SetEnvironmentVariableIfMissing(startInfo, "NIX_XDG_DESKTOP_PORTAL_DIR", ResolveNixXdgDesktopPortalDirectory(systemProfilePath));
+        SetEnvironmentVariableIfMissing(startInfo, "GIO_EXTRA_MODULES", ResolveNixGioExtraModules(systemProfilePath));
+    }
+
+    static void ApplyUnityLinuxGioMitigations(ProcessStartInfo startInfo)
+    {
+        SetEnvironmentVariableIfMissing(startInfo, "GIO_USE_VFS", "local");
+        SetEnvironmentVariableIfMissing(startInfo, "GTK_USE_PORTAL", "0");
+        SetEnvironmentVariableIfMissing(startInfo, "GSETTINGS_BACKEND", "memory");
     }
 
     static void SetEnvironmentVariableIfMissing(ProcessStartInfo startInfo, string variableName, string? value)
@@ -521,6 +571,76 @@ public sealed class UnityEditorProcessController(
         {
             return null;
         }
+    }
+
+    internal static string? ResolveCurrentDesktop(string? runtimeDirectoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeDirectoryPath))
+            return null;
+
+        if (Directory.Exists(Path.Combine(runtimeDirectoryPath, "hypr")))
+            return "Hyprland";
+
+        try
+        {
+            if (Directory.Exists(runtimeDirectoryPath)
+                && Directory.EnumerateFileSystemEntries(runtimeDirectoryPath, "sway-ipc.*.sock").Any())
+                return "sway";
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    internal static string? ResolveNixXdgDesktopPortalDirectory(string systemProfilePath)
+    {
+        var portalDirectoryPath = Path.Combine(systemProfilePath, "share", "xdg-desktop-portal", "portals");
+        try
+        {
+            return Directory.Exists(portalDirectoryPath)
+                   && Directory.EnumerateFiles(portalDirectoryPath, "*.portal", SearchOption.TopDirectoryOnly).Any()
+                ? portalDirectoryPath
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? ResolveNixGioExtraModules(string systemProfilePath)
+    {
+        var serviceFilePath = Path.Combine(systemProfilePath, "share", "dbus-1", "services", "ca.desrt.dconf.service");
+        try
+        {
+            if (!File.Exists(serviceFilePath))
+                return null;
+
+            foreach (var line in File.ReadLines(serviceFilePath))
+            {
+                if (!line.StartsWith("Exec=", StringComparison.Ordinal))
+                    continue;
+
+                var executablePath = line["Exec=".Length..].Trim();
+                const string libexecSegment = "/libexec/";
+                var libexecIndex = executablePath.IndexOf(libexecSegment, StringComparison.Ordinal);
+                if (libexecIndex <= 0)
+                    return null;
+
+                var moduleDirectoryPath = Path.Combine(executablePath[..libexecIndex], "lib", "gio", "modules");
+                if (Directory.Exists(moduleDirectoryPath))
+                    return moduleDirectoryPath;
+
+                return null;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     internal static string? ResolveSessionBusAddress(string? runtimeDirectoryPath)
