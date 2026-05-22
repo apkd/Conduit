@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Conduit;
@@ -473,14 +475,28 @@ public sealed class UnityEditorProcessController(
         return Directory.Exists(runtimeDirectoryPath) ? runtimeDirectoryPath : null;
     }
 
-    static string? ResolveCurrentUserId()
+    internal static string? ResolveCurrentUserId()
     {
+        if (OperatingSystem.IsLinux())
+        {
+            try
+            {
+                return GetCurrentUnixUserId().ToString(CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+            }
+        }
+
         if (TryReadCurrentUserIdFromProcStatus() is { Length: > 0 } procStatusUserId)
             return procStatusUserId;
 
         var environmentUserId = Environment.GetEnvironmentVariable("UID");
         return IsUnixUserId(environmentUserId) ? environmentUserId : null;
     }
+
+    [DllImport("libc", EntryPoint = "getuid", SetLastError = false)]
+    static extern uint GetCurrentUnixUserId();
 
     static string? TryReadCurrentUserIdFromProcStatus()
     {

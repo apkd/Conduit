@@ -325,6 +325,18 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task CurrentUserIdResolverUsesNativeLinuxUserId()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var userId = UnityEditorProcessController.ResolveCurrentUserId();
+
+        await Assert.That(string.IsNullOrWhiteSpace(userId)).IsFalse();
+        await Assert.That(userId!.All(char.IsAsciiDigit)).IsTrue();
+    }
+
+    [Test]
     public async Task X11DisplayResolverUsesLowestNumericSocketName()
     {
         var socketDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-x11-{Guid.NewGuid():N}");
