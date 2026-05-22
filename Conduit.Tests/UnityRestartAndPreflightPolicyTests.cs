@@ -435,7 +435,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         var projectPath = CreateTempProject();
         try
         {
-            var backupDirectoryPath = Path.Combine(projectPath, "Temp", "__BackupScenes");
+            var backupDirectoryPath = Path.Combine(projectPath, "Temp", "__Backupscenes");
             Directory.CreateDirectory(backupDirectoryPath);
             var backupFilePath = Path.Combine(backupDirectoryPath, "SampleScene.backup");
             File.WriteAllText(backupFilePath, "scene-backup");
@@ -462,7 +462,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         var projectPath = CreateTempProject();
         try
         {
-            var backupDirectoryPath = Path.Combine(projectPath, "Temp", "__BackupScenes");
+            var backupDirectoryPath = Path.Combine(projectPath, "Temp", "__Backupscenes");
             var recoveryDirectoryPath = Path.Combine(projectPath, "Assets", "_Recovery");
             Directory.CreateDirectory(backupDirectoryPath);
             Directory.CreateDirectory(recoveryDirectoryPath);

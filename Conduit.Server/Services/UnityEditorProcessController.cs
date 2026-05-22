@@ -571,7 +571,7 @@ public sealed class UnityEditorProcessController(
     internal static string[] PreserveSceneBackups(string projectPath)
     {
         var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(projectPath);
-        var backupDirectoryPath = Path.Combine(platformProjectPath, "Temp", "__BackupScenes");
+        var backupDirectoryPath = Path.Combine(platformProjectPath, "Temp", "__Backupscenes");
         if (!Directory.Exists(backupDirectoryPath))
             return Array.Empty<string>();
 
