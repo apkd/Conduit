@@ -22,6 +22,9 @@ enum BridgeCommandKind : byte
     RunTestsEditMode,
     RunTestsPlayMode,
     RunTestsPlayer,
+    ProfilerRecord,
+    ProfilerOverview,
+    ProfilerBrowse,
 }
 
 static class BridgeCommandKinds
@@ -48,6 +51,9 @@ static class BridgeCommandKinds
             BridgeCommandTypes.RunTestsEditMode     => BridgeCommandKind.RunTestsEditMode,
             BridgeCommandTypes.RunTestsPlayMode     => BridgeCommandKind.RunTestsPlayMode,
             BridgeCommandTypes.RunTestsPlayer       => BridgeCommandKind.RunTestsPlayer,
+            BridgeCommandTypes.ProfilerRecord       => BridgeCommandKind.ProfilerRecord,
+            BridgeCommandTypes.ProfilerOverview     => BridgeCommandKind.ProfilerOverview,
+            BridgeCommandTypes.ProfilerBrowse       => BridgeCommandKind.ProfilerBrowse,
             _                                       => BridgeCommandKind.Unknown,
         };
 

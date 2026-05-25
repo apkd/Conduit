@@ -253,6 +253,77 @@ public sealed class UnityProjectOperations(
             ct
         );
 
+    public Task<ToolExecutionResult> ProfilerRecordAsync(
+        string projectPath,
+        ProfilerRecordAction action,
+        int frames,
+        string target,
+        string? fileName,
+        CT ct
+    ) => EnqueueAsync(
+        projectPath,
+        new()
+        {
+            CommandType = BridgeCommandTypes.ProfilerRecord,
+            Args =
+            [
+                $"action={action.ToWireName()}",
+                $"frames={frames}",
+                $"target={target}",
+                $"file_name={fileName ?? string.Empty}",
+            ],
+        },
+        ct
+    );
+
+    public Task<ToolExecutionResult> ProfilerOverviewAsync(
+        string projectPath,
+        ProfilerOverviewMode mode,
+        string frameRange,
+        CT ct
+    ) => EnqueueAsync(
+        projectPath,
+        new()
+        {
+            CommandType = BridgeCommandTypes.ProfilerOverview,
+            Args =
+            [
+                $"mode={mode.ToWireName()}",
+                $"frame_range={frameRange}",
+            ],
+        },
+        ct
+    );
+
+    public Task<ToolExecutionResult> ProfilerBrowseAsync(
+        string projectPath,
+        string frame,
+        string thread,
+        string root,
+        int depth,
+        ProfilerBrowseSort sort,
+        int limit,
+        bool onlyNonTrivial,
+        CT ct
+    ) => EnqueueAsync(
+        projectPath,
+        new()
+        {
+            CommandType = BridgeCommandTypes.ProfilerBrowse,
+            Args =
+            [
+                $"frame={frame}",
+                $"thread={thread}",
+                $"root={root}",
+                $"depth={depth}",
+                $"sort={sort.ToWireName()}",
+                $"limit={limit}",
+                $"only_non_trivial={onlyNonTrivial.ToString().ToLowerInvariant()}",
+            ],
+        },
+        ct
+    );
+
     async Task<ToolExecutionResult> EnqueueAsync(string projectPath, BridgeCommand command, CT ct)
     {
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);

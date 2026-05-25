@@ -35,6 +35,9 @@ static class UnityToolTimeouts
             RunTestsEditMode     => TimeSpan.FromMinutes(10),
             RunTestsPlayMode     => TimeSpan.FromMinutes(20),
             RunTestsPlayer       => TimeSpan.FromMinutes(30),
+            ProfilerRecord       => TimeSpan.FromMinutes(2),
+            ProfilerOverview     => TimeSpan.FromSeconds(90),
+            ProfilerBrowse       => TimeSpan.FromSeconds(90),
             _                    => StatusCommand,
         };
 }

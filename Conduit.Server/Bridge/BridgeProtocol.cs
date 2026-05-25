@@ -24,6 +24,9 @@ public static class BridgeCommandTypes
     public const string RunTestsEditMode = "run_tests_editmode";
     public const string RunTestsPlayMode = "run_tests_playmode";
     public const string RunTestsPlayer = "run_tests_player";
+    public const string ProfilerRecord = "profiler_record";
+    public const string ProfilerOverview = "profiler_overview";
+    public const string ProfilerBrowse = "profiler_browse";
 }
 
 static class BridgeMessageTypes

@@ -296,6 +296,74 @@ public sealed class UnityTools
         string? testFilter = null
     ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayerAsync(projectPath, testFilter, ct));
 
+    [McpServerTool(Name = CMD.ProfilerRecord)]
+    [Description(
+        """
+        Captures Unity Profiler frames or saves/loads profiler capture files.
+        Capture requires Unity to already be in the requested target mode.
+        Bare file names are saved under Temp/profiler; relative paths are project-relative; absolute paths are used directly.
+        """
+    )]
+    public static Task<string> ProfilerRecord(
+        [Description("Project path")] string projectPath,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Action to perform: capture, save, load, or list")]
+        ProfilerRecordAction action = ProfilerRecordAction.Capture,
+        [Description("Number of completed frames to capture when action is capture. Clamped to 1..600.")]
+        int frames = 120,
+        [Description("Capture target. Use play_mode or edit_mode.")]
+        string target = "play_mode",
+        [Description("Capture file name or path. Bare names resolve under Temp/profiler.")]
+        string? fileName = null
+    ) => ToPlainTextToolResponseAsync(operations.ProfilerRecordAsync(projectPath, action, frames, target, fileName, ct));
+
+    [McpServerTool(Name = CMD.ProfilerOverview)]
+    [Description(
+        """
+        Summarizes Unity Profiler frames and main-thread hot samples.
+        Frame ranges use available-frame ordinals such as 0..^1 or ^120..^1.
+        """
+    )]
+    public static Task<string> ProfilerOverview(
+        [Description("Project path")] string projectPath,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Sort metric: cpu_ms or gc_kb")]
+        ProfilerOverviewMode mode = ProfilerOverviewMode.CpuMs,
+        [Description("Available-frame ordinal range. Examples: 0..^1, ^120..^1, 10..50.")]
+        string frameRange = "0..^1"
+    ) => ToPlainTextToolResponseAsync(operations.ProfilerOverviewAsync(projectPath, mode, frameRange, ct));
+
+    [McpServerTool(Name = CMD.ProfilerBrowse)]
+    [Description(
+        """
+        Browses one Unity Profiler hierarchy frame/thread using merged samples.
+        Reads profiler data directly and does not open or mutate the Profiler Window.
+        """
+    )]
+    public static Task<string> ProfilerBrowse(
+        [Description("Project path")] string projectPath,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Frame selector: selected, latest, an available-frame ordinal, or index:<unityFrameIndex>.")]
+        string frame = "selected",
+        [Description("Thread selector: main, render, worker<N>, all, index:<threadIndex>, id:<threadId>, or name:<fragment>.")]
+        string thread = "main",
+        [Description("Root selector: empty root, an output id, slash-separated path, or exact marker/sample name.")]
+        string root = "",
+        [Description("Number of hierarchy levels to print. Clamped to 1..32.")]
+        int depth = 3,
+        [Description("Sort metric: total_ms, self_ms, gc_bytes, or calls.")]
+        ProfilerBrowseSort sort = ProfilerBrowseSort.TotalMs,
+        [Description("Maximum number of rows to print. Clamped to 1..200.")]
+        int limit = 50,
+        [Description("Exclude rows that are insignificant for the selected sort metric.")]
+        bool onlyNonTrivial = true
+    ) => ToPlainTextToolResponseAsync(
+        operations.ProfilerBrowseAsync(projectPath, frame, thread, root, depth, sort, limit, onlyNonTrivial, ct)
+    );
+
     static async Task<string> ToPlainTextToolResponseAsync(Task<ToolExecutionResult> resultTask)
         => ToolResponseFormatter.Format(await resultTask);
 }

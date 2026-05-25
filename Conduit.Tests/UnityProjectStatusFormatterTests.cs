@@ -48,6 +48,20 @@ public sealed class UnityProjectStatusFormatterTests
     }
 
     [Test]
+    public async Task PingReportIncludesProfilerStatusLine()
+    {
+        var report = UnityProjectStatusFormatter.FormatPingReport(
+            new()
+            {
+                UnityVersion = "6000.5.0f1",
+                ProfilerStatusLine = "Profiler: not recording",
+            }
+        );
+
+        await Assert.That(report).Contains("Profiler: not recording");
+    }
+
+    [Test]
     public async Task PingFailureIncludesEditorLogPath()
     {
         var snapshot = new UnityProjectEnvironmentSnapshot(

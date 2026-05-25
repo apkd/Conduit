@@ -187,4 +187,16 @@ public sealed class ToolExecutionResultSerializationTests
         await Assert.That(payload).Contains("\"command_type\":\"reflect\"");
         await Assert.That(payload).Contains("\"args\":[\"methods\",\"ConduitReflectDerivedFixture\",\"GenericMethod\"]");
     }
+
+    [Test]
+    public async Task ProfilerToolEnumsSerializeAsWireNames()
+    {
+        var action = JsonSerializer.Serialize(ProfilerRecordAction.Capture, ConduitJsonContext.Default.ProfilerRecordAction);
+        var overviewMode = JsonSerializer.Serialize(ProfilerOverviewMode.GcKb, ConduitJsonContext.Default.ProfilerOverviewMode);
+        var browseSort = JsonSerializer.Serialize(ProfilerBrowseSort.SelfMs, ConduitJsonContext.Default.ProfilerBrowseSort);
+
+        await Assert.That(action).IsEqualTo("\"capture\"");
+        await Assert.That(overviewMode).IsEqualTo("\"gc_kb\"");
+        await Assert.That(browseSort).IsEqualTo("\"self_ms\"");
+    }
 }

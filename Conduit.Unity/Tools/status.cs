@@ -28,6 +28,7 @@ namespace Conduit
                 is_compiling = EditorApplication.isCompiling,
                 is_updating = EditorApplication.isUpdating,
                 active_command_type = ConduitToolRunner.GetActiveCommandType(),
+                profiler_status_line = profiler.BuildStatusLine(),
                 scenes = BuildScenes(),
                 dirty_scenes = ConduitSceneCommandUtility.GetDirtySceneDescriptions(),
             };
@@ -113,6 +114,7 @@ namespace Conduit
             public bool is_compiling;
             public bool is_updating;
             public string? active_command_type;
+            public string? profiler_status_line;
             public string[] scenes = Array.Empty<string>();
             public string[] dirty_scenes = Array.Empty<string>();
         }

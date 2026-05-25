@@ -176,6 +176,12 @@ public sealed class UnityProjectOperationsPolicyTests
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(5));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.Reflect)).IsEqualTo(BridgeCommandKind.Reflect);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.Reflect)).IsEqualTo(TimeSpan.FromSeconds(90));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerRecord)).IsEqualTo(BridgeCommandKind.ProfilerRecord);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerRecord)).IsEqualTo(TimeSpan.FromMinutes(2));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerOverview)).IsEqualTo(BridgeCommandKind.ProfilerOverview);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerOverview)).IsEqualTo(TimeSpan.FromSeconds(90));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerBrowse)).IsEqualTo(BridgeCommandKind.ProfilerBrowse);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerBrowse)).IsEqualTo(TimeSpan.FromSeconds(90));
     }
 
     [Test]

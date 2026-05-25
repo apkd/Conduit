@@ -71,6 +71,9 @@ namespace Conduit
             RunTestsEditMode,
             RunTestsPlayMode,
             RunTestsPlayer,
+            ProfilerRecord,
+            ProfilerOverview,
+            ProfilerBrowse,
         }
 
         internal struct ParsedBridgeCommand
@@ -347,6 +350,15 @@ namespace Conduit
                     case ParsedBridgeCommandKind.RunTestsPlayer:
                         StartTestRun(TestMode.PlayMode, true, pendingOperation.test_filter);
                         break;
+                    case ParsedBridgeCommandKind.ProfilerRecord:
+                        await ExecuteProfilerRecordAsync(pendingOperation);
+                        break;
+                    case ParsedBridgeCommandKind.ProfilerOverview:
+                        await ExecuteProfilerOverviewAsync(pendingOperation);
+                        break;
+                    case ParsedBridgeCommandKind.ProfilerBrowse:
+                        await ExecuteProfilerBrowseAsync(pendingOperation);
+                        break;
                     default:
                         await CompleteCurrentAsync(
                             new()
@@ -491,6 +503,9 @@ namespace Conduit
                 BridgeCommandTypes.RunTestsEditMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsEditMode },
                 BridgeCommandTypes.RunTestsPlayMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayMode },
                 BridgeCommandTypes.RunTestsPlayer       => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayer },
+                BridgeCommandTypes.ProfilerRecord       => new() { Kind = ParsedBridgeCommandKind.ProfilerRecord },
+                BridgeCommandTypes.ProfilerOverview     => new() { Kind = ParsedBridgeCommandKind.ProfilerOverview },
+                BridgeCommandTypes.ProfilerBrowse       => new() { Kind = ParsedBridgeCommandKind.ProfilerBrowse },
                 _                                       => new() { Kind = ParsedBridgeCommandKind.Unknown },
             };
 

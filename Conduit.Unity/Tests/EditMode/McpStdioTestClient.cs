@@ -19,6 +19,7 @@ namespace Conduit
     sealed class McpStdioTestClient : IDisposable
     {
         const string SupportedProtocolVersion = "2025-03-26";
+        const string RepoRootEnvironmentVariable = "CONDUIT_REPO_ROOT";
         const string ServerExecutableEnvironmentVariable = "CONDUIT_SERVER_EXECUTABLE";
         static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(20);
         static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(5);
@@ -444,6 +445,10 @@ namespace Conduit
 
         static IEnumerable<string> EnumerateServerProjectCandidates()
         {
+            var configuredRepoRoot = Environment.GetEnvironmentVariable(RepoRootEnvironmentVariable);
+            if (!string.IsNullOrWhiteSpace(configuredRepoRoot))
+                yield return Path.Combine(Path.GetFullPath(configuredRepoRoot), "Conduit.Server", "Conduit.csproj");
+
             var packageRoot = ResolvePackageRootPath();
             if (string.Equals(Path.GetFileName(packageRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
                     "Conduit.Unity",

@@ -90,6 +90,42 @@ namespace Conduit
             }
         }
 
+        static async Task ExecuteProfilerRecordAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(await profiler.RecordAsync(operation.args));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
+        static async Task ExecuteProfilerOverviewAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(profiler.Overview(operation.args));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
+        static async Task ExecuteProfilerBrowseAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(profiler.Browse(operation.args));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
         static async Task ExecuteCommandAsync(Func<string> getResult)
         {
             try

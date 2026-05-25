@@ -127,6 +127,65 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ProfilerCommands_Parse()
+    {
+        Assert.That(
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerRecord).Kind,
+            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerRecord)
+        );
+        Assert.That(
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerOverview).Kind,
+            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerOverview)
+        );
+        Assert.That(
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerBrowse).Kind,
+            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerBrowse)
+        );
+    }
+
+    [Test]
+    public void ProfilerCapturePath_BareFileNameUsesTempProfiler()
+    {
+        var path = profiler.ResolveCapturePathForTest("sample", allocateDefault: false);
+
+        Assert.That(path.DisplayPath, Is.EqualTo("Temp/profiler/sample.data"));
+    }
+
+    [Test]
+    public void ProfilerFrameRange_UsesAvailableFrameOrdinalsAndClampsLargeRanges()
+    {
+        var frames = profiler.ResolveFrameRangeForTest(10, "0..^1", out var warnings);
+
+        Assert.That(frames, Is.EqualTo(new[] { 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009 }));
+        Assert.That(warnings, Is.Empty);
+
+        var clamped = profiler.ResolveFrameRangeForTest(2500, "0..^1", out warnings);
+
+        Assert.That(clamped, Has.Count.EqualTo(2000));
+        Assert.That(clamped[0], Is.EqualTo(1500));
+        Assert.That(clamped[^1], Is.EqualTo(3499));
+        Assert.That(warnings, Does.Contain("frame_range_clamped_to_latest_2000"));
+    }
+
+    [Test]
+    public void ProfilerBrowse_NonTrivialFilterDependsOnSort()
+    {
+        Assert.That(profiler.IsNonTrivialForTest(totalMs: 1.0, selfMs: 0.1, gcBytes: 0, calls: 1, frameTimeMs: 100, sort: "total_ms"), Is.True);
+        Assert.That(profiler.IsNonTrivialForTest(totalMs: 0.9, selfMs: 0.9, gcBytes: 0, calls: 1, frameTimeMs: 100, sort: "total_ms"), Is.False);
+        Assert.That(profiler.IsNonTrivialForTest(totalMs: 10, selfMs: 0.9, gcBytes: 0, calls: 1, frameTimeMs: 100, sort: "self_ms"), Is.False);
+        Assert.That(profiler.IsNonTrivialForTest(totalMs: 0, selfMs: 0, gcBytes: 1, calls: 1, frameTimeMs: 100, sort: "gc_bytes"), Is.True);
+    }
+
+    [Test]
+    public void Status_IncludesProfilerStatusLineInSnapshot()
+    {
+        var snapshot = status.Status();
+
+        Assert.That(snapshot, Does.Contain("\"profiler_status_line\""));
+        Assert.That(snapshot, Does.Contain("Profiler:"));
+    }
+
+    [Test]
     public void ReflectTypes_SearchesByTypeNameAndKind()
     {
         var result = reflect.Reflect(new[] { "classes", "ConduitReflectDerivedFixture", string.Empty });

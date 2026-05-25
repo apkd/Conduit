@@ -22,6 +22,8 @@ sealed class UnityPingSnapshot
 
     public string? ActiveCommandType { get; set; }
 
+    public string? ProfilerStatusLine { get; set; }
+
     public string[] Scenes { get; set; } = [];
 
     public string[] DirtyScenes { get; set; } = [];

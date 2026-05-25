@@ -17,4 +17,7 @@ namespace Conduit;
 [JsonSerializable(typeof(ToolExecutionResult))]
 [JsonSerializable(typeof(ToolExceptionInfo))]
 [JsonSerializable(typeof(ProjectListItem))]
+[JsonSerializable(typeof(ProfilerRecordAction))]
+[JsonSerializable(typeof(ProfilerOverviewMode))]
+[JsonSerializable(typeof(ProfilerBrowseSort))]
 partial class ConduitJsonContext : JsonSerializerContext { }

@@ -111,6 +111,7 @@ static class UnityProjectStatusFormatter
                 ref builder,
                 string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath) ? fallbackEditorLogPath : pingSnapshot.EditorLogPath
             );
+            AppendProfilerStatus(ref builder, pingSnapshot);
 
             builder.AppendLine("Scenes:");
             if (pingSnapshot.Scenes.Length == 0)
@@ -189,6 +190,14 @@ static class UnityProjectStatusFormatter
 
         builder.Append("Editor log: ");
         builder.AppendLine(editorLogPath);
+    }
+
+    static void AppendProfilerStatus(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (string.IsNullOrWhiteSpace(pingSnapshot.ProfilerStatusLine))
+            return;
+
+        builder.AppendLine(pingSnapshot.ProfilerStatusLine);
     }
 
     static string BuildStatusLine(UnityPingSnapshot pingSnapshot)

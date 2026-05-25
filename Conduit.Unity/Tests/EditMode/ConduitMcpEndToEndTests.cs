@@ -119,6 +119,9 @@ public sealed class ConduitMcpEndToEndTests
                      BridgeCommandTypes.RefreshAssetDatabase,
                      BridgeCommandTypes.ExecuteCode,
                      BridgeCommandTypes.Reflect,
+                     BridgeCommandTypes.ProfilerRecord,
+                     BridgeCommandTypes.ProfilerOverview,
+                     BridgeCommandTypes.ProfilerBrowse,
                  })
             Assert.That(tools, Has.Member(tool));
     }
