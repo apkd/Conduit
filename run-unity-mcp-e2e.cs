@@ -31,8 +31,8 @@ try
             repoRoot,
             timeout: TimeSpan.FromMinutes(5));
 
-    if (!options.NoKillUnity)
-        await KillUnityAsync();
+    if (options.KillUnity)
+        await KillUnityAsync(projectPath);
 
     var unityExitCode = await RunUnityTestsAsync(
         unityPath,
@@ -40,10 +40,22 @@ try
         resultsPath,
         logPath,
         filter,
+        repoRoot,
         unityTimeout,
-        batchMode: !options.NoBatchMode);
+        batchMode: !options.NoBatchMode,
+        unityWrapper: options.UnityWrapper);
 
-    EnsureFileExists(resultsPath, "Unity test results");
+    if (!File.Exists(resultsPath))
+    {
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"Unity exit code: {unityExitCode}");
+        Console.Error.WriteLine($"Results path: {resultsPath}");
+        Console.Error.WriteLine($"Log path: {logPath}");
+        PrintLogTail(logPath);
+        Console.Error.WriteLine("Unity test results were not produced.");
+        Environment.ExitCode = 1;
+        return;
+    }
 
     var xml = await File.ReadAllTextAsync(resultsPath);
     Console.Out.Write(xml);
@@ -80,19 +92,21 @@ static async Task<int> RunUnityTestsAsync(
     string resultsPath,
     string logPath,
     string filter,
+    string repoRoot,
     TimeSpan timeout,
-    bool batchMode)
+    bool batchMode,
+    string? unityWrapper)
 {
     var arguments = new List<string>
     {
         "-projectPath",
-        ToWindowsPath(projectPath),
+        projectPath,
         "-executeMethod",
         "Conduit.CI.RunFilteredEditModeTestsFromCommandLine",
         "-conduitTestResults",
-        ToWindowsPath(resultsPath),
+        resultsPath,
         "-logFile",
-        ToWindowsPath(logPath),
+        logPath,
     };
 
     if (batchMode)
@@ -109,24 +123,87 @@ static async Task<int> RunUnityTestsAsync(
 
     Console.Error.WriteLine(
         $"Running Unity EditMode tests through Conduit.CI with filter '{filter}' ({(batchMode ? "batchmode" : "interactive mode")})...");
+    var invocation = BuildUnityInvocation(unityPath, arguments, unityWrapper);
     return await RunProcessAsync(
-        unityPath,
-        arguments,
+        invocation.FileName,
+        invocation.Arguments,
         workingDirectory: null,
         timeout,
-        throwOnError: false);
+        throwOnError: false,
+        environment: BuildUnityEnvironment(repoRoot));
 }
 
-static async Task KillUnityAsync()
+static UnityInvocation BuildUnityInvocation(string unityPath, IReadOnlyList<string> unityArguments, string? unityWrapper)
 {
-    Console.Error.WriteLine("Killing live Unity.exe instances...");
+    if (string.IsNullOrWhiteSpace(unityWrapper) || string.Equals(unityWrapper, "none", StringComparison.OrdinalIgnoreCase))
+        return new(unityPath, unityArguments);
+
+    var wrapper = ResolveUnityWrapper(unityWrapper);
+    if (string.IsNullOrWhiteSpace(wrapper))
+        return new(unityPath, unityArguments);
+
+    var arguments = new List<string> { unityPath };
+    arguments.AddRange(unityArguments);
+    Console.Error.WriteLine($"Launching Unity through NixOS wrapper: {wrapper}");
+    return new(wrapper, arguments);
+}
+
+static string? ResolveUnityWrapper(string unityWrapper)
+{
+    if (string.Equals(unityWrapper, "auto", StringComparison.OrdinalIgnoreCase))
+        return FindUnityHubFhsEnv() ?? FindExecutableOnPath("steam-run");
+
+    if (unityWrapper.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0 || Path.IsPathRooted(unityWrapper))
+        return NormalizePath(unityWrapper);
+
+    return FindExecutableOnPath(unityWrapper) ?? unityWrapper;
+}
+
+static Dictionary<string, string?> BuildUnityEnvironment(string repoRoot)
+{
+    var environment = new Dictionary<string, string?>(StringComparer.Ordinal);
+    environment["CONDUIT_REPO_ROOT"] = repoRoot;
+    SetIfMissing(environment, "GIO_USE_VFS", "local");
+    SetIfMissing(environment, "GTK_USE_PORTAL", "0");
+    SetIfMissing(environment, "GSETTINGS_BACKEND", "memory");
+    SetIfMissing(environment, "NO_AT_BRIDGE", "1");
+    SetIfMissing(environment, "NIX_XDG_DESKTOP_PORTAL_DIR", ResolveNixXdgDesktopPortalDirectory("/run/current-system/sw"));
+    SetIfMissing(environment, "GIO_EXTRA_MODULES", ResolveNixGioExtraModules("/run/current-system/sw"));
+    return environment;
+}
+
+static void SetIfMissing(Dictionary<string, string?> environment, string name, string? value)
+{
+    if (string.IsNullOrWhiteSpace(value) || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)))
+        return;
+
+    environment[name] = value;
+}
+
+static async Task KillUnityAsync(string projectPath)
+{
+    Console.Error.WriteLine("Stopping live Unity instances for this project...");
     await RunProcessAsync(
-        ResolveTaskkillPath(),
-        ["/IM", "Unity.exe", "/F", "/T"],
+        "pkill",
+        ["-f", $"Unity.*-projectPath[ =]+{RegexEscapeForPkill(projectPath)}"],
         workingDirectory: null,
         timeout: TimeSpan.FromSeconds(30),
         throwOnError: false);
     await Task.Delay(TimeSpan.FromSeconds(2));
+}
+
+static string RegexEscapeForPkill(string value)
+{
+    var builder = new StringBuilder();
+    foreach (var character in value)
+    {
+        if ("\\.^$|?*+()[]{}".IndexOf(character) >= 0)
+            builder.Append('\\');
+
+        builder.Append(character);
+    }
+
+    return builder.ToString();
 }
 
 static async Task RunCheckedAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory, TimeSpan? timeout)
@@ -286,7 +363,7 @@ static string ResolveRepoRoot(string? overridePath)
 {
     if (!string.IsNullOrWhiteSpace(overridePath))
     {
-        var normalized = NormalizeToPlatformPath(overridePath);
+        var normalized = NormalizePath(overridePath);
         EnsureDirectoryExists(normalized, "Repository root");
         return normalized;
     }
@@ -308,23 +385,29 @@ static string ResolveProjectPath(string repoRoot, string? overridePath)
 {
     if (!string.IsNullOrWhiteSpace(overridePath))
     {
-        var normalized = NormalizeToPlatformPath(overridePath);
+        var normalized = NormalizePath(overridePath);
         EnsureDirectoryExists(normalized, "Unity project");
         return normalized;
     }
 
-    var sibling = Path.GetFullPath(Path.Combine(repoRoot, "..", "ConduitPlayground"));
-    EnsureDirectoryExists(sibling, "Default Unity project");
-    return sibling;
+    foreach (var siblingName in new[] { "ConduitPlayground", "conduit-test" })
+    {
+        var sibling = Path.GetFullPath(Path.Combine(repoRoot, "..", siblingName));
+        if (IsUnityProject(sibling))
+            return sibling;
+    }
+
+    throw new DirectoryNotFoundException(
+        $"Default Unity project was not found next to '{repoRoot}'. Pass --project <path>.");
 }
 
 static string ResolveResultsPath(string? overridePath)
 {
     var path = string.IsNullOrWhiteSpace(overridePath)
-        ? "/mnt/c/Users/apk/AppData/LocalLow/apkd/UnityConduit_Unity/TestResults.xml"
+        ? Path.Combine(Path.GetTempPath(), $"conduit-unity-e2e-{DateTimeOffset.Now:yyyyMMdd-HHmmss}-results.xml")
         : overridePath;
 
-    return NormalizeToPlatformPath(path);
+    return NormalizePath(path);
 }
 
 static string ResolveLogPath(string? overridePath)
@@ -333,13 +416,13 @@ static string ResolveLogPath(string? overridePath)
         ? Path.Combine(Path.GetTempPath(), $"conduit-unity-e2e-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.log")
         : overridePath;
 
-    return NormalizeToPlatformPath(path);
+    return NormalizePath(path);
 }
 
 static string ResolveUnityEditorPath(string projectPath, string? overridePath)
 {
     if (!string.IsNullOrWhiteSpace(overridePath))
-        return NormalizeToPlatformPath(overridePath);
+        return NormalizePath(overridePath);
 
     var projectVersionPath = Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt");
     var editorVersion = File.ReadLines(projectVersionPath)
@@ -351,65 +434,134 @@ static string ResolveUnityEditorPath(string projectPath, string? overridePath)
     if (string.IsNullOrWhiteSpace(editorVersion))
         throw new InvalidOperationException($"Could not read the Unity editor version from '{projectVersionPath}'.");
 
-    var candidates = new[]
-    {
-        NormalizeToPlatformPath($"/mnt/c/Program Files/Unity/Hub/Editor/{editorVersion}/Editor/Unity.exe"),
-        NormalizeToPlatformPath("/mnt/c/Program Files/Unity/Editor/Unity.exe"),
-        $@"C:\Program Files\Unity\Hub\Editor\{editorVersion}\Editor\Unity.exe",
-        @"C:\Program Files\Unity\Editor\Unity.exe",
-    }.Distinct(StringComparer.OrdinalIgnoreCase);
+    var candidates = EnumerateUnityEditorPathCandidates(editorVersion)
+        .Select(NormalizePath)
+        .Distinct(StringComparer.OrdinalIgnoreCase);
 
     var unityPath = candidates.FirstOrDefault(File.Exists);
     if (unityPath != null)
         return unityPath;
 
     throw new InvalidOperationException(
-        $"Could not find Unity.exe for version '{editorVersion}'. Pass --unity <path> to override.");
+        $"Could not find the Unity editor for version '{editorVersion}'. Pass --unity <path> to override.");
 }
 
-static string NormalizeToPlatformPath(string path) =>
-    UseWindowsPaths() ? ToWindowsPath(path) : ToWslPath(path);
-
-static string ToWslPath(string path)
+static IEnumerable<string> EnumerateUnityEditorPathCandidates(string editorVersion)
 {
-    if (string.IsNullOrWhiteSpace(path))
-        return path;
+    if (Environment.GetEnvironmentVariable("UNITY_EDITOR") is { Length: > 0 } unityEditor)
+        yield return unityEditor;
 
-    var normalized = path.Replace('\\', '/');
-    if (normalized.Length >= 3 && char.IsLetter(normalized[0]) && normalized[1] == ':' && normalized[2] == '/')
-        return $"/mnt/{char.ToLowerInvariant(normalized[0])}/{normalized[3..]}";
+    if (Environment.GetEnvironmentVariable("UNITY_PATH") is { Length: > 0 } unityPath)
+        yield return unityPath;
 
-    return normalized;
+    if (Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } home)
+    {
+        yield return Path.Combine(home, "Unity", "Hub", "Editor", editorVersion, "Editor", "Unity");
+        yield return Path.Combine(home, ".local", "share", "Unity", "Hub", "Editor", editorVersion, "Editor", "Unity");
+    }
+
+    yield return Path.Combine("/opt", "Unity", "Hub", "Editor", editorVersion, "Editor", "Unity");
+    yield return Path.Combine("/opt", "unity", editorVersion, "Editor", "Unity");
+
+    if (FindExecutableOnPath("unity-editor") is { Length: > 0 } unityEditorPath)
+        yield return unityEditorPath;
+
+    if (FindExecutableOnPath("Unity") is { Length: > 0 } unityOnPath)
+        yield return unityOnPath;
 }
 
-static string ToWindowsPath(string path)
+static string NormalizePath(string path) =>
+    Path.GetFullPath(path);
+
+static bool IsUnityProject(string path) =>
+    Directory.Exists(path)
+    && File.Exists(Path.Combine(path, "ProjectSettings", "ProjectVersion.txt"))
+    && File.Exists(Path.Combine(path, "Packages", "manifest.json"));
+
+static string? FindExecutableOnPath(string executableName)
 {
+    var path = Environment.GetEnvironmentVariable("PATH");
     if (string.IsNullOrWhiteSpace(path))
-        return path;
+        return null;
 
-    var normalized = path.Replace('/', '\\');
-    if (IsWindowsStylePath(normalized))
-        return normalized;
+    foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var candidate = Path.Combine(directory, executableName);
+        if (File.Exists(candidate))
+            return candidate;
+    }
 
-    normalized = ToWslPath(path);
-    if (normalized.StartsWith("/mnt/", StringComparison.Ordinal) && normalized.Length > 6 && normalized[6] == '/')
-        return $"{char.ToUpperInvariant(normalized[5])}:{normalized[6..].Replace('/', '\\')}";
-
-    return normalized.Replace('/', '\\');
+    return null;
 }
 
-static string ResolveTaskkillPath() =>
-    UseWindowsPaths() ? "taskkill.exe" : "/mnt/c/Windows/System32/taskkill.exe";
+static string? FindUnityHubFhsEnv()
+{
+    if (FindExecutableOnPath("unityhub-fhs-env") is { Length: > 0 } directPath)
+        return directPath;
 
-static bool IsWindowsStylePath(string path) =>
-    !string.IsNullOrWhiteSpace(path)
-    && path.Length >= 3
-    && char.IsLetter(path[0])
-    && path[1] == ':'
-    && (path[2] == '\\' || path[2] == '/');
+    var unityHubPath = FindExecutableOnPath("unityhub");
+    if (string.IsNullOrWhiteSpace(unityHubPath))
+        return null;
 
-static bool UseWindowsPaths() =>
-    OperatingSystem.IsWindows() || IsWindowsStylePath(Environment.CurrentDirectory);
+    try
+    {
+        return TryExtractUnityHubFhsEnvPath(File.ReadAllText(unityHubPath));
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static string? TryExtractUnityHubFhsEnvPath(string? wrapperText)
+{
+    if (string.IsNullOrWhiteSpace(wrapperText))
+        return null;
+
+    const string marker = "unityhub-fhs-env";
+    var searchStart = 0;
+    while (true)
+    {
+        var markerIndex = wrapperText.IndexOf(marker, searchStart, StringComparison.Ordinal);
+        if (markerIndex < 0)
+            return null;
+
+        var start = markerIndex;
+        while (start > 0 && !IsShellTokenBoundary(wrapperText[start - 1]))
+            start--;
+
+        var end = markerIndex + marker.Length;
+        while (end < wrapperText.Length && !IsShellTokenBoundary(wrapperText[end]))
+            end++;
+
+        var candidate = wrapperText[start..end];
+        if (candidate.EndsWith("/bin/unityhub-fhs-env", StringComparison.Ordinal)
+            || string.Equals(Path.GetFileName(candidate), "unityhub-fhs-env", StringComparison.Ordinal))
+            return candidate;
+
+        searchStart = markerIndex + marker.Length;
+    }
+}
+
+static bool IsShellTokenBoundary(char character) =>
+    char.IsWhiteSpace(character) || character is '"' or '\'';
+
+static string? ResolveNixXdgDesktopPortalDirectory(string systemProfilePath)
+{
+    var candidates = new[]
+    {
+        Path.Combine(systemProfilePath, "share", "xdg-desktop-portal", "portals"),
+        Path.Combine(systemProfilePath, "share", "xdg-desktop-portal"),
+    };
+
+    return candidates.FirstOrDefault(Directory.Exists);
+}
+
+static string? ResolveNixGioExtraModules(string systemProfilePath)
+{
+    var moduleRoot = Path.Combine(systemProfilePath, "lib", "gio", "modules");
+    return Directory.Exists(moduleRoot) ? moduleRoot : null;
+}
 
 static void EnsureFileExists(string path, string description)
 {
@@ -446,6 +598,9 @@ static RunnerOptions ParseArguments(string[] arguments)
             case "--unity":
                 options.UnityPath = ReadValue(arguments, ref index, "--unity");
                 break;
+            case "--unity-wrapper":
+                options.UnityWrapper = ReadValue(arguments, ref index, "--unity-wrapper");
+                break;
             case "--results":
                 options.ResultsPath = ReadValue(arguments, ref index, "--results");
                 break;
@@ -458,8 +613,8 @@ static RunnerOptions ParseArguments(string[] arguments)
             case "--skip-build":
                 options.SkipBuild = true;
                 break;
-            case "--no-kill-unity":
-                options.NoKillUnity = true;
+            case "--kill-unity":
+                options.KillUnity = true;
                 break;
             case "--help":
             case "-h":
@@ -502,15 +657,17 @@ static void PrintUsage()
     builder.AppendLine();
     builder.AppendLine("Options:");
     builder.AppendLine("  --repo <path>       Repository root. Defaults to walking up from the current directory.");
-    builder.AppendLine("  --project <path>    Unity project path. Defaults to ../ConduitPlayground.");
-    builder.AppendLine("  --unity <path>      Unity.exe path. Defaults to the version from ProjectVersion.txt.");
+    builder.AppendLine("  --project <path>    Unity project path. Defaults to ../ConduitPlayground, then ../conduit-test.");
+    builder.AppendLine("  --unity <path>      Unity editor path. Defaults to the version from ProjectVersion.txt.");
+    builder.AppendLine("  --unity-wrapper <x> Optional Unity launcher wrapper. Use none, auto, or a wrapper path.");
+    builder.AppendLine("                      Defaults to auto on NixOS and none elsewhere.");
     builder.AppendLine("  --filter <name>     Test filter. Defaults to ConduitMcpEndToEndTests.");
-    builder.AppendLine("  --results <path>    XML report path. Defaults to C:/Users/apk/AppData/LocalLow/apkd/UnityConduit_Unity/TestResults.xml.");
+    builder.AppendLine("  --results <path>    XML report path. Defaults to the platform temp directory.");
     builder.AppendLine("  --log <path>        Unity log path. Defaults to the platform temp directory.");
     builder.AppendLine("  --timeout <span>    Unity test timeout. Defaults to 00:10:00.");
     builder.AppendLine("  --no-batchmode      Run Unity without -batchmode/-nographics.");
     builder.AppendLine("  --skip-build        Skip the Conduit.Server Debug build prerequisite.");
-    builder.AppendLine("  --no-kill-unity     Do not kill live Unity.exe processes before the run.");
+    builder.AppendLine("  --kill-unity        Stop live Unity processes for the project before the run.");
     builder.AppendLine("  --help              Print this help.");
     Console.Error.Write(builder.ToString());
 }
@@ -520,14 +677,17 @@ sealed class RunnerOptions
     public string? RepoRoot { get; set; }
     public string? ProjectPath { get; set; }
     public string? UnityPath { get; set; }
+    public string? UnityWrapper { get; set; } = OperatingSystem.IsLinux() && File.Exists("/etc/NIXOS") ? "auto" : "none";
     public string? ResultsPath { get; set; }
     public string? LogPath { get; set; }
     public string? Filter { get; set; }
     public TimeSpan? Timeout { get; set; }
     public bool NoBatchMode { get; set; }
     public bool SkipBuild { get; set; }
-    public bool NoKillUnity { get; set; }
+    public bool KillUnity { get; set; }
 }
+
+sealed record UnityInvocation(string FileName, IReadOnlyList<string> Arguments);
 
 sealed record TestSummary(
     string Name,
