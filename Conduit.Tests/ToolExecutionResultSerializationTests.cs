@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Reflection;
 using JetBrains.Annotations;
 
 namespace Conduit;
@@ -198,5 +199,25 @@ public sealed class ToolExecutionResultSerializationTests
         await Assert.That(action).IsEqualTo("\"capture\"");
         await Assert.That(overviewMode).IsEqualTo("\"gc_kb\"");
         await Assert.That(browseSort).IsEqualTo("\"self_ms\"");
+    }
+
+    [Test]
+    public async Task McpToolParameterTypesHaveSourceGeneratedJsonMetadata()
+    {
+        var missing = typeof(UnityTools)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(method => method.GetCustomAttributes(inherit: false).Any(attribute => attribute.GetType().Name == "McpServerToolAttribute"))
+            .SelectMany(method => method.GetParameters())
+            .Select(parameter => Nullable.GetUnderlyingType(parameter.ParameterType) ?? parameter.ParameterType)
+            .Where(type => type != typeof(UnityProjectOperations)
+                           && type != typeof(UnityProjectRegistry)
+                           && type != typeof(CancellationToken))
+            .Distinct()
+            .Where(type => ConduitJsonContext.Default.GetTypeInfo(type) == null)
+            .Select(type => type.FullName ?? type.Name)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        await Assert.That(string.Join("\n", missing)).IsEqualTo("");
     }
 }
