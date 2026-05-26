@@ -178,7 +178,6 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
             "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
-            dotnet run --file run-conduit-binary-smoke.cs -- "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
           fi
 
           if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
@@ -196,6 +195,31 @@ jobs:
         with:
           name: ${{ matrix.publish_name }}
           path: ${{ runner.temp }}/release/${{ matrix.publish_target }}
+
+  test-server-binary:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-musl-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - name: Run binary smoke test
+        shell: bash
+        run: |
+          executable="$RUNNER_TEMP/conduit-server/conduit-linux-musl-x64"
+          chmod +x "$executable"
+          "$executable" --version
+          dotnet run --file run-conduit-binary-smoke.cs -- "$executable"
 
   test-server:
     needs: version
@@ -233,7 +257,7 @@ jobs:
         run: exit 1
 
   test-unity:
-    needs: [version, build]
+    needs: [version, build, test-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -365,7 +389,7 @@ jobs:
 
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
-    needs: [version, build, test-server, test-unity]
+    needs: [version, build, test-server, test-server-binary, test-unity]
     permissions:
       contents: write
     runs-on: ubuntu-latest

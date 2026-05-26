@@ -86,6 +86,9 @@ static async Task<string> RunStatusAsync(string conduitExecutable, string projec
     catch
     {
         var stderr = await ReadCapturedStandardErrorAsync(stderrTask);
+        if (process.HasExited)
+            Console.Error.WriteLine($"Server exit code: {process.ExitCode}");
+
         if (!string.IsNullOrWhiteSpace(stderr))
             Console.Error.WriteLine(stderr);
 
@@ -114,7 +117,7 @@ static async Task<string> ReadCapturedStandardErrorAsync(Task<List<string>> stde
     try
     {
         var lines = await stderrTask.WaitAsync(TimeSpan.FromSeconds(1));
-        return string.Join(Environment.NewLine, lines.TakeLast(24));
+        return string.Join(Environment.NewLine, lines.TakeLast(200));
     }
     catch
     {
@@ -137,7 +140,10 @@ static async Task<JsonObject> RequestAsync(Process process, int requestId, strin
     {
         var line = await process.StandardOutput.ReadLineAsync(cts.Token);
         if (line is null)
-            throw new InvalidOperationException($"Server exited before response {requestId}.");
+        {
+            var exitCode = process.HasExited ? process.ExitCode.ToString() : "unknown";
+            throw new InvalidOperationException($"Server exited before response {requestId}. Exit code: {exitCode}.");
+        }
 
         if (JsonNode.Parse(line) is JsonObject response && response["id"]?.GetValue<int>() == requestId)
             return response;
