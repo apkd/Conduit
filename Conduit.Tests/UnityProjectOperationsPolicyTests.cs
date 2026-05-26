@@ -185,6 +185,28 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task ProfilerRecordArgs_IncludeCaptureDelay()
+    {
+        var args = UnityProjectOperations.BuildProfilerRecordArgs(
+            ProfilerRecordAction.Capture,
+            frames: 120,
+            delaySeconds: 1.5,
+            target: "play_mode",
+            fileName: "capture"
+        );
+
+        await Assert.That(string.Join("\n", args)).IsEqualTo(
+            """
+            action=capture
+            frames=120
+            delay_seconds=1.5
+            target=play_mode
+            file_name=capture
+            """
+        );
+    }
+
+    [Test]
     public async Task ReflectValidation_RejectsMissingModeBeforeQueueingUnityWork()
     {
         var result = UnityProjectOperations.ValidateReflectRequest(" ");

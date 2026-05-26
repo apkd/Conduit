@@ -177,6 +177,65 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ProfilerOverview_ThreadLabelsOnlyShowMainRenderAndJobWorkers()
+    {
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("Main Thread", "", out var label), Is.True);
+        Assert.That(label, Is.EqualTo("main"));
+
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("Render Thread", "", out label), Is.True);
+        Assert.That(label, Is.EqualTo("render"));
+
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("Worker 7", "Job", out label), Is.True);
+        Assert.That(label, Is.EqualTo("worker7"));
+
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("Job Worker 12", "Job", out label), Is.True);
+        Assert.That(label, Is.EqualTo("worker12"));
+
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("Background Worker", "Loading", out _), Is.False);
+        Assert.That(profiler.TryGetOverviewThreadLabelForTest("GfxDeviceWorker", "", out _), Is.False);
+    }
+
+    [Test]
+    public void ProfilerOverview_ThreadLabelsUseStableDisplayOrder()
+    {
+        var labels = profiler.FormatThreadLabelsForTest(new[] { "worker10", "render", "worker2", "main", "worker0" });
+
+        Assert.That(labels, Is.EqualTo("main, render, worker0, worker2, worker10"));
+    }
+
+    [Test]
+    public void ProfilerOverview_InterestingSampleFilterSkipsContainersAndNoise()
+    {
+        Assert.That(
+            profiler.ShouldIncludeOverviewSampleForTest("EditorLoop", totalMs: 33, selfMs: 33, gcBytes: 0, frameTimeMs: 40, childCount: 0, mode: "cpu_ms"),
+            Is.False
+        );
+        Assert.That(
+            profiler.ShouldIncludeOverviewSampleForTest("EnemySystem.Update", totalMs: 2, selfMs: 2, gcBytes: 0, frameTimeMs: 100, childCount: 0, mode: "cpu_ms"),
+            Is.True
+        );
+        Assert.That(
+            profiler.ShouldIncludeOverviewSampleForTest("Tiny.Marker", totalMs: 0.5, selfMs: 0.5, gcBytes: 0, frameTimeMs: 100, childCount: 0, mode: "cpu_ms"),
+            Is.False
+        );
+        Assert.That(
+            profiler.ShouldIncludeOverviewSampleForTest("Allocator", totalMs: 0.01, selfMs: 0.01, gcBytes: 64, frameTimeMs: 100, childCount: 0, mode: "gc_kb"),
+            Is.True
+        );
+        Assert.That(
+            profiler.ShouldIncludeOverviewSampleForTest("Allocator.Parent", totalMs: 0.01, selfMs: 0.01, gcBytes: 64, frameTimeMs: 100, childCount: 1, mode: "gc_kb"),
+            Is.False
+        );
+    }
+
+    [Test]
+    public void ProfilerOverview_ActionableCpuUsesLeafTotalAndParentSelf()
+    {
+        Assert.That(profiler.GetActionableCpuMsForTest(totalMs: 20, selfMs: 1, childCount: 0), Is.EqualTo(20));
+        Assert.That(profiler.GetActionableCpuMsForTest(totalMs: 20, selfMs: 1, childCount: 3), Is.EqualTo(1));
+    }
+
+    [Test]
     public void Status_IncludesProfilerStatusLineInSnapshot()
     {
         var snapshot = status.Status();

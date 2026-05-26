@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Extensions.Hosting;
@@ -257,6 +258,7 @@ public sealed class UnityProjectOperations(
         string projectPath,
         ProfilerRecordAction action,
         int frames,
+        double delaySeconds,
         string target,
         string? fileName,
         CT ct
@@ -265,16 +267,25 @@ public sealed class UnityProjectOperations(
         new()
         {
             CommandType = BridgeCommandTypes.ProfilerRecord,
-            Args =
-            [
-                $"action={action.ToWireName()}",
-                $"frames={frames}",
-                $"target={target}",
-                $"file_name={fileName ?? string.Empty}",
-            ],
+            Args = BuildProfilerRecordArgs(action, frames, delaySeconds, target, fileName),
         },
         ct
     );
+
+    internal static string[] BuildProfilerRecordArgs(
+        ProfilerRecordAction action,
+        int frames,
+        double delaySeconds,
+        string target,
+        string? fileName
+    ) =>
+    [
+        $"action={action.ToWireName()}",
+        $"frames={frames}",
+        $"delay_seconds={delaySeconds.ToString(CultureInfo.InvariantCulture)}",
+        $"target={target}",
+        $"file_name={fileName ?? string.Empty}",
+    ];
 
     public Task<ToolExecutionResult> ProfilerOverviewAsync(
         string projectPath,

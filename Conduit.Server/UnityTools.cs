@@ -300,8 +300,6 @@ public sealed class UnityTools
     [Description(
         """
         Captures Unity Profiler frames or saves/loads profiler capture files.
-        Capture requires Unity to already be in the requested target mode.
-        Bare file names are saved under Temp/profiler; relative paths are project-relative; absolute paths are used directly.
         """
     )]
     public static Task<string> ProfilerRecord(
@@ -310,19 +308,20 @@ public sealed class UnityTools
         CancellationToken ct,
         [Description("Action to perform: capture, save, load, or list")]
         ProfilerRecordAction action = ProfilerRecordAction.Capture,
-        [Description("Number of completed frames to capture when action is capture. Clamped to 1..600.")]
+        [Description("Number of completed frames to capture when action is capture (max 600).")]
         int frames = 120,
+        [Description("Seconds to wait before clearing profiler history and capturing frames. Applies only to capture.")]
+        double delaySeconds = 1,
         [Description("Capture target. Use play_mode or edit_mode.")]
         string target = "play_mode",
-        [Description("Capture file name or path. Bare names resolve under Temp/profiler.")]
+        [Description("Capture file name or path.")]
         string? fileName = null
-    ) => ToPlainTextToolResponseAsync(operations.ProfilerRecordAsync(projectPath, action, frames, target, fileName, ct));
+    ) => ToPlainTextToolResponseAsync(operations.ProfilerRecordAsync(projectPath, action, frames, delaySeconds, target, fileName, ct));
 
     [McpServerTool(Name = CMD.ProfilerOverview)]
     [Description(
         """
         Summarizes Unity Profiler frames and main-thread hot samples.
-        Frame ranges use available-frame ordinals such as 0..^1 or ^120..^1.
         """
     )]
     public static Task<string> ProfilerOverview(
@@ -338,17 +337,16 @@ public sealed class UnityTools
     [McpServerTool(Name = CMD.ProfilerBrowse)]
     [Description(
         """
-        Browses one Unity Profiler hierarchy frame/thread using merged samples.
-        Reads profiler data directly and does not open or mutate the Profiler Window.
+        Browses the sample hierarchy of a captured frame in the Unity Profiler.
         """
     )]
     public static Task<string> ProfilerBrowse(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
         CancellationToken ct,
-        [Description("Frame selector: selected, latest, an available-frame ordinal, or index:<unityFrameIndex>.")]
+        [Description("Frame selector: selected, latest, or an available-frame ordinal.")]
         string frame = "selected",
-        [Description("Thread selector: main, render, worker<N>, all, index:<threadIndex>, id:<threadId>, or name:<fragment>.")]
+        [Description("Thread selector: main, render, or worker<N>.")]
         string thread = "main",
         [Description("Root selector: empty root, an output id, slash-separated path, or exact marker/sample name.")]
         string root = "",

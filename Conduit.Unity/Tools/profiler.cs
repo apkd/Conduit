@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.Profiling;
@@ -18,10 +19,16 @@ namespace Conduit
     {
         const int DefaultCaptureFrameCount = 120;
         const int MaxCaptureFrameCount = 600;
+        const double DefaultCaptureDelaySeconds = 1;
+        const double MaxCaptureDelaySeconds = 60;
         const int MaxScanFrameCount = 2000;
         const int OverviewRowLimit = 10;
         const int MaxBrowseLimit = 200;
         const string CaptureDirectory = "Temp/profiler";
+        static readonly Regex jobWorkerThreadNamePattern = new(
+            @"^(?:Worker|Job Worker) (?<index>\d+)$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant
+        );
 
         public static string BuildStatusLine()
         {
@@ -73,12 +80,14 @@ namespace Conduit
                 if (frames.Count == 0)
                     return Success("No profiler frames available. Use profiler_record action=capture first.");
 
+                var availableFrames = GetAvailableFrames();
+                var ordinalByFrame = BuildFrameOrdinalMap(availableFrames);
                 var frameStats = new List<FrameStats>(frames.Count);
-                var threadLabels = new SortedSet<string>(StringComparer.Ordinal);
+                var threadLabels = new HashSet<string>(StringComparer.Ordinal);
                 long sampleCount = 0;
                 foreach (var frame in frames)
                 {
-                    var stats = ReadFrameStats(frame);
+                    var stats = ReadFrameStats(frame, ordinalByFrame.GetValueOrDefault(frame, -1));
                     frameStats.Add(stats);
                     sampleCount += stats.SampleCount;
                     foreach (var thread in stats.Threads)
@@ -87,7 +96,7 @@ namespace Conduit
 
                 var builder = new StringBuilder();
                 builder.Append("Threads: ");
-                builder.AppendLine(threadLabels.Count == 0 ? "none" : string.Join(", ", threadLabels));
+                builder.AppendLine(FormatThreadLabels(threadLabels));
                 builder.Append("Sample count: ");
                 builder.AppendLine(sampleCount.ToString(CultureInfo.InvariantCulture));
                 builder.AppendLine();
@@ -171,10 +180,14 @@ namespace Conduit
         static async Task<BridgeCommandResult> CaptureAsync(Dictionary<string, string> options)
         {
             var frames = Clamp(ParseInt(GetOption(options, "frames", DefaultCaptureFrameCount.ToString(CultureInfo.InvariantCulture)), DefaultCaptureFrameCount), 1, MaxCaptureFrameCount);
+            var delaySeconds = Clamp(ParseDouble(GetOption(options, "delay_seconds", DefaultCaptureDelaySeconds.ToString(CultureInfo.InvariantCulture)), DefaultCaptureDelaySeconds), 0, MaxCaptureDelaySeconds);
             var target = GetOption(options, "target", "play_mode");
             var fileName = GetOption(options, "file_name", "");
             if (!TryValidateTarget(target, out var targetDiagnostic))
                 return Failure("Unable to capture profile.", targetDiagnostic, null);
+
+            if (delaySeconds > 0)
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
 
             var previousProfileEditor = ProfilerDriver.profileEditor;
             try
@@ -276,12 +289,8 @@ namespace Conduit
             builder.AppendLine();
 
             var samples = CollectMainThreadSamples(frameStats);
-            builder.AppendLine("Worst samples, sorted by cpu_ms (total):");
-            AppendSampleTable(builder, TopSamples(samples, sample => sample.TotalMs));
-            builder.AppendLine();
-
-            builder.AppendLine("Worst samples, sorted by cpu_ms (self):");
-            AppendSampleTable(builder, TopSamples(samples, sample => sample.SelfMs));
+            builder.AppendLine("Interesting samples, sorted by actionable_cpu_ms:");
+            AppendSampleTable(builder, TopInterestingSamples(samples, "cpu_ms"), includeRank: true);
             AppendWarnings(builder, warnings);
         }
 
@@ -291,8 +300,8 @@ namespace Conduit
             AppendFrameTable(builder, TopFrames(frameStats, stats => stats.GcBytes));
             builder.AppendLine();
 
-            builder.AppendLine("Worst samples, sorted by gc_kb:");
-            AppendSampleTable(builder, TopSamples(CollectMainThreadSamples(frameStats), sample => sample.GcBytes));
+            builder.AppendLine("Interesting samples, sorted by gc_kb:");
+            AppendSampleTable(builder, TopInterestingSamples(CollectMainThreadSamples(frameStats), "gc_kb"), includeRank: true);
             AppendWarnings(builder, warnings);
         }
 
@@ -315,26 +324,83 @@ namespace Conduit
                 if (!hierarchy.valid)
                     continue;
 
-                CollectSamples(hierarchy, hierarchy.GetRootItemID(), frame.FrameIndex, hierarchy.frameTimeMs, samples, skipRoot: true);
+                CollectSampleChildren(hierarchy, hierarchy.GetRootItemID(), frame.FrameIndex, frame.FrameOrdinal, hierarchy.frameTimeMs, samples, identityPath: "", displayPath: "", depth: 0);
             }
 
             return samples;
         }
 
-        static void CollectSamples(HierarchyFrameDataView hierarchy, int itemId, int frameIndex, float frameTimeMs, List<SampleRow> samples, bool skipRoot)
+        static void CollectSampleChildren(
+            HierarchyFrameDataView hierarchy,
+            int itemId,
+            int frameIndex,
+            int frameOrdinal,
+            float frameTimeMs,
+            List<SampleRow> samples,
+            string identityPath,
+            string displayPath,
+            int depth
+        )
         {
-            if (!skipRoot)
-                samples.Add(ReadSampleRow(hierarchy, itemId, frameIndex, frameTimeMs));
-
             using var pooledChildren = ConduitUtility.GetPooledList<int>(out var children);
             hierarchy.GetItemChildren(itemId, children);
+            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var child in children)
-                CollectSamples(hierarchy, child, frameIndex, frameTimeMs, samples, skipRoot: false);
+            {
+                var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
+                var segment = NormalizeIdentitySegment(childName);
+                occurrences.TryGetValue(segment, out var occurrence);
+                occurrences[segment] = ++occurrence;
+
+                var childIdentityPath = string.IsNullOrEmpty(identityPath)
+                    ? $"{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]"
+                    : $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]";
+                var childDisplayPath = string.IsNullOrEmpty(displayPath) ? childName : $"{displayPath}/{childName}";
+                CollectSampleTree(hierarchy, child, frameIndex, frameOrdinal, frameTimeMs, samples, childIdentityPath, childDisplayPath, depth);
+            }
         }
 
-        static FrameStats ReadFrameStats(int frameIndex)
+        static void CollectSampleTree(
+            HierarchyFrameDataView hierarchy,
+            int itemId,
+            int frameIndex,
+            int frameOrdinal,
+            float frameTimeMs,
+            List<SampleRow> samples,
+            string identityPath,
+            string displayPath,
+            int depth
+        )
         {
-            var stats = new FrameStats { FrameIndex = frameIndex };
+            using var pooledChildren = ConduitUtility.GetPooledList<int>(out var children);
+            hierarchy.GetItemChildren(itemId, children);
+            samples.Add(ReadSampleRow(hierarchy, itemId, frameIndex, frameOrdinal, frameTimeMs, identityPath, displayPath, depth, children.Count));
+
+            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var child in children)
+            {
+                var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
+                var segment = NormalizeIdentitySegment(childName);
+                occurrences.TryGetValue(segment, out var occurrence);
+                occurrences[segment] = ++occurrence;
+
+                CollectSampleTree(
+                    hierarchy,
+                    child,
+                    frameIndex,
+                    frameOrdinal,
+                    frameTimeMs,
+                    samples,
+                    $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]",
+                    $"{displayPath}/{childName}",
+                    depth + 1
+                );
+            }
+        }
+
+        static FrameStats ReadFrameStats(int frameIndex, int frameOrdinal = -1)
+        {
+            var stats = new FrameStats { FrameIndex = frameIndex, FrameOrdinal = frameOrdinal };
             for (var threadIndex = 0; ; threadIndex++)
             {
                 using var raw = ProfilerDriver.GetRawFrameDataView(frameIndex, threadIndex);
@@ -351,7 +417,8 @@ namespace Conduit
                 stats.ThreadCount++;
                 stats.SampleCount += raw.sampleCount;
                 stats.GcBytes += ReadGcAllocBytes(raw);
-                stats.Threads.Add(ClassifyThread(raw.threadName, raw.threadGroupName, stats.Threads.Count));
+                if (ClassifyThread(raw.threadName, raw.threadGroupName) is { } label)
+                    stats.Threads.Add(label);
             }
 
             return stats;
@@ -556,17 +623,21 @@ namespace Conduit
                 return frames[^1];
             }
 
-            if (selector.StartsWith("index:", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(selector["index:".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var explicitFrame)
-                && frames.Contains(explicitFrame))
-                return explicitFrame;
-
             if (int.TryParse(selector, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal)
                 && ordinal >= 0
                 && ordinal < frames.Count)
                 return frames[ordinal];
 
             throw new InvalidOperationException($"Frame selector '{selector}' did not match an available profiler frame.");
+        }
+
+        static Dictionary<int, int> BuildFrameOrdinalMap(List<int> frames)
+        {
+            var ordinals = new Dictionary<int, int>();
+            for (var i = 0; i < frames.Count; i++)
+                ordinals[frames[i]] = i;
+
+            return ordinals;
         }
 
         static List<int> ResolveFrameRange(string frameRange, out List<string> warnings)
@@ -640,43 +711,17 @@ namespace Conduit
                 return false;
             }
 
-            if (string.Equals(selector, "all", StringComparison.OrdinalIgnoreCase))
-            {
-                thread = default;
-                diagnostic = "profiler_browse requires a single thread selector.";
-                return false;
-            }
-
             if (string.Equals(selector, "main", StringComparison.OrdinalIgnoreCase))
-                return TryFindThread(threads, info => info.Name.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0, out thread, out diagnostic)
-                       || UseThread(threads[0], out thread, out diagnostic);
+                return TryFindThread(threads, IsMainThread, out thread, out diagnostic);
 
             if (string.Equals(selector, "render", StringComparison.OrdinalIgnoreCase))
-                return TryFindThread(threads, info => info.Name.IndexOf("render", StringComparison.OrdinalIgnoreCase) >= 0, out thread, out diagnostic);
+                return TryFindThread(threads, IsRenderThread, out thread, out diagnostic);
 
             if (selector.StartsWith("worker", StringComparison.OrdinalIgnoreCase)
                 && int.TryParse(selector["worker".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var workerIndex))
-            {
-                var workers = threads.FindAll(info => info.Name.IndexOf("worker", StringComparison.OrdinalIgnoreCase) >= 0);
-                if (workerIndex >= 0 && workerIndex < workers.Count)
-                    return UseThread(workers[workerIndex], out thread, out diagnostic);
-            }
+                return TryFindThread(threads, info => TryParseJobWorkerIndex(info, out var index) && index == workerIndex, out thread, out diagnostic);
 
-            if (selector.StartsWith("index:", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(selector["index:".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
-                return TryFindThread(threads, info => info.Index == index, out thread, out diagnostic);
-
-            if (selector.StartsWith("id:", StringComparison.OrdinalIgnoreCase)
-                && ulong.TryParse(selector["id:".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
-                return TryFindThread(threads, info => info.Id == id, out thread, out diagnostic);
-
-            if (selector.StartsWith("name:", StringComparison.OrdinalIgnoreCase))
-            {
-                var fragment = selector["name:".Length..];
-                return TryFindThread(threads, info => info.Name.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0, out thread, out diagnostic);
-            }
-
-            diagnostic = $"Profiler thread '{selector}' was not found.";
+            diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, or worker<N>.";
             thread = default;
             return false;
         }
@@ -711,7 +756,6 @@ namespace Conduit
                 threads.Add(new()
                 {
                     Index = threadIndex,
-                    Id = raw.threadId,
                     Name = raw.threadName ?? $"Thread {threadIndex.ToString(CultureInfo.InvariantCulture)}",
                     GroupName = raw.threadGroupName ?? string.Empty,
                 });
@@ -851,20 +895,41 @@ namespace Conduit
         static int ParseInt(string value, int defaultValue)
             => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : defaultValue;
 
+        static double ParseDouble(string value, double defaultValue)
+            => double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : defaultValue;
+
         static bool ParseBool(string value, bool defaultValue)
             => bool.TryParse(value, out var parsed) ? parsed : defaultValue;
 
         static int Clamp(int value, int min, int max)
             => Math.Min(max, Math.Max(min, value));
 
+        static double Clamp(double value, double min, double max)
+            => Math.Min(max, Math.Max(min, value));
+
         static double ReadColumn(HierarchyFrameDataView hierarchy, int itemId, int column)
             => hierarchy.GetItemColumnDataAsDouble(itemId, column);
 
-        static SampleRow ReadSampleRow(HierarchyFrameDataView hierarchy, int itemId, int frameIndex, float frameTimeMs)
+        static SampleRow ReadSampleRow(
+            HierarchyFrameDataView hierarchy,
+            int itemId,
+            int frameIndex,
+            int frameOrdinal,
+            float frameTimeMs,
+            string identityPath,
+            string displayPath,
+            int depth,
+            int childCount
+        )
             => new()
             {
                 FrameIndex = frameIndex,
+                FrameOrdinal = frameOrdinal,
                 Name = hierarchy.GetItemName(itemId) ?? "<unnamed>",
+                IdentityPath = identityPath,
+                DisplayPath = displayPath,
+                Depth = depth,
+                ChildCount = childCount,
                 TotalMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnTotalTime),
                 SelfMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnSelfTime),
                 GcBytes = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnGcMemory),
@@ -884,32 +949,127 @@ namespace Conduit
             return samples.GetRange(0, Math.Min(OverviewRowLimit, samples.Count));
         }
 
+        static IEnumerable<SampleRow> TopInterestingSamples(List<SampleRow> samples, string mode)
+        {
+            var bestByPath = new Dictionary<string, SampleRow>(StringComparer.Ordinal);
+            foreach (var sample in samples)
+            {
+                if (!ShouldIncludeOverviewSample(sample, mode))
+                    continue;
+
+                var key = string.IsNullOrEmpty(sample.IdentityPath) ? sample.DisplayPath : sample.IdentityPath;
+                if (!bestByPath.TryGetValue(key, out var existing) || CompareOverviewSamples(sample, existing, mode) < 0)
+                    bestByPath[key] = sample;
+            }
+
+            var rows = new List<SampleRow>(bestByPath.Values);
+            rows.Sort((left, right) => CompareOverviewSamples(left, right, mode));
+            return rows.GetRange(0, Math.Min(OverviewRowLimit, rows.Count));
+        }
+
+        static int CompareOverviewSamples(SampleRow left, SampleRow right, string mode)
+        {
+            var leftScore = GetOverviewScore(left, mode);
+            var rightScore = GetOverviewScore(right, mode);
+            var scoreComparison = rightScore.CompareTo(leftScore);
+            if (scoreComparison != 0)
+                return scoreComparison;
+
+            var totalComparison = right.TotalMs.CompareTo(left.TotalMs);
+            if (totalComparison != 0)
+                return totalComparison;
+
+            var selfComparison = right.SelfMs.CompareTo(left.SelfMs);
+            return selfComparison != 0
+                ? selfComparison
+                : left.DisplayPath.CompareTo(right.DisplayPath);
+        }
+
+        static bool ShouldIncludeOverviewSample(SampleRow sample, string mode)
+        {
+            if (IsOverviewContainerSample(sample))
+                return false;
+
+            if (mode == "gc_kb")
+                return sample.GcBytes > 0 && sample.ChildCount == 0;
+
+            return GetActionableCpuMs(sample) >= GetOverviewThresholdMs(sample.FrameTimeMs);
+        }
+
+        static double GetOverviewScore(SampleRow sample, string mode)
+            => mode == "gc_kb" ? sample.GcBytes : GetActionableCpuMs(sample);
+
+        static double GetActionableCpuMs(SampleRow sample)
+        {
+            if (sample.ChildCount == 0)
+                return sample.TotalMs;
+
+            return sample.SelfMs;
+        }
+
+        static bool IsOverviewContainerSample(SampleRow sample)
+        {
+            var name = sample.Name.Trim();
+            if (string.Equals(name, "EditorLoop", StringComparison.Ordinal)
+                || string.Equals(name, "PlayerLoop", StringComparison.Ordinal)
+                || string.Equals(name, "Main Thread", StringComparison.Ordinal)
+                || string.Equals(name, "Render Thread", StringComparison.Ordinal))
+                return true;
+
+            return sample.ChildCount > 0
+                   && sample.SelfMs <= sample.TotalMs * 0.05
+                   && IsUnityLoopPhaseName(name);
+        }
+
+        static bool IsUnityLoopPhaseName(string name)
+            => name switch
+            {
+                "Initialization" => true,
+                "EarlyUpdate"    => true,
+                "FixedUpdate"    => true,
+                "PreUpdate"      => true,
+                "Update"         => true,
+                "PreLateUpdate"  => true,
+                "PostLateUpdate" => true,
+                "TimeUpdate"     => true,
+                _                => false,
+            };
+
+        static double GetOverviewThresholdMs(float frameTimeMs)
+            => Math.Max(0.001, frameTimeMs * 0.01);
+
         static void AppendFrameTable(StringBuilder builder, IEnumerable<FrameStats> rows)
         {
-            builder.AppendLine("frame  cpu_ms  gpu_ms  fps   gc_kb  samples");
+            builder.AppendLine("frame    cpu_ms    gpu_ms    fps       gc_kb    samples");
             foreach (var row in rows)
             {
-                builder.Append(row.FrameIndex.ToString(CultureInfo.InvariantCulture).PadRight(7));
-                builder.Append(FormatNumber(row.CpuMs).PadRight(8));
-                builder.Append(FormatOptionalNumber(row.GpuMs).PadRight(8));
-                builder.Append(FormatNumber(row.Fps).PadRight(6));
-                builder.Append(FormatKb(row.GcBytes).PadRight(7));
+                builder.Append(FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex).PadRight(9));
+                builder.Append(FormatNumber(row.CpuMs).PadRight(10));
+                builder.Append(FormatOptionalNumber(row.GpuMs).PadRight(10));
+                builder.Append(FormatNumber(row.Fps).PadRight(10));
+                builder.Append(FormatKb(row.GcBytes).PadRight(9));
                 builder.AppendLine(row.SampleCount.ToString(CultureInfo.InvariantCulture));
             }
         }
 
-        static void AppendSampleTable(StringBuilder builder, IEnumerable<SampleRow> rows)
+        static void AppendSampleTable(StringBuilder builder, IEnumerable<SampleRow> rows, bool includeRank = false)
         {
-            builder.AppendLine("frame  total_ms  self_ms  gc_kb  calls  frame_%  name");
+            builder.AppendLine(includeRank
+                ? "rank  frame  total_ms  self_ms  gc_kb  calls  frame_%  sample"
+                : "frame  total_ms  self_ms  gc_kb  calls  frame_%  name");
+            var rank = 1;
             foreach (var row in rows)
             {
-                builder.Append(row.FrameIndex.ToString(CultureInfo.InvariantCulture).PadRight(7));
+                if (includeRank)
+                    builder.Append((rank++).ToString(CultureInfo.InvariantCulture).PadRight(6));
+
+                builder.Append(FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex).PadRight(7));
                 builder.Append(FormatNumber(row.TotalMs).PadRight(10));
                 builder.Append(FormatNumber(row.SelfMs).PadRight(9));
                 builder.Append(FormatKb(row.GcBytes).PadRight(7));
                 builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
                 builder.Append(FormatPercent(row.TotalMs, row.FrameTimeMs).PadRight(9));
-                builder.AppendLine(row.Name);
+                builder.AppendLine(includeRank ? FormatSamplePath(row.DisplayPath) : row.Name);
             }
         }
 
@@ -976,28 +1136,96 @@ namespace Conduit
             }
         }
 
-        static string ClassifyThread(string? threadName, string? threadGroupName, int fallbackIndex)
+        static string? ClassifyThread(string? threadName, string? threadGroupName)
         {
-            var name = string.IsNullOrWhiteSpace(threadName)
-                ? threadGroupName ?? string.Empty
-                : threadName ?? string.Empty;
-            if (name.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0)
+            var name = (threadName ?? string.Empty).Trim();
+            if (string.Equals(name, "Main Thread", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "UnityMain", StringComparison.OrdinalIgnoreCase))
                 return "main";
 
-            if (name.IndexOf("render", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (string.Equals(name, "Render Thread", StringComparison.OrdinalIgnoreCase))
                 return "render";
 
-            if (name.IndexOf("worker", StringComparison.OrdinalIgnoreCase) >= 0)
-                return $"worker{fallbackIndex.ToString(CultureInfo.InvariantCulture)}";
+            if (TryParseJobWorkerIndex(threadName, threadGroupName, out var workerIndex))
+                return $"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}";
 
-            return string.IsNullOrWhiteSpace(name) ? $"thread{fallbackIndex.ToString(CultureInfo.InvariantCulture)}" : name;
+            return null;
         }
+
+        static bool IsMainThread(ThreadInfo info)
+            => string.Equals(info.Name.Trim(), "Main Thread", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(info.Name.Trim(), "UnityMain", StringComparison.OrdinalIgnoreCase);
+
+        static bool IsRenderThread(ThreadInfo info)
+            => string.Equals(info.Name.Trim(), "Render Thread", StringComparison.OrdinalIgnoreCase);
+
+        static bool TryParseJobWorkerIndex(ThreadInfo info, out int workerIndex)
+            => TryParseJobWorkerIndex(info.Name, info.GroupName, out workerIndex);
+
+        static bool TryParseJobWorkerIndex(string? threadName, string? threadGroupName, out int workerIndex)
+        {
+            workerIndex = -1;
+            if (!string.Equals((threadGroupName ?? string.Empty).Trim(), "Job", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var match = jobWorkerThreadNamePattern.Match((threadName ?? string.Empty).Trim());
+            return match.Success
+                   && int.TryParse(match.Groups["index"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out workerIndex);
+        }
+
+        static string FormatThreadLabels(IEnumerable<string> labels)
+        {
+            var sorted = new List<string>(labels);
+            sorted.Sort(CompareThreadLabels);
+            return sorted.Count == 0 ? "none" : string.Join(", ", sorted);
+        }
+
+        static int CompareThreadLabels(string left, string right)
+        {
+            var leftRank = GetThreadLabelRank(left);
+            var rightRank = GetThreadLabelRank(right);
+            if (leftRank != rightRank)
+                return leftRank.CompareTo(rightRank);
+
+            if (TryParseWorkerLabel(left, out var leftWorker) && TryParseWorkerLabel(right, out var rightWorker))
+                return leftWorker.CompareTo(rightWorker);
+
+            return string.Compare(left, right, StringComparison.Ordinal);
+        }
+
+        static int GetThreadLabelRank(string label)
+        {
+            if (string.Equals(label, "main", StringComparison.Ordinal))
+                return 0;
+
+            if (string.Equals(label, "render", StringComparison.Ordinal))
+                return 1;
+
+            return TryParseWorkerLabel(label, out _) ? 2 : 3;
+        }
+
+        static bool TryParseWorkerLabel(string label, out int workerIndex)
+        {
+            workerIndex = -1;
+            return label.StartsWith("worker", StringComparison.Ordinal)
+                   && int.TryParse(label["worker".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out workerIndex);
+        }
+
+        static string FormatFrameOrdinal(int frameOrdinal, int frameIndex)
+            => (frameOrdinal >= 0 ? frameOrdinal : frameIndex).ToString(CultureInfo.InvariantCulture);
+
+        static string FormatSamplePath(string displayPath)
+            => string.IsNullOrWhiteSpace(displayPath) ? "<unnamed>" : displayPath;
 
         static string FormatNumber(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
         static string FormatOptionalNumber(double value) => value <= 0 ? "n/a" : FormatNumber(value);
 
-        static string FormatKb(double bytes) => (bytes / 1024.0).ToString("0.#", CultureInfo.InvariantCulture);
+        static string FormatKb(double bytes)
+        {
+            var kb = bytes / 1024.0;
+            return bytes > 0 && kb < 0.1 ? "<0.1" : kb.ToString("0.#", CultureInfo.InvariantCulture);
+        }
 
         static string FormatMb(long bytes) => (bytes / 1024.0 / 1024.0).ToString("0.#", CultureInfo.InvariantCulture);
 
@@ -1080,6 +1308,40 @@ namespace Conduit
                 frameTimeMs
             );
 
+        internal static bool TryGetOverviewThreadLabelForTest(string? threadName, string? threadGroupName, out string label)
+        {
+            label = ClassifyThread(threadName, threadGroupName) ?? string.Empty;
+            return label.Length > 0;
+        }
+
+        internal static string FormatThreadLabelsForTest(IEnumerable<string> labels)
+            => FormatThreadLabels(labels);
+
+        internal static bool ShouldIncludeOverviewSampleForTest(
+            string name,
+            double totalMs,
+            double selfMs,
+            double gcBytes,
+            float frameTimeMs,
+            int childCount,
+            string mode
+        )
+            => ShouldIncludeOverviewSample(
+                new()
+                {
+                    Name = name,
+                    TotalMs = totalMs,
+                    SelfMs = selfMs,
+                    GcBytes = gcBytes,
+                    FrameTimeMs = frameTimeMs,
+                    ChildCount = childCount,
+                },
+                mode
+            );
+
+        internal static double GetActionableCpuMsForTest(double totalMs, double selfMs, int childCount)
+            => GetActionableCpuMs(new() { TotalMs = totalMs, SelfMs = selfMs, ChildCount = childCount });
+
         internal struct CapturePath
         {
             public string AbsolutePath;
@@ -1089,7 +1351,6 @@ namespace Conduit
         struct ThreadInfo
         {
             public int Index;
-            public ulong Id;
             public string Name;
             public string GroupName;
         }
@@ -1097,6 +1358,7 @@ namespace Conduit
         sealed class FrameStats
         {
             public int FrameIndex;
+            public int FrameOrdinal;
             public double CpuMs;
             public double GpuMs;
             public double Fps;
@@ -1109,7 +1371,12 @@ namespace Conduit
         sealed class SampleRow
         {
             public int FrameIndex;
+            public int FrameOrdinal;
             public string Name = string.Empty;
+            public string IdentityPath = string.Empty;
+            public string DisplayPath = string.Empty;
+            public int Depth;
+            public int ChildCount;
             public double TotalMs;
             public double SelfMs;
             public double GcBytes;
