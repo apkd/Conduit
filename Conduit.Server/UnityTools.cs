@@ -10,7 +10,7 @@ using CMD = Conduit.BridgeCommandTypes;
 [SuppressMessage("ReSharper", "RawStringCanBeSimplified")]
 public sealed class UnityTools
 {
-    [McpServerTool(Name = CMD.Status)]
+    [McpServerTool(Name = CMD.Status, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """Checks whether a Unity project is reachable through the bridge and returns the project status or failure diagnostics"""
     )]
@@ -20,7 +20,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => operations.StatusAsync(projectPath, ct);
 
-    [McpServerTool(Name = CMD.Play)]
+    [McpServerTool(Name = CMD.Play, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """Toggles between play mode and edit mode, and returns the mode that Unity entered"""
     )]
@@ -30,7 +30,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.PlayAsync(projectPath, ct));
 
-    [McpServerTool(Name = CMD.Screenshot)]
+    [McpServerTool(Name = CMD.Screenshot, ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
         """
         Captures an image and saves it into Temp/screenshot.
@@ -47,7 +47,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ScreenshotAsync(projectPath, target, ct));
 
-    [McpServerTool(Name = "restart")]
+    [McpServerTool(Name = "restart", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """
         Starts or restarts the Unity editor.
@@ -60,7 +60,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.RestartAsync(projectPath, ct));
 
-    [McpServerTool(Name = "help")]
+    [McpServerTool(Name = "help", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         $"""
          Returns additional help for finding objects with {CMD.Search}, {CMD.Show}, {CMD.ToJson}, and {CMD.FromJsonOverwrite}.
@@ -70,7 +70,7 @@ public sealed class UnityTools
     public static string Help(UnityProjectRegistry projectRegistry)
         => HelpTool.GetHelpString(projectRegistry.GetLatestUnityVersion());
 
-    [McpServerTool(Name = CMD.GetDependencies)]
+    [McpServerTool(Name = CMD.GetDependencies, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Lists the assets that this asset directly references. Answers 'what does this use?'
@@ -84,7 +84,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.GetDependenciesAsync(projectPath, asset, ct));
 
-    [McpServerTool(Name = CMD.FindReferencesTo)]
+    [McpServerTool(Name = CMD.FindReferencesTo, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """Lists assets that directly reference the specified asset. """
     )]
@@ -98,7 +98,7 @@ public sealed class UnityTools
         bool rebuildCache = false
     ) => ToPlainTextToolResponseAsync(operations.FindReferencesToAsync(projectPath, asset, rebuildCache, ct));
 
-    [McpServerTool(Name = CMD.FindMissingScripts)]
+    [McpServerTool(Name = CMD.FindMissingScripts, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """Finds missing MonoBehaviour scripts in one or more scenes or prefabs"""
     )]
@@ -110,7 +110,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.FindMissingScriptsAsync(projectPath, assetPattern, ct));
 
-    [McpServerTool(Name = CMD.Show)]
+    [McpServerTool(Name = CMD.Show, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         $"""
          Prints a compact, readable description of a Unity object. Displays both serialized and private fields.
@@ -127,7 +127,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ShowAsync(projectPath, query, ct));
 
-    [McpServerTool(Name = CMD.Search)]
+    [McpServerTool(Name = CMD.Search, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         $"""
         Universal Unity search tool that supports assets, prefabs, scene GameObjects, tests, and more.
@@ -145,7 +145,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.SearchAsync(projectPath, query, ct));
 
-    [McpServerTool(Name = CMD.ToJson)]
+    [McpServerTool(Name = CMD.ToJson, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         $"""Reads a resolved Unity object and returns its JSON representation. (Combine with: {CMD.FromJsonOverwrite}.)"""
     )]
@@ -157,7 +157,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ToJsonAsync(projectPath, query, ct));
 
-    [McpServerTool(Name = CMD.FromJsonOverwrite)]
+    [McpServerTool(Name = CMD.FromJsonOverwrite, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Resolves a single Unity object, applies EditorJsonUtility.FromJsonOverwrite to it, persists asset changes,
@@ -174,7 +174,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.FromJsonOverwriteAsync(projectPath, query, json, ct));
 
-    [McpServerTool(Name = CMD.SaveScenes)]
+    [McpServerTool(Name = CMD.SaveScenes, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
     [Description(
         """Saves dirty open scenes. When no specific scene path is provided, saves all dirty open scenes"""
     )]
@@ -186,7 +186,7 @@ public sealed class UnityTools
         string? scenePath = null
     ) => ToPlainTextToolResponseAsync(operations.SaveScenesAsync(projectPath, scenePath, ct));
 
-    [McpServerTool(Name = CMD.DiscardScenes)]
+    [McpServerTool(Name = CMD.DiscardScenes, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Discards changes in dirty open scenes. When specific no scene path is provided, discards all dirty open scenes;
@@ -201,7 +201,7 @@ public sealed class UnityTools
         string? scenePath = null
     ) => ToPlainTextToolResponseAsync(operations.DiscardScenesAsync(projectPath, scenePath, ct));
 
-    [McpServerTool(Name = CMD.RefreshAssetDatabase)]
+    [McpServerTool(Name = CMD.RefreshAssetDatabase, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = true)]
     [Description(
         """
         Triggers AssetDatabase.Refresh for the project and waits for the editor to become stable again.
@@ -214,7 +214,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.RefreshAssetDatabaseAsync(projectPath, ct));
 
-    [McpServerTool(Name = CMD.ExecuteCode)]
+    [McpServerTool(Name = CMD.ExecuteCode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """
         Immediately compiles and runs a one-off C# snippet inside the Unity editor. Works in edit mode and in play mode.
@@ -231,7 +231,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ExecuteCodeAsync(projectPath, snippet, ct));
 
-    [McpServerTool(Name = CMD.ViewBurstAsm)]
+    [McpServerTool(Name = CMD.ViewBurstAsm, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Shows low-level optimization statistics and assembly for a Burst compilation target.
@@ -246,7 +246,7 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, ct));
 
-    [McpServerTool(Name = CMD.Reflect)]
+    [McpServerTool(Name = CMD.Reflect, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Searches loaded assemblies for C# types and members.
@@ -266,7 +266,7 @@ public sealed class UnityTools
         string? member = null
     ) => ToPlainTextToolResponseAsync(operations.ReflectAsync(projectPath, mode, type, member, ct));
 
-    [McpServerTool(Name = CMD.RunTestsEditMode)]
+    [McpServerTool(Name = CMD.RunTestsEditMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Runs the edit mode test suite")]
     public static Task<string> RunTestsEditMode(
         [Description("Project path")] string projectPath,
@@ -276,7 +276,7 @@ public sealed class UnityTools
         string? testFilter = null
     ) => ToPlainTextToolResponseAsync(operations.RunTestsEditModeAsync(projectPath, testFilter, ct));
 
-    [McpServerTool(Name = CMD.RunTestsPlayMode)]
+    [McpServerTool(Name = CMD.RunTestsPlayMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Runs the play mode test suite")]
     public static Task<string> RunTestsPlayMode(
         [Description("Project path")] string projectPath,
@@ -286,7 +286,7 @@ public sealed class UnityTools
         string? testFilter = null
     ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayModeAsync(projectPath, testFilter, ct));
 
-    [McpServerTool(Name = CMD.RunTestsPlayer)]
+    [McpServerTool(Name = CMD.RunTestsPlayer, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Builds the Unity player and runs the test suite using the current build target and settings")]
     public static Task<string> RunTestsPlayer(
         [Description("Project path")] string projectPath,
@@ -296,7 +296,7 @@ public sealed class UnityTools
         string? testFilter = null
     ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayerAsync(projectPath, testFilter, ct));
 
-    [McpServerTool(Name = CMD.ProfilerRecord)]
+    [McpServerTool(Name = CMD.ProfilerRecord, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         """
         Captures Unity Profiler frames or saves/loads profiler capture files.
@@ -318,7 +318,7 @@ public sealed class UnityTools
         string? fileName = null
     ) => ToPlainTextToolResponseAsync(operations.ProfilerRecordAsync(projectPath, action, frames, delaySeconds, target, fileName, ct));
 
-    [McpServerTool(Name = CMD.ProfilerOverview)]
+    [McpServerTool(Name = CMD.ProfilerOverview, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Summarizes Unity Profiler frames and main-thread hot samples.
@@ -334,7 +334,7 @@ public sealed class UnityTools
         string frameRange = "0..^1"
     ) => ToPlainTextToolResponseAsync(operations.ProfilerOverviewAsync(projectPath, mode, frameRange, ct));
 
-    [McpServerTool(Name = CMD.ProfilerBrowse)]
+    [McpServerTool(Name = CMD.ProfilerBrowse, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
         Browses the sample hierarchy of a captured frame in the Unity Profiler.
