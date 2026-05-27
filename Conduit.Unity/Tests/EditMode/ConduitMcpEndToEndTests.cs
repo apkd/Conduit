@@ -239,7 +239,7 @@ public sealed class ConduitMcpEndToEndTests
             BridgeCommandTypes.Show,
             Args(
                 ("projectPath", projectPath),
-                ("asset", "/Main Camera")
+                ("query", "/Main Camera")
             )
         );
 
@@ -249,7 +249,7 @@ public sealed class ConduitMcpEndToEndTests
             BridgeCommandTypes.Show,
             Args(
                 ("projectPath", projectPath),
-                ("asset", MissingQuery)
+                ("query", MissingQuery)
             )
         );
 
