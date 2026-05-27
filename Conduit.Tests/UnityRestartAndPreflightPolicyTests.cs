@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using JetBrains.Annotations;
 
 namespace Conduit;
@@ -180,6 +181,12 @@ public sealed class UnityRestartAndPreflightPolicyTests
         startInfo.Environment["GIO_USE_VFS"] = "gvfs";
         startInfo.Environment["GTK_USE_PORTAL"] = "1";
         startInfo.Environment["GSETTINGS_BACKEND"] = "dconf";
+        startInfo.Environment["GTK_THEME"] = "Existing:dark";
+        startInfo.Environment["XCURSOR_THEME"] = "existing-cursor";
+        startInfo.Environment["XCURSOR_SIZE"] = "64";
+        startInfo.Environment["XDG_CONFIG_HOME"] = "/tmp/conduit-existing-config";
+        startInfo.Environment["XDG_DATA_HOME"] = "/tmp/conduit-existing-data";
+        startInfo.Environment["XDG_CACHE_HOME"] = "/tmp/conduit-existing-cache";
 
         UnityEditorProcessController.ApplyGraphicalSessionEnvironment(startInfo);
 
@@ -192,6 +199,173 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("gvfs");
         await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("1");
         await Assert.That(startInfo.Environment["GSETTINGS_BACKEND"]).IsEqualTo("dconf");
+        await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("Existing:dark");
+        await Assert.That(startInfo.Environment["XCURSOR_THEME"]).IsEqualTo("existing-cursor");
+        await Assert.That(startInfo.Environment["XCURSOR_SIZE"]).IsEqualTo("64");
+        await Assert.That(startInfo.Environment["XDG_CONFIG_HOME"]).IsEqualTo("/tmp/conduit-existing-config");
+        await Assert.That(startInfo.Environment["XDG_DATA_HOME"]).IsEqualTo("/tmp/conduit-existing-data");
+        await Assert.That(startInfo.Environment["XDG_CACHE_HOME"]).IsEqualTo("/tmp/conduit-existing-cache");
+    }
+
+    [Test]
+    public async Task RestartProcessEnvironmentUsesPreviousEditorEnvironment()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["GTK_THEME"] = "wrong";
+        startInfo.Environment["XDG_CONFIG_HOME"] = "/tmp/wrong-config";
+
+        UnityEditorProcessController.ApplyRestartProcessEnvironment(
+            startInfo,
+            new Dictionary<string, string>
+            {
+                ["HOME"] = "/home/sample",
+                ["DISPLAY"] = ":7",
+                ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1234/bus",
+                ["GDK_BACKEND"] = "wayland",
+                ["GTK_THEME"] = "SampleTheme:dark",
+                ["QT_QPA_PLATFORM"] = "wayland;xcb",
+                ["WAYLAND_DISPLAY"] = "wayland-7",
+                ["XCURSOR_SIZE"] = "48",
+                ["XCURSOR_THEME"] = "sample-cursor",
+                ["XDG_CACHE_HOME"] = "/home/sample/.cache",
+                ["XDG_CONFIG_HOME"] = "/home/sample/.config",
+                ["XDG_CURRENT_DESKTOP"] = "SampleDesktop",
+                ["XDG_DATA_HOME"] = "/home/sample/.local/share",
+                ["XDG_RUNTIME_DIR"] = "/run/user/1234",
+                ["XDG_SESSION_DESKTOP"] = "SampleDesktop",
+                ["XDG_SESSION_TYPE"] = "wayland",
+            }
+        );
+
+        await Assert.That(startInfo.Environment["HOME"]).IsEqualTo("/home/sample");
+        await Assert.That(startInfo.Environment["DISPLAY"]).IsEqualTo(":7");
+        await Assert.That(startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"]).IsEqualTo("unix:path=/run/user/1234/bus");
+        await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("wayland");
+        await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("SampleTheme:dark");
+        await Assert.That(startInfo.Environment["QT_QPA_PLATFORM"]).IsEqualTo("wayland;xcb");
+        await Assert.That(startInfo.Environment["WAYLAND_DISPLAY"]).IsEqualTo("wayland-7");
+        await Assert.That(startInfo.Environment["XCURSOR_SIZE"]).IsEqualTo("48");
+        await Assert.That(startInfo.Environment["XCURSOR_THEME"]).IsEqualTo("sample-cursor");
+        await Assert.That(startInfo.Environment["XDG_CACHE_HOME"]).IsEqualTo("/home/sample/.cache");
+        await Assert.That(startInfo.Environment["XDG_CONFIG_HOME"]).IsEqualTo("/home/sample/.config");
+        await Assert.That(startInfo.Environment["XDG_CURRENT_DESKTOP"]).IsEqualTo("SampleDesktop");
+        await Assert.That(startInfo.Environment["XDG_DATA_HOME"]).IsEqualTo("/home/sample/.local/share");
+        await Assert.That(startInfo.Environment["XDG_RUNTIME_DIR"]).IsEqualTo("/run/user/1234");
+        await Assert.That(startInfo.Environment["XDG_SESSION_DESKTOP"]).IsEqualTo("SampleDesktop");
+        await Assert.That(startInfo.Environment["XDG_SESSION_TYPE"]).IsEqualTo("wayland");
+        await Assert.That(startInfo.Environment.ContainsKey("GSETTINGS_BACKEND")).IsFalse();
+        await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("local");
+        await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("0");
+    }
+
+    [Test]
+    public async Task ProcessEnvironmentParserReadsNullSeparatedEntries()
+    {
+        var environment = UnityEditorProcessController.ParseProcessEnvironment(
+            Encoding.UTF8.GetBytes("GTK_THEME=Sample:dark\0BROKEN\0XCURSOR_SIZE=32\0A=B=C\0")
+        );
+
+        await Assert.That(environment["GTK_THEME"]).IsEqualTo("Sample:dark");
+        await Assert.That(environment["XCURSOR_SIZE"]).IsEqualTo("32");
+        await Assert.That(environment["A"]).IsEqualTo("B=C");
+        await Assert.That(environment.ContainsKey("BROKEN")).IsFalse();
+    }
+
+    [Test]
+    public async Task XdgBaseDirectoryDefaultsUseHomeDirectory()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["HOME"] = "/home/sample";
+
+        UnityEditorProcessController.ApplyXdgBaseDirectoryDefaults(startInfo);
+
+        await Assert.That(startInfo.Environment["XDG_CONFIG_HOME"]).IsEqualTo("/home/sample/.config");
+        await Assert.That(startInfo.Environment["XDG_DATA_HOME"]).IsEqualTo("/home/sample/.local/share");
+        await Assert.That(startInfo.Environment["XDG_CACHE_HOME"]).IsEqualTo("/home/sample/.cache");
+        await Assert.That(startInfo.Environment["XDG_STATE_HOME"]).IsEqualTo("/home/sample/.local/state");
+        await Assert.That(startInfo.Environment["XDG_CONFIG_DIRS"]).IsEqualTo("/etc/xdg");
+        await Assert.That(startInfo.Environment["XDG_DATA_DIRS"]).IsEqualTo("/usr/local/share:/usr/share");
+    }
+
+    [Test]
+    public async Task GtkUserSettingsEnvironmentDerivesThemeAndCursorVariables()
+    {
+        var homePath = Path.Combine(Path.GetTempPath(), $"conduit-home-{Guid.NewGuid():N}");
+        var settingsDirectoryPath = Path.Combine(homePath, ".config", "gtk-3.0");
+        Directory.CreateDirectory(settingsDirectoryPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(settingsDirectoryPath, "settings.ini"),
+            """
+            [Settings]
+            gtk-theme-name=Example-dark
+            gtk-application-prefer-dark-theme=true
+            gtk-cursor-theme-name=example-cursor
+            gtk-cursor-theme-size=32
+            """
+        );
+
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["HOME"] = homePath;
+        try
+        {
+            UnityEditorProcessController.ApplyXdgBaseDirectoryDefaults(startInfo);
+            UnityEditorProcessController.ApplyGtkUserSettingsEnvironment(startInfo);
+
+            await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("Example:dark");
+            await Assert.That(startInfo.Environment["XCURSOR_THEME"]).IsEqualTo("example-cursor");
+            await Assert.That(startInfo.Environment["XCURSOR_SIZE"]).IsEqualTo("32");
+        }
+        finally
+        {
+            Directory.Delete(homePath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task GtkUserSettingsEnvironmentKeepsInstalledThemeName()
+    {
+        var homePath = Path.Combine(Path.GetTempPath(), $"conduit-home-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(homePath, ".themes", "Example-dark"));
+        var settingsDirectoryPath = Path.Combine(homePath, ".config", "gtk-3.0");
+        Directory.CreateDirectory(settingsDirectoryPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(settingsDirectoryPath, "settings.ini"),
+            """
+            [Settings]
+            gtk-theme-name=Example-dark
+            gtk-application-prefer-dark-theme=true
+            """
+        );
+
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["HOME"] = homePath;
+        try
+        {
+            UnityEditorProcessController.ApplyXdgBaseDirectoryDefaults(startInfo);
+            UnityEditorProcessController.ApplyGtkUserSettingsEnvironment(startInfo);
+
+            await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("Example-dark");
+        }
+        finally
+        {
+            Directory.Delete(homePath, recursive: true);
+        }
     }
 
     [Test]
@@ -265,11 +439,28 @@ public sealed class UnityRestartAndPreflightPolicyTests
         };
         startInfo.Environment.Clear();
 
-        UnityEditorProcessController.ApplyGraphicalSessionEnvironment(startInfo);
+        UnityEditorProcessController.ApplyUnityLinuxGioMitigations(startInfo);
 
         await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("local");
         await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("0");
         await Assert.That(startInfo.Environment["GSETTINGS_BACKEND"]).IsEqualTo("memory");
+    }
+
+    [Test]
+    public async Task UnityGioMitigationsKeepSessionGSettingsWhenSessionBusExists()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus";
+
+        UnityEditorProcessController.ApplyUnityLinuxGioMitigations(startInfo);
+
+        await Assert.That(startInfo.Environment["GIO_USE_VFS"]).IsEqualTo("local");
+        await Assert.That(startInfo.Environment["GTK_USE_PORTAL"]).IsEqualTo("0");
+        await Assert.That(startInfo.Environment.ContainsKey("GSETTINGS_BACKEND")).IsFalse();
     }
 
     [Test]

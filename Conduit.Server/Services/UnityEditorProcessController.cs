@@ -17,6 +17,7 @@ public sealed class UnityEditorProcessController(
         string? restartLogPath = null;
         Process? editorProcess = null;
         Process? restartedProcess = null;
+        IReadOnlyDictionary<string, string>? editorEnvironment = null;
 
         try
         {
@@ -41,6 +42,7 @@ public sealed class UnityEditorProcessController(
                 if (editorProcess != null)
                 {
                     builder.AppendLine($"Found running Unity editor via bridge: pid={editorProcess.Id}");
+                    editorEnvironment = TryReadProcessEnvironment(editorProcess.Id);
                     if (await TryTerminateExistingEditorAsync(editorProcess, builder, ct) is { } terminationResult)
                         return terminationResult;
                 }
@@ -51,6 +53,7 @@ public sealed class UnityEditorProcessController(
                 if (editorProcess != null)
                 {
                     builder.AppendLine($"Found running Unity editor via command line: pid={editorProcess.Id}");
+                    editorEnvironment = TryReadProcessEnvironment(editorProcess.Id);
                     if (await TryTerminateExistingEditorAsync(editorProcess, builder, ct) is { } terminationResult)
                         return terminationResult;
                 }
@@ -80,6 +83,7 @@ public sealed class UnityEditorProcessController(
 
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
             var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
+            ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
             if (!string.Equals(startInfo.FileName, editorPath, StringComparison.Ordinal))
                 builder.AppendLine($"Launching Unity through: {startInfo.FileName}");
             restartedProcess = Process.Start(startInfo);
@@ -386,6 +390,8 @@ public sealed class UnityEditorProcessController(
 
     internal static void ApplyGraphicalSessionEnvironment(ProcessStartInfo startInfo)
     {
+        ApplyXdgBaseDirectoryDefaults(startInfo);
+
         var runtimeDirectoryPath = ResolveRuntimeDirectoryPath();
         var waylandDisplay = ResolveWaylandDisplay(runtimeDirectoryPath);
         var x11Display = ResolveX11Display("/tmp/.X11-unix");
@@ -397,8 +403,63 @@ public sealed class UnityEditorProcessController(
         SetEnvironmentVariableIfMissing(startInfo, "XAUTHORITY", ResolveXAuthorityPath());
 
         ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath, waylandDisplay, x11Display);
+        ApplyGtkUserSettingsEnvironment(startInfo);
         ApplyNixOsGraphicalSessionEnvironment(startInfo);
         ApplyUnityLinuxGioMitigations(startInfo);
+    }
+
+    internal static void ApplyRestartProcessEnvironment(
+        ProcessStartInfo startInfo,
+        IReadOnlyDictionary<string, string>? editorEnvironment
+    )
+    {
+        if (startInfo.UseShellExecute)
+            return;
+
+        if (editorEnvironment is { Count: > 0 })
+        {
+            startInfo.Environment.Clear();
+            foreach (var (variableName, value) in editorEnvironment)
+                if (IsValidEnvironmentVariableName(variableName))
+                    startInfo.Environment[variableName] = value;
+        }
+
+        ApplyGraphicalSessionEnvironment(startInfo);
+    }
+
+    static bool IsValidEnvironmentVariableName(string variableName) =>
+        !string.IsNullOrWhiteSpace(variableName)
+        && !variableName.Contains('=', StringComparison.Ordinal)
+        && !variableName.Contains('\0', StringComparison.Ordinal);
+
+    internal static IReadOnlyDictionary<string, string>? TryReadProcessEnvironment(int processId)
+    {
+        if (!OperatingSystem.IsLinux())
+            return null;
+
+        try
+        {
+            return ParseProcessEnvironment(File.ReadAllBytes($"/proc/{processId.ToString(CultureInfo.InvariantCulture)}/environ"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static IReadOnlyDictionary<string, string> ParseProcessEnvironment(byte[] bytes)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entry in Encoding.UTF8.GetString(bytes).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separatorIndex = entry.IndexOf('=');
+            if (separatorIndex <= 0)
+                continue;
+
+            environment[entry[..separatorIndex]] = entry[(separatorIndex + 1)..];
+        }
+
+        return environment;
     }
 
     internal static void ApplyDesktopSessionDefaults(
@@ -429,6 +490,168 @@ public sealed class UnityEditorProcessController(
         SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_DESKTOP", currentDesktop);
     }
 
+    internal static void ApplyXdgBaseDirectoryDefaults(ProcessStartInfo startInfo)
+    {
+        var homePath = ResolveHomePath(startInfo);
+        if (string.IsNullOrWhiteSpace(homePath))
+            return;
+
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_CONFIG_HOME", Path.Combine(homePath, ".config"));
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_DATA_HOME", Path.Combine(homePath, ".local", "share"));
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_CACHE_HOME", Path.Combine(homePath, ".cache"));
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_STATE_HOME", Path.Combine(homePath, ".local", "state"));
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_CONFIG_DIRS", "/etc/xdg");
+        SetEnvironmentVariableIfMissing(startInfo, "XDG_DATA_DIRS", "/usr/local/share:/usr/share");
+    }
+
+    static string? ResolveHomePath(ProcessStartInfo startInfo)
+    {
+        if (startInfo.Environment.TryGetValue("HOME", out var configuredHomePath)
+            && !string.IsNullOrWhiteSpace(configuredHomePath))
+            return configuredHomePath;
+
+        var environmentHomePath = Environment.GetEnvironmentVariable("HOME");
+        if (!string.IsNullOrWhiteSpace(environmentHomePath))
+        {
+            SetEnvironmentVariableIfMissing(startInfo, "HOME", environmentHomePath);
+            return environmentHomePath;
+        }
+
+        var profilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(profilePath))
+            return null;
+
+        SetEnvironmentVariableIfMissing(startInfo, "HOME", profilePath);
+        return profilePath;
+    }
+
+    internal static void ApplyGtkUserSettingsEnvironment(ProcessStartInfo startInfo)
+    {
+        var settings = TryReadGtkSettings(startInfo, "gtk-3.0")
+                       ?? TryReadGtkSettings(startInfo, "gtk-4.0");
+        if (settings is null)
+            return;
+
+        SetEnvironmentVariableIfMissing(
+            startInfo,
+            "GTK_THEME",
+            ResolveGtkThemeEnvironmentValue(
+                startInfo,
+                GetGtkSetting(settings, "gtk-theme-name"),
+                GetGtkSetting(settings, "gtk-application-prefer-dark-theme")
+            )
+        );
+        SetEnvironmentVariableIfMissing(startInfo, "XCURSOR_THEME", GetGtkSetting(settings, "gtk-cursor-theme-name"));
+        SetEnvironmentVariableIfMissing(startInfo, "XCURSOR_SIZE", GetGtkSetting(settings, "gtk-cursor-theme-size"));
+    }
+
+    static Dictionary<string, string>? TryReadGtkSettings(ProcessStartInfo startInfo, string versionDirectoryName)
+    {
+        if (!startInfo.Environment.TryGetValue("XDG_CONFIG_HOME", out var configHomePath)
+            || string.IsNullOrWhiteSpace(configHomePath))
+            return null;
+
+        var settingsPath = Path.Combine(configHomePath, versionDirectoryName, "settings.ini");
+        try
+        {
+            if (!File.Exists(settingsPath))
+                return null;
+
+            var settings = new Dictionary<string, string>(StringComparer.Ordinal);
+            var inSettingsSection = false;
+            foreach (var rawLine in File.ReadLines(settingsPath))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line[0] is '#' or ';')
+                    continue;
+
+                if (line[0] == '[' && line[^1] == ']')
+                {
+                    inSettingsSection = string.Equals(line, "[Settings]", StringComparison.OrdinalIgnoreCase);
+                    continue;
+                }
+
+                if (!inSettingsSection)
+                    continue;
+
+                var separatorIndex = line.IndexOf('=');
+                if (separatorIndex <= 0)
+                    continue;
+
+                var key = line[..separatorIndex].Trim();
+                var value = line[(separatorIndex + 1)..].Trim();
+                if (key.Length > 0 && value.Length > 0)
+                    settings[key] = value;
+            }
+
+            return settings.Count > 0 ? settings : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static string? GetGtkSetting(IReadOnlyDictionary<string, string> settings, string key) =>
+        settings.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+
+    internal static string? ResolveGtkThemeEnvironmentValue(
+        ProcessStartInfo startInfo,
+        string? themeName,
+        string? preferDark
+    )
+    {
+        if (string.IsNullOrWhiteSpace(themeName))
+            return null;
+
+        var theme = themeName.Trim();
+        if (theme.Contains(':', StringComparison.Ordinal)
+            || !IsTruthyGtkSetting(preferDark)
+            || GtkThemeDirectoryExists(startInfo, theme))
+            return theme;
+
+        const string darkSuffix = "-dark";
+        return theme.EndsWith(darkSuffix, StringComparison.OrdinalIgnoreCase)
+            ? theme[..^darkSuffix.Length] + ":dark"
+            : theme;
+    }
+
+    static bool GtkThemeDirectoryExists(ProcessStartInfo startInfo, string themeName)
+    {
+        try
+        {
+            foreach (var themeDirectoryPath in EnumerateGtkThemeDirectoryPaths(startInfo, themeName))
+                if (Directory.Exists(themeDirectoryPath))
+                    return true;
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    static IEnumerable<string> EnumerateGtkThemeDirectoryPaths(ProcessStartInfo startInfo, string themeName)
+    {
+        if (startInfo.Environment.TryGetValue("HOME", out var homePath)
+            && !string.IsNullOrWhiteSpace(homePath))
+            yield return Path.Combine(homePath, ".themes", themeName);
+
+        if (startInfo.Environment.TryGetValue("XDG_DATA_HOME", out var dataHomePath)
+            && !string.IsNullOrWhiteSpace(dataHomePath))
+            yield return Path.Combine(dataHomePath, "themes", themeName);
+
+        if (!startInfo.Environment.TryGetValue("XDG_DATA_DIRS", out var dataDirectoryPaths)
+            || string.IsNullOrWhiteSpace(dataDirectoryPaths))
+            yield break;
+
+        foreach (var dataDirectoryPath in dataDirectoryPaths.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            yield return Path.Combine(dataDirectoryPath, "themes", themeName);
+    }
+
+    static bool IsTruthyGtkSetting(string? value) =>
+        value?.Trim() is "1" or "true" or "True" or "TRUE" or "yes" or "Yes" or "YES";
+
     internal static void ApplyNixOsGraphicalSessionEnvironment(ProcessStartInfo startInfo) =>
         ApplyNixOsGraphicalSessionEnvironment(startInfo, "/run/current-system/sw");
 
@@ -438,11 +661,13 @@ public sealed class UnityEditorProcessController(
         SetEnvironmentVariableIfMissing(startInfo, "GIO_EXTRA_MODULES", ResolveNixGioExtraModules(systemProfilePath));
     }
 
-    static void ApplyUnityLinuxGioMitigations(ProcessStartInfo startInfo)
+    internal static void ApplyUnityLinuxGioMitigations(ProcessStartInfo startInfo)
     {
         SetEnvironmentVariableIfMissing(startInfo, "GIO_USE_VFS", "local");
         SetEnvironmentVariableIfMissing(startInfo, "GTK_USE_PORTAL", "0");
-        SetEnvironmentVariableIfMissing(startInfo, "GSETTINGS_BACKEND", "memory");
+        if (!startInfo.Environment.TryGetValue("DBUS_SESSION_BUS_ADDRESS", out var sessionBusAddress)
+            || string.IsNullOrWhiteSpace(sessionBusAddress))
+            SetEnvironmentVariableIfMissing(startInfo, "GSETTINGS_BACKEND", "memory");
     }
 
     static void SetEnvironmentVariableIfMissing(ProcessStartInfo startInfo, string variableName, string? value)
