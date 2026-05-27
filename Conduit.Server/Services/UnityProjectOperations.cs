@@ -114,10 +114,10 @@ public sealed class UnityProjectOperations(
             ct: ct
         );
 
-    public Task<ToolExecutionResult> ShowAsync(string projectPath, string asset, CT ct)
+    public Task<ToolExecutionResult> ShowAsync(string projectPath, string query, CT ct)
         => EnqueueAsync(
             projectPath: projectPath,
-            command: new() { CommandType = BridgeCommandTypes.Show, Target = asset },
+            command: new() { CommandType = BridgeCommandTypes.Show, Target = query },
             ct: ct
         );
 

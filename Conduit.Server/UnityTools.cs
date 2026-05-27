@@ -122,10 +122,10 @@ public sealed class UnityTools
     public static Task<string> Show(
         [Description("Project path")] string projectPath,
         [Description("Entity ID, asset path, hierarchy path, or Unity search query. Examples: eid:12345, Assets/Foo.prefab, /Root/Child")]
-        string asset,
+        string query,
         UnityProjectOperations operations,
         CancellationToken ct
-    ) => ToPlainTextToolResponseAsync(operations.ShowAsync(projectPath, asset, ct));
+    ) => ToPlainTextToolResponseAsync(operations.ShowAsync(projectPath, query, ct));
 
     [McpServerTool(Name = CMD.Search)]
     [Description(
