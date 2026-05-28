@@ -25,7 +25,7 @@ namespace Conduit
                {
                    ParsedBridgeCommandKind.Play                 => false,
                    ParsedBridgeCommandKind.RefreshAssetDatabase => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
-                   _ when IsTestCommand(command.Kind)           => !EditorApplication.isPlayingOrWillChangePlaymode,
+                   _ when IsTestCommand(command.Kind)           => !IsAnyTestRunActive() && !EditorApplication.isPlayingOrWillChangePlaymode,
                    _                                            => true,
                };
 

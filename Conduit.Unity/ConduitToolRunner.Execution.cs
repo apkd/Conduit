@@ -55,12 +55,15 @@ namespace Conduit
             if (playerRun)
                 filter.targetPlatform = EditorUserBuildSettings.activeBuildTarget;
 
-            GetOrCreateTestRunnerApi().Execute(
+            var runGuid = GetOrCreateTestRunnerApi().Execute(
                 new ExecutionSettings(filter)
                 {
                     playerHeartbeatTimeout = 600,
                 }
             );
+
+            lock (stateGate)
+                activeTestRunGuid = runGuid;
         }
 
         static bool TryCompleteDirtySceneBlock(string? commandType)
@@ -175,6 +178,26 @@ namespace Conduit
         }
 
         static void OnReimportUpdate() => TryFinishReimport();
+
+        static void InstallTestRunCompletionHooks()
+        {
+            if (testRunCompletionHooksInstalled)
+                return;
+
+            testRunCompletionHooksInstalled = true;
+            EditorApplication.update += OnTestRunCompletionUpdate;
+        }
+
+        static void RemoveTestRunCompletionHooks()
+        {
+            if (!testRunCompletionHooksInstalled)
+                return;
+
+            testRunCompletionHooksInstalled = false;
+            EditorApplication.update -= OnTestRunCompletionUpdate;
+        }
+
+        static void OnTestRunCompletionUpdate() => TryCompletePendingTestRun();
 
         static void InstallPlayModeHooks()
         {
@@ -388,6 +411,14 @@ namespace Conduit
         internal static bool ShouldFailEnterPlayForCompileErrors(bool scriptCompilationFailed)
             => scriptCompilationFailed;
 
+        internal static bool ShouldWaitForTestRunCompletion(
+            bool isTestRunnerActive,
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlaying,
+            bool isPlayingOrWillChangePlaymode)
+            => isTestRunnerActive || isCompiling || isUpdating || isPlaying || isPlayingOrWillChangePlaymode;
+
         internal static string BuildEnterPlayBusyDiagnostic(bool isCompiling, bool isUpdating, bool isPlayingOrWillChangePlaymode)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
@@ -484,6 +515,12 @@ namespace Conduit
             reimportObservedCompilation = false;
         }
 
+        static void ResetTestRunCompletionState()
+        {
+            activeTestRunGuid = null;
+            pendingTestRunResult = null;
+        }
+
         static void MarkRestoredReimportAsResumed()
         {
             reimportRefreshReturned = true;
@@ -517,6 +554,8 @@ namespace Conduit
             result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
             RemoveReimportHooks();
             RemovePlayModeHooks();
+            RemoveTestRunCompletionHooks();
+            ResetTestRunCompletionState();
             ClearPersistedActiveOperation();
             if (await ConduitConnection.TrySendResultAsync(operation.client_id, operation.request_id, result, operation.command_type))
             {

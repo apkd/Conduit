@@ -2137,6 +2137,17 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void TestRunCompletionGuard_WaitsForRunnerAndEditorLifecycle()
+    {
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, false, false, false), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(false, true, false, false, false), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(false, false, true, false, false), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(false, false, false, true, false), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(false, false, false, false, true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(false, false, false, false, false), Is.False);
+    }
+
+    [Test]
     public void PlayBusyGuard_BlocksCompilingUpdatingAndPlayModeTransition()
     {
         Assert.That(ConduitToolRunner.ShouldWaitToEnterPlayMode(true, false, false), Is.True);

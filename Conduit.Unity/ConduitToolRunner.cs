@@ -43,11 +43,23 @@ namespace Conduit
         static bool reimportRefreshReturned;
         static bool reimportSawImportedScripts;
         static bool reimportObservedCompilation;
+        static string? activeTestRunGuid;
+        static BridgeCommandResult? pendingTestRunResult;
+        static bool testRunCompletionHooksInstalled;
         static double enterPlayModeBusyWaitDeadline;
         static bool enterPlayModeRequested;
         static bool discardCapturedLogsOnCompletion;
         static bool testCallbacksRegistered;
         static TestRunnerApi? testRunnerApi;
+        static readonly MethodInfo? testRunnerIsRunActiveMethod = typeof(TestRunnerApi).GetMethod(
+            "IsRunActive",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        static readonly MethodInfo? testRunnerIsRunningMethod = typeof(TestRunnerApi).GetMethod(
+            "IsRunning",
+            BindingFlags.Static | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(string) },
+            null);
 
         internal enum ParsedBridgeCommandKind : byte
         {
@@ -477,6 +489,8 @@ namespace Conduit
             }
 
             RemovePlayModeHooks();
+            RemoveTestRunCompletionHooks();
+            ResetTestRunCompletionState();
             ClearPersistedActiveOperation();
             PumpQueuedCommands();
         }

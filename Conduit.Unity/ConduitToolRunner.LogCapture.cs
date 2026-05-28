@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEditor.TestTools.TestRunner.Api;
@@ -25,7 +26,7 @@ namespace Conduit
 
         static void HandleTestRunFinished(ITestResultAdaptor result)
         {
-            _ = CompleteCurrentAsync(
+            QueueTestRunCompletion(
                 new()
                 {
                     outcome = result.FailCount > 0 ? ToolOutcome.TestFailed : ToolOutcome.Success,
@@ -74,14 +75,11 @@ namespace Conduit
                     out var stoppedResult
                 ))
             {
-                lock (stateGate)
-                    discardCapturedLogsOnCompletion = true;
-
-                _ = CompleteCurrentAsync(stoppedResult!);
+                QueueTestRunCompletion(stoppedResult!, discardLogs: true);
                 return;
             }
 
-            _ = CompleteCurrentAsync(
+            QueueTestRunCompletion(
                 new()
                 {
                     outcome = ToolOutcome.Exception,
@@ -93,6 +91,97 @@ namespace Conduit
                     },
                 }
             );
+        }
+
+        static void QueueTestRunCompletion(BridgeCommandResult result, bool discardLogs = false)
+        {
+            lock (stateGate)
+            {
+                if (!IsTestCommand(activeCommand.Kind))
+                    return;
+
+                if (pendingTestRunResult != null && !ShouldReplacePendingTestRunResult(result))
+                    return;
+
+                pendingTestRunResult = result;
+                if (discardLogs)
+                    discardCapturedLogsOnCompletion = true;
+            }
+
+            InstallTestRunCompletionHooks();
+            TryCompletePendingTestRun();
+        }
+
+        static bool ShouldReplacePendingTestRunResult(BridgeCommandResult result)
+            => result.outcome is ToolOutcome.Exception or ToolOutcome.Cancelled;
+
+        static void TryCompletePendingTestRun()
+        {
+            lock (stateGate)
+                if (!IsTestCommand(activeCommand.Kind) || pendingTestRunResult == null)
+                    return;
+
+            var isTestRunnerActive = IsTestRunStillActive();
+            var isCompiling = EditorApplication.isCompiling;
+            var isUpdating = EditorApplication.isUpdating;
+            var isPlaying = EditorApplication.isPlaying;
+            var isPlayingOrWillChangePlaymode = EditorApplication.isPlayingOrWillChangePlaymode;
+            BridgeCommandResult result;
+            lock (stateGate)
+            {
+                if (!IsTestCommand(activeCommand.Kind) || pendingTestRunResult == null)
+                    return;
+
+                if (ShouldWaitForTestRunCompletion(
+                        isTestRunnerActive,
+                        isCompiling,
+                        isUpdating,
+                        isPlaying,
+                        isPlayingOrWillChangePlaymode
+                    ))
+                    return;
+
+                result = pendingTestRunResult!;
+                pendingTestRunResult = null;
+            }
+
+            RemoveTestRunCompletionHooks();
+            _ = CompleteCurrentAsync(result);
+        }
+
+        static bool IsTestRunStillActive()
+        {
+            string? runGuid;
+            lock (stateGate)
+                runGuid = activeTestRunGuid;
+
+            if (!string.IsNullOrEmpty(runGuid)
+                && TryInvokeTestRunnerBoolMethod(testRunnerIsRunningMethod, out var isRunning, runGuid))
+                return isRunning;
+
+            return IsAnyTestRunActive();
+        }
+
+        static bool IsAnyTestRunActive()
+            => TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
+
+        static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value, params object[] args)
+        {
+            value = false;
+            if (method == null)
+                return false;
+
+            try
+            {
+                if (method.Invoke(null, args) is bool result)
+                {
+                    value = result;
+                    return true;
+                }
+            }
+            catch (Exception) { }
+
+            return false;
         }
 
         static BridgeExceptionInfo ToExceptionInfo(Exception exception)
@@ -409,6 +498,7 @@ namespace Conduit
             capturedLogEntryIndexes.Clear();
             capturedLogEntries.Clear();
             compilerMessageBuffer.Clear();
+            ResetTestRunCompletionState();
         }
 
         static void RecycleLogTarget(CapturedLogTarget target)
