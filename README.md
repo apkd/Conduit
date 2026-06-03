@@ -132,6 +132,9 @@ tools.from_json_overwrite.approval_mode = "approve"
 tools.get_dependencies.approval_mode = "approve"
 tools.help.approval_mode = "approve"
 tools.play.approval_mode = "approve"
+tools.profiler_browse.approval_mode = "approve"
+tools.profiler_overview.approval_mode = "approve"
+tools.profiler_record.approval_mode = "approve"
 tools.refresh_asset_database.approval_mode = "approve"
 tools.reflect.approval_mode = "approve"
 tools.restart.approval_mode = "approve"
@@ -144,6 +147,7 @@ tools.search.approval_mode = "approve"
 tools.show.approval_mode = "approve"
 tools.status.approval_mode = "approve"
 tools.to_json.approval_mode = "approve"
+tools.view_burst_asm.approval_mode = "approve"
 ```
 
 </details>
@@ -915,6 +919,7 @@ It returns the result, logs, exceptions, and compilation errors.
 Agents are very proficient at using it for interacting with Unity and debugging code.
 
 - ***`status`***: project and MCP connection state
+- ***`play`***: toggles Play Mode
 - ***`refresh_asset_database`***: imports modified assets, recompiles code
 - ***`execute_code`***: runs ad hoc C# code
 - ***`reflect`***: searches loaded C# types and members
@@ -924,6 +929,7 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 Together, these tools enable agents to find, read, and write any asset, GameObject, or component.
 
 - ***`search`***: finds objects and assets
+- ***`help`***: search syntax and examples
 - ***`show`***: displays object properties
 - ***`to_json`***: read object in JSON format
 - ***`from_json_overwrite`***: overwrite object properties with JSON
@@ -941,6 +947,14 @@ By the way: if your project doesn't have tests, *you're doing it wrong*.
 - ***`run_tests_playmode`***: run Play Mode tests
 - ***`run_tests_player`***: run player tests
 - ***`screenshot`***: captures the game view, scene view, or any other object
+
+#### Profiling:
+These inspect runtime performance and Burst output.
+
+- ***`profiler_record`***: capture, save, load, or list profiler data
+- ***`profiler_overview`***: summarizes hot frames and samples
+- ***`profiler_browse`***: browses profiler sample hierarchy
+- ***`view_burst_asm`***: Burst assembly and optimization stats
 
 ## Agent instructions
 
