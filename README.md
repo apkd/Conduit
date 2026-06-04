@@ -136,6 +136,7 @@ tools.profiler_browse.approval_mode = "approve"
 tools.profiler_overview.approval_mode = "approve"
 tools.profiler_record.approval_mode = "approve"
 tools.refresh_asset_database.approval_mode = "approve"
+tools.reimport_assets.approval_mode = "approve"
 tools.reflect.approval_mode = "approve"
 tools.restart.approval_mode = "approve"
 tools.run_tests_editmode.approval_mode = "approve"
@@ -921,6 +922,7 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 - ***`status`***: project and MCP connection state
 - ***`play`***: toggles Play Mode
 - ***`refresh_asset_database`***: imports modified assets, recompiles code
+- ***`reimport_assets`***: forces matching assets to reimport
 - ***`execute_code`***: runs ad hoc C# code
 - ***`reflect`***: searches loaded C# types and members
 - ***`restart`***: starts or restarts Unity Editor
@@ -966,5 +968,5 @@ If you really want to, you can include something like this in your agent instruc
 Use the Unity MCP tools to prototype solutions, validate code compilation and run tests.
 Invoke the `restart` tool in case of instability.
 Don't build the Unity solution manually; simply call `refresh_asset_database` after making any code changes.
-When dealing with assets and GameObjects, `search`, `show`, `to_json`, `from_json_overwrite`, `find_missing_scripts`, `get_dependencies` and `find_references_to` are your friends.
+When dealing with assets and GameObjects, `search`, `show`, `to_json`, `from_json_overwrite`, `find_missing_scripts`, `get_dependencies`, `find_references_to` and `reimport_assets` are your friends.
 ```

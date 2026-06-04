@@ -77,6 +77,7 @@ namespace Conduit
             SaveScenes,
             DiscardScenes,
             RefreshAssetDatabase,
+            ReimportAssets,
             ExecuteCode,
             ViewBurstAsm,
             Reflect,
@@ -342,7 +343,8 @@ namespace Conduit
                         await ExecuteDiscardScenesAsync(pendingOperation);
                         break;
                     case ParsedBridgeCommandKind.RefreshAssetDatabase:
-                        StartReimport();
+                    case ParsedBridgeCommandKind.ReimportAssets:
+                        StartReimport(pendingOperation);
                         break;
                     case ParsedBridgeCommandKind.ExecuteCode:
                         await ExecuteCodeAsync(pendingOperation);
@@ -511,6 +513,7 @@ namespace Conduit
                 BridgeCommandTypes.SaveScenes           => new() { Kind = ParsedBridgeCommandKind.SaveScenes },
                 BridgeCommandTypes.DiscardScenes        => new() { Kind = ParsedBridgeCommandKind.DiscardScenes },
                 BridgeCommandTypes.RefreshAssetDatabase => new() { Kind = ParsedBridgeCommandKind.RefreshAssetDatabase },
+                BridgeCommandTypes.ReimportAssets       => new() { Kind = ParsedBridgeCommandKind.ReimportAssets },
                 BridgeCommandTypes.ExecuteCode          => new() { Kind = ParsedBridgeCommandKind.ExecuteCode },
                 BridgeCommandTypes.ViewBurstAsm         => new() { Kind = ParsedBridgeCommandKind.ViewBurstAsm },
                 BridgeCommandTypes.Reflect              => new() { Kind = ParsedBridgeCommandKind.Reflect },

@@ -76,6 +76,25 @@ namespace Conduit
                 : FormatMatches(matches, includeHint: false);
         }
 
+        public static List<string> ResolveAssetPaths(string query)
+        {
+            var normalizedQuery = query?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(normalizedQuery))
+                return new();
+
+            var matches = Resolve(normalizedQuery, int.MaxValue);
+            var assetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var match in matches)
+                CollectImportableAssetPaths(match, assetPaths);
+
+            var orderedAssetPaths = new List<string>(assetPaths.Count);
+            foreach (var assetPath in assetPaths)
+                orderedAssetPaths.Add(assetPath);
+
+            orderedAssetPaths.Sort(StringComparer.OrdinalIgnoreCase);
+            return orderedAssetPaths;
+        }
+
         public static string FormatNoMatches(string query)
         {
             var normalizedQuery = query?.Trim() ?? string.Empty;
@@ -668,6 +687,50 @@ namespace Conduit
 
             return builder.TrimEnd().ToString();
         }
+
+        static void CollectImportableAssetPaths(ResolvedObjectMatch match, HashSet<string> assetPaths)
+        {
+            if (match.Target == null || !EditorUtility.IsPersistent(match.Target))
+                return;
+
+            CollectImportableAssetPaths(AssetDatabase.GetAssetPath(match.Target), assetPaths);
+        }
+
+        static void CollectImportableAssetPaths(string assetPath, HashSet<string> assetPaths)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath))
+                return;
+
+            if (!AssetDatabase.IsValidFolder(assetPath))
+            {
+                if (IsImportableAssetPath(assetPath))
+                    assetPaths.Add(assetPath);
+
+                return;
+            }
+
+            var addedChildren = false;
+            foreach (var guid in AssetDatabase.FindAssets(string.Empty, new[] { assetPath }))
+            {
+                var childAssetPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (!IsImportableAssetPath(childAssetPath) || AssetDatabase.IsValidFolder(childAssetPath))
+                    continue;
+
+                assetPaths.Add(childAssetPath);
+                addedChildren = true;
+            }
+
+            if (!addedChildren && IsImportableAssetPath(assetPath))
+                assetPaths.Add(assetPath);
+        }
+
+        static bool IsImportableAssetPath(string assetPath)
+            => !string.IsNullOrWhiteSpace(assetPath)
+               && !assetPath.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
+               && (assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                   || assetPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)
+                   || assetPath.Equals("Assets", StringComparison.OrdinalIgnoreCase)
+                   || assetPath.Equals("Packages", StringComparison.OrdinalIgnoreCase));
 
         static List<ResolvedObjectMatch> Deduplicate(IEnumerable<ResolvedObjectMatch> matches, int maxResults)
         {

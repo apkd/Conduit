@@ -16,6 +16,7 @@ enum BridgeCommandKind : byte
     SaveScenes,
     DiscardScenes,
     RefreshAssetDatabase,
+    ReimportAssets,
     ExecuteCode,
     ViewBurstAsm,
     Reflect,
@@ -45,6 +46,7 @@ static class BridgeCommandKinds
             BridgeCommandTypes.SaveScenes           => BridgeCommandKind.SaveScenes,
             BridgeCommandTypes.DiscardScenes        => BridgeCommandKind.DiscardScenes,
             BridgeCommandTypes.RefreshAssetDatabase => BridgeCommandKind.RefreshAssetDatabase,
+            BridgeCommandTypes.ReimportAssets       => BridgeCommandKind.ReimportAssets,
             BridgeCommandTypes.ExecuteCode          => BridgeCommandKind.ExecuteCode,
             BridgeCommandTypes.ViewBurstAsm         => BridgeCommandKind.ViewBurstAsm,
             BridgeCommandTypes.Reflect              => BridgeCommandKind.Reflect,
@@ -59,4 +61,7 @@ static class BridgeCommandKinds
 
     public static bool IsTest(BridgeCommandKind commandKind) =>
         commandKind is BridgeCommandKind.RunTestsEditMode or BridgeCommandKind.RunTestsPlayMode or BridgeCommandKind.RunTestsPlayer;
+
+    public static bool IsAssetImport(BridgeCommandKind commandKind) =>
+        commandKind is BridgeCommandKind.RefreshAssetDatabase or BridgeCommandKind.ReimportAssets;
 }

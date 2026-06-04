@@ -29,6 +29,7 @@ static class UnityToolTimeouts
             SaveScenes           => TimeSpan.FromSeconds(90),
             DiscardScenes        => TimeSpan.FromSeconds(40),
             RefreshAssetDatabase => TimeSpan.FromMinutes(10),
+            ReimportAssets       => TimeSpan.FromMinutes(10),
             ExecuteCode          => TimeSpan.FromMinutes(10),
             ViewBurstAsm         => TimeSpan.FromMinutes(5),
             Reflect              => TimeSpan.FromSeconds(90),

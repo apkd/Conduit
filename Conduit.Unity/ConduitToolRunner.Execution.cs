@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.Compilation;
@@ -30,14 +31,38 @@ namespace Conduit
             TryAdvancePlayToggle();
         }
 
-        static void StartReimport()
+        static void StartReimport(PendingOperationState operation)
         {
-            if (TryCompleteReimportPlayModeBlock())
+            if (TryCompleteReimportPlayModeBlock(operation.command_type))
                 return;
+
+            var commandKind = ParseIncomingCommand(operation.command_type).Kind;
+            List<string>? assetPaths = null;
+            if (commandKind == ParsedBridgeCommandKind.ReimportAssets)
+            {
+                if (!TryPrepareReimportAssets(operation, out var resolvedAssetPaths))
+                    return;
+
+                assetPaths = resolvedAssetPaths;
+            }
 
             InstallReimportHooks();
             ResetReimportSettlementState();
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+            if (commandKind == ParsedBridgeCommandKind.ReimportAssets)
+            {
+                var pathsToReimport = assetPaths!;
+                StoreReimportAssetPaths(operation, pathsToReimport);
+                foreach (var assetPath in pathsToReimport)
+                    AssetDatabase.ImportAsset(
+                        assetPath,
+                        ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport
+                    );
+            }
+            else
+            {
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+            }
+
             reimportRefreshReturned = true;
             TryFinishReimport();
         }
@@ -82,7 +107,7 @@ namespace Conduit
             return true;
         }
 
-        static bool TryCompleteReimportPlayModeBlock()
+        static bool TryCompleteReimportPlayModeBlock(string commandType)
         {
             if (!ShouldBlockReimportForPlayMode(EditorApplication.isPlaying))
                 return false;
@@ -91,7 +116,7 @@ namespace Conduit
                 new()
                 {
                     outcome = ToolOutcome.Exception,
-                    diagnostic = BuildReimportPlayModeDiagnostic(),
+                    diagnostic = BuildReimportPlayModeDiagnostic(commandType),
                 }
             );
 
@@ -101,8 +126,8 @@ namespace Conduit
         internal static bool ShouldBlockReimportForPlayMode(bool isPlaying)
             => isPlaying;
 
-        internal static string BuildReimportPlayModeDiagnostic()
-            => "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'play' to return to edit mode first.";
+        internal static string BuildReimportPlayModeDiagnostic(string commandType = BridgeCommandTypes.RefreshAssetDatabase)
+            => $"Cannot run '{commandType}' while Unity is in play mode. Use 'play' to return to edit mode first.";
 
         static bool TryCompleteBusyTestStartBlock(string? commandType)
         {
@@ -230,7 +255,7 @@ namespace Conduit
                 command = activeCommand;
             }
 
-            if (operation == null || command.Kind != ParsedBridgeCommandKind.RefreshAssetDatabase)
+            if (operation == null || !IsAssetImportCommand(command.Kind))
                 return;
 
             if (!reimportRefreshReturned)
@@ -261,6 +286,9 @@ namespace Conduit
                     outcome = string.IsNullOrWhiteSpace(compilerMessages) && !hasRestoredCompileFailure
                         ? ToolOutcome.Success
                         : ToolOutcome.CompileError,
+                    return_value = command.Kind == ParsedBridgeCommandKind.ReimportAssets
+                        ? FormatReimportedAssetFilenames(operation.snippet)
+                        : null,
                     diagnostic = string.IsNullOrWhiteSpace(compilerMessages)
                         ? hasRestoredCompileFailure ? BuildRestoredReimportCompileErrorDiagnostic() : null
                         : compilerMessages,
@@ -278,7 +306,7 @@ namespace Conduit
                 command = activeCommand;
             }
 
-            if (operation == null || command.Kind != ParsedBridgeCommandKind.RefreshAssetDatabase)
+            if (operation == null || !IsAssetImportCommand(command.Kind))
                 return;
 
             if (importedAssets == null || importedAssets.Length == 0)
@@ -507,6 +535,64 @@ namespace Conduit
                || assetPath.EndsWith(".asmref", StringComparison.OrdinalIgnoreCase)
                || assetPath.EndsWith(".rsp", StringComparison.OrdinalIgnoreCase)
                || assetPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+
+        static bool TryPrepareReimportAssets(PendingOperationState operation, out List<string> assetPaths)
+        {
+            assetPaths = ConduitSearchUtility.ResolveAssetPaths(operation.target ?? string.Empty);
+            if (assetPaths.Count > 0)
+                return true;
+
+            _ = CompleteCurrentAsync(
+                new()
+                {
+                    outcome = ToolOutcome.Success,
+                    return_value = "No assets matched the query.",
+                }
+            );
+
+            return false;
+        }
+
+        static void StoreReimportAssetPaths(PendingOperationState operation, List<string> assetPaths)
+        {
+            operation.snippet = string.Join("\n", assetPaths);
+            lock (stateGate)
+                if (ReferenceEquals(activeOperation, operation))
+                    activeOperation.snippet = operation.snippet;
+
+            PersistActiveOperation(operation, ParsedBridgeCommandKind.ReimportAssets);
+        }
+
+        internal static string FormatReimportedAssetFilenames(string? assetPathPayload)
+        {
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.AppendLine("Reimported assets:");
+            var appendedAny = false;
+            foreach (var assetPath in SplitReimportAssetPaths(assetPathPayload))
+            {
+                builder.Append("- ");
+                builder.Append(GetAssetFileName(assetPath));
+                builder.Append('\n');
+                appendedAny = true;
+            }
+
+            if (appendedAny)
+                return builder.TrimEnd().ToString();
+
+            return "No assets were reimported.";
+        }
+
+        static string[] SplitReimportAssetPaths(string? assetPathPayload)
+            => string.IsNullOrWhiteSpace(assetPathPayload)
+                ? Array.Empty<string>()
+                : assetPathPayload!.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+        static string GetAssetFileName(string assetPath)
+        {
+            var normalizedPath = assetPath.Replace('\\', '/').TrimEnd('/');
+            var separatorIndex = normalizedPath.LastIndexOf('/');
+            return separatorIndex < 0 ? normalizedPath : normalizedPath[(separatorIndex + 1)..];
+        }
 
         static void ResetReimportSettlementState()
         {

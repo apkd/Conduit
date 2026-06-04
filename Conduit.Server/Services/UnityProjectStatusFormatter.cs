@@ -207,7 +207,7 @@ static class UnityProjectStatusFormatter
             ? "running tests..."
             : pingSnapshot.IsCompiling
                 ? "compiling..."
-                : pingSnapshot.IsUpdating || commandKind == BridgeCommandKind.RefreshAssetDatabase
+                : pingSnapshot.IsUpdating || BridgeCommandKinds.IsAssetImport(commandKind)
                     ? "importing assets..."
                     : null;
 

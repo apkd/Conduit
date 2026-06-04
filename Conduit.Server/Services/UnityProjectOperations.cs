@@ -166,6 +166,16 @@ public sealed class UnityProjectOperations(
         );
     }
 
+    public async Task<ToolExecutionResult> ReimportAssetsAsync(string projectPath, string query, CT ct)
+    {
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        return await EnqueueAsync(
+            projectPath: normalizedProjectPath,
+            command: new() { CommandType = BridgeCommandTypes.ReimportAssets, Target = query },
+            ct: ct
+        );
+    }
+
     public Task<ToolExecutionResult> ExecuteCodeAsync(string projectPath, string snippet, CT ct)
     {
         if (CallsAssetDatabaseRefresh(snippet))
@@ -466,7 +476,7 @@ public sealed class UnityProjectOperations(
 
         try
         {
-            if (commandKind == BridgeCommandKind.RefreshAssetDatabase)
+            if (BridgeCommandKinds.IsAssetImport(commandKind))
             {
                 monitoredProcessId = environmentInspector
                     .Inspect(queuedCommand.Session.ProjectPath)

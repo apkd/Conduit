@@ -127,6 +127,37 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ReimportAssetsCommand_Parses()
+    {
+        var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ReimportAssets);
+
+        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ReimportAssets));
+    }
+
+    [Test]
+    public void ResolveAssetPaths_UsesObjectQueryAndReturnsAssetsOnly()
+    {
+        var materialMatches = ConduitSearchUtility.ResolveAssetPaths(MaterialAsset);
+        Assert.That(materialMatches, Is.EqualTo(new[] { MaterialAsset }));
+
+        var cameraMatches = ConduitSearchUtility.ResolveAssetPaths(CameraSearchQuery);
+        Assert.That(cameraMatches, Is.Empty);
+    }
+
+    [Test]
+    public void ReimportAssetFilenames_FormatOmitsAssetPaths()
+    {
+        var output = ConduitToolRunner.FormatReimportedAssetFilenames(
+            "Assets/Temp/Foo.asset\nPackages/dev.tryfinally.conduit/Tests/EditMode/TestAssets/JsonOverwriteMaterial.mat"
+        );
+
+        Assert.That(output, Does.Contain("- Foo.asset"));
+        Assert.That(output, Does.Contain("- JsonOverwriteMaterial.mat"));
+        Assert.That(output, Does.Not.Contain("Assets/Temp"));
+        Assert.That(output, Does.Not.Contain("Packages/dev.tryfinally.conduit"));
+    }
+
+    [Test]
     public void ProfilerCommands_Parse()
     {
         Assert.That(
@@ -2175,6 +2206,8 @@ public sealed class ConduitMcpToolsTests
         Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(false), Is.False);
         Assert.That(ConduitToolRunner.BuildReimportPlayModeDiagnostic(), Is.EqualTo(
             "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'play' to return to edit mode first."));
+        Assert.That(ConduitToolRunner.BuildReimportPlayModeDiagnostic(BridgeCommandTypes.ReimportAssets), Is.EqualTo(
+            "Cannot run 'reimport_assets' while Unity is in play mode. Use 'play' to return to edit mode first."));
     }
 
     [Test]

@@ -117,6 +117,7 @@ public sealed class ConduitMcpEndToEndTests
                      BridgeCommandTypes.SaveScenes,
                      BridgeCommandTypes.DiscardScenes,
                      BridgeCommandTypes.RefreshAssetDatabase,
+                     BridgeCommandTypes.ReimportAssets,
                      BridgeCommandTypes.ExecuteCode,
                      BridgeCommandTypes.Reflect,
                      BridgeCommandTypes.ProfilerRecord,
@@ -702,6 +703,37 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(102)]
+    public async Task ReimportAssets_UpdatesExistingTextAssetAndListsFilename()
+    {
+        var fileName = $"ReimportAsset_{Guid.NewGuid():N}.txt";
+        var assetPath = RegisterTemporaryAsset(GetTempAssetPath("Reimport", fileName));
+        File.WriteAllText(ToAbsoluteProjectPath(assetPath), "before reimport");
+        AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport);
+
+        var importedAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(assetPath);
+        Assert.That(importedAsset, Is.Not.Null);
+        Assert.That(importedAsset!.text, Is.EqualTo("before reimport"));
+
+        File.WriteAllText(ToAbsoluteProjectPath(assetPath), "after reimport");
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ReimportAssets,
+            Args(
+                ("projectPath", projectPath),
+                ("query", assetPath)
+            )
+        );
+
+        Assert.That(result.IsError, Is.False, result.Text);
+        AssertTextContainsAny(result.Text, "Reimported assets:", fileName);
+        Assert.That(result.Text, Does.Not.Contain(assetPath));
+
+        importedAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(assetPath);
+        Assert.That(importedAsset, Is.Not.Null);
+        Assert.That(importedAsset!.text, Is.EqualTo("after reimport"));
+    }
+
+    [Test]
+    [Order(103)]
     public async Task RefreshAssetDatabase_PlayModeRefusesPromptly()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;

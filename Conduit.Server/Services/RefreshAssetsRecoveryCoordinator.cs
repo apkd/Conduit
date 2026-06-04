@@ -228,7 +228,7 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
     internal static bool IsRefreshStillBusy(UnityPingSnapshot pingSnapshot) =>
         pingSnapshot.IsCompiling
         || pingSnapshot.IsUpdating
-        || string.Equals(pingSnapshot.ActiveCommandType, BridgeCommandTypes.RefreshAssetDatabase, StringComparison.Ordinal);
+        || BridgeCommandKinds.IsAssetImport(BridgeCommandKinds.Parse(pingSnapshot.ActiveCommandType));
 
     internal static string DescribeRefreshRecoveryState(UnityPingSnapshot pingSnapshot) =>
         $"is_compiling={pingSnapshot.IsCompiling.ToString().ToLowerInvariant()}, is_updating={pingSnapshot.IsUpdating.ToString().ToLowerInvariant()}, active_command_type='{pingSnapshot.ActiveCommandType ?? "<none>"}'";

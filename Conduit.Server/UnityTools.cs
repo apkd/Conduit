@@ -214,6 +214,20 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.RefreshAssetDatabaseAsync(projectPath, ct));
 
+    [McpServerTool(Name = CMD.ReimportAssets, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = true)]
+    [Description(
+        """
+        Resolves all assets matching the query, forces synchronous reimport, and waits for the editor to become stable again.
+        """
+    )]
+    public static Task<string> ReimportAssets(
+        [Description("Project path")] string projectPath,
+        [Description("Entity ID, asset path, GUID, or Unity search query. All matching assets are reimported.")]
+        string query,
+        UnityProjectOperations operations,
+        CancellationToken ct
+    ) => ToPlainTextToolResponseAsync(operations.ReimportAssetsAsync(projectPath, query, ct));
+
     [McpServerTool(Name = CMD.ExecuteCode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """

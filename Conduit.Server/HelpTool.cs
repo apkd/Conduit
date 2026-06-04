@@ -9,7 +9,7 @@ static class HelpTool
         string entity = usesEntityIds ? "entity" : "instance";
 
         return $"""
-                The same search query format is used for `search`, `show`, `to_json`, and `from_json_overwrite`.
+                The same search query format is used for `search`, `show`, `to_json`, `from_json_overwrite`, and `reimport_assets`.
 
                 If you have an exact search target, you can simply specify one of these:
                 - exact {entity} ID: `{eid}:12345`

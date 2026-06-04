@@ -174,6 +174,8 @@ public sealed class UnityProjectOperationsPolicyTests
     {
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ViewBurstAsm)).IsEqualTo(BridgeCommandKind.ViewBurstAsm);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ViewBurstAsm)).IsEqualTo(TimeSpan.FromMinutes(5));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ReimportAssets)).IsEqualTo(BridgeCommandKind.ReimportAssets);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ReimportAssets)).IsEqualTo(TimeSpan.FromMinutes(10));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.Reflect)).IsEqualTo(BridgeCommandKind.Reflect);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.Reflect)).IsEqualTo(TimeSpan.FromSeconds(90));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerRecord)).IsEqualTo(BridgeCommandKind.ProfilerRecord);
@@ -224,6 +226,7 @@ public sealed class UnityProjectOperationsPolicyTests
         await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new() { IsUpdating = true })).IsTrue();
         await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new() { IsCompiling = true })).IsTrue();
         await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new() { ActiveCommandType = BridgeCommandTypes.RefreshAssetDatabase })).IsTrue();
+        await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new() { ActiveCommandType = BridgeCommandTypes.ReimportAssets })).IsTrue();
         await Assert.That(RefreshAssetDatabaseRecoveryCoordinator.IsRefreshStillBusy(new())).IsFalse();
     }
 

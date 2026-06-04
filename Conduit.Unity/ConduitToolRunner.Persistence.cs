@@ -14,8 +14,12 @@ namespace Conduit
                 or ParsedBridgeCommandKind.RunTestsPlayMode
                 or ParsedBridgeCommandKind.RunTestsPlayer;
 
+        static bool IsAssetImportCommand(ParsedBridgeCommandKind kind)
+            => kind is ParsedBridgeCommandKind.RefreshAssetDatabase or ParsedBridgeCommandKind.ReimportAssets;
+
         static bool CanRestorePersistedOperation(ParsedBridgeCommandKind kind)
-            => kind is ParsedBridgeCommandKind.Play or ParsedBridgeCommandKind.RefreshAssetDatabase
+            => kind is ParsedBridgeCommandKind.Play
+                || IsAssetImportCommand(kind)
                || IsTestCommand(kind);
 
         static bool IsStaleRestoredOperation(PendingOperationState? operation, ParsedBridgeCommand command)
@@ -24,7 +28,7 @@ namespace Conduit
                && command.Kind switch
                {
                    ParsedBridgeCommandKind.Play                 => false,
-                   ParsedBridgeCommandKind.RefreshAssetDatabase => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
+                   _ when IsAssetImportCommand(command.Kind)    => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
                    _ when IsTestCommand(command.Kind)           => !IsAnyTestRunActive() && !EditorApplication.isPlayingOrWillChangePlaymode,
                    _                                            => true,
                };
@@ -42,6 +46,7 @@ namespace Conduit
                         RequestID = operation.request_id,
                         CommandType = operation.command_type,
                         Target = operation.target,
+                        Snippet = operation.snippet,
                         TestFilter = operation.test_filter,
                     }
                 )
@@ -92,6 +97,7 @@ namespace Conduit
                     command_type = restoredState.CommandType,
                     client_id = 0,
                     target = restoredState.Target,
+                    snippet = restoredState.Snippet,
                     test_filter = restoredState.TestFilter,
                     args = Array.Empty<string>(),
                     is_acknowledged = true,
@@ -134,6 +140,7 @@ namespace Conduit
                     TryAdvancePlayToggle();
                     return;
                 case ParsedBridgeCommandKind.RefreshAssetDatabase:
+                case ParsedBridgeCommandKind.ReimportAssets:
                     InstallReimportHooks();
                     MarkRestoredReimportAsResumed();
                     TryFinishReimport();
@@ -202,6 +209,7 @@ namespace Conduit
             [FormerlySerializedAs("request_id")] public string RequestID = string.Empty;
             [FormerlySerializedAs("command_type")] public string CommandType = string.Empty;
             [FormerlySerializedAs("target")] public string? Target;
+            [FormerlySerializedAs("snippet")] public string? Snippet;
             [FormerlySerializedAs("test_filter")] public string? TestFilter;
         }
 

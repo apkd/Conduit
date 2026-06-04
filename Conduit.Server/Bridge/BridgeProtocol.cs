@@ -18,6 +18,7 @@ public static class BridgeCommandTypes
     public const string SaveScenes = "save_scenes";
     public const string DiscardScenes = "discard_scenes";
     public const string RefreshAssetDatabase = "refresh_asset_database";
+    public const string ReimportAssets = "reimport_assets";
     public const string ExecuteCode = "execute_code";
     public const string ViewBurstAsm = "view_burst_asm";
     public const string Reflect = "reflect";
