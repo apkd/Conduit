@@ -87,7 +87,10 @@ sealed partial class UnityProjectEnvironmentProbe
             return null;
 
         var mainWindowTitle = TryReadMainWindowTitle(matchedProcess.ProcessId) ?? "";
-        if (mainWindowTitle is "Enter Safe Mode?" || mainWindowTitle.Contains("SAFE MODE", StringComparison.Ordinal))
+        if (SafeModeWindowProbe.IsSafeModeWindowTitle(mainWindowTitle))
+            return SafeModeDiagnostic;
+
+        if (SafeModeWindowProbe.TryReadSafeModeWindowSignal(matchedProcess.ProcessId) is not null)
             return SafeModeDiagnostic;
 
         // if (TryReadUiAutomationSafeModeSignal(matchedProcess.ProcessId) is "Enter Safe Mode?" or "SAFE MODE")

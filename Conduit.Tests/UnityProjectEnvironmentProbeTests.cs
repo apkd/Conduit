@@ -6,6 +6,64 @@ namespace Conduit;
 public sealed class UnityProjectEnvironmentProbeTests
 {
     [Test]
+    [Arguments("Enter Safe Mode?", true)]
+    [Arguments("UNITY - SAFE MODE", true)]
+    [Arguments("Exit Safe Mode", true)]
+    [Arguments("Unity", false)]
+    [Arguments("", false)]
+    public async Task SafeModeWindowTitleRecognizesSafeModeText(string title, bool expected)
+    {
+        await Assert.That(SafeModeWindowProbe.IsSafeModeWindowTitle(title)).IsEqualTo(expected);
+    }
+
+    [Test]
+    public async Task HyprlandSafeModeSignalMatchesTargetPidTitle()
+    {
+        const string json =
+            """
+            [
+              { "pid": 1234, "class": "Unity", "title": "Unity", "initialTitle": "Unity" },
+              { "pid": 1234, "class": "Unity", "title": "Enter Safe Mode?", "initialTitle": "Enter Safe Mode?" },
+              { "pid": 5678, "class": "Unity", "title": "Enter Safe Mode?", "initialTitle": "Enter Safe Mode?" }
+            ]
+            """;
+
+        var title = SafeModeWindowProbe.TryReadHyprlandClientsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
+    public async Task HyprlandSafeModeSignalIgnoresOtherPids()
+    {
+        const string json =
+            """
+            [
+              { "pid": 5678, "class": "Unity", "title": "Enter Safe Mode?", "initialTitle": "Enter Safe Mode?" }
+            ]
+            """;
+
+        var title = SafeModeWindowProbe.TryReadHyprlandClientsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsNull();
+    }
+
+    [Test]
+    public async Task HyprlandSafeModeSignalUsesInitialTitle()
+    {
+        const string json =
+            """
+            [
+              { "pid": 1234, "class": "Unity", "title": "Unity", "initialTitle": "Enter Safe Mode?" }
+            ]
+            """;
+
+        var title = SafeModeWindowProbe.TryReadHyprlandClientsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
     public async Task HasConduitPackageSignalReturnsFalseWhenPackageIsAbsent()
     {
         var projectPath = CreateTempProject();
