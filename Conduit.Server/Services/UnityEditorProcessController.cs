@@ -151,7 +151,11 @@ public sealed class UnityEditorProcessController(
 
             var currentSnapshot = environmentInspector.Inspect(projectPath);
             if (environmentInspector.TryReadSafeModeDiagnostic(currentSnapshot) is { } safeModeDiagnostic)
-                return ToolExecutionResult.NotConnected(projectPath, safeModeDiagnostic);
+            {
+                builder.AppendLine(safeModeDiagnostic);
+                AppendLatestCompilationDiagnostics(builder, restartCompilationDiagnostics);
+                return ToolExecutionResult.NotConnected(projectPath, ConduitUtility.FinishText(builder));
+            }
 
             if (!string.IsNullOrWhiteSpace(restartCompilationDiagnostics.ErrorText))
             {
