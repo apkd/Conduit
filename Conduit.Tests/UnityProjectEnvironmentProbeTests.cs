@@ -64,6 +64,53 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    public async Task ResolveExecutablePathPrefersPrimaryPath()
+    {
+        var primaryDirectory = Directory.CreateTempSubdirectory("conduit-primary-path-");
+        var fallbackDirectory = Directory.CreateTempSubdirectory("conduit-fallback-path-");
+        try
+        {
+            var primaryExecutable = Path.Combine(primaryDirectory.FullName, "hyprctl");
+            await File.WriteAllTextAsync(primaryExecutable, string.Empty);
+            await File.WriteAllTextAsync(Path.Combine(fallbackDirectory.FullName, "hyprctl"), string.Empty);
+
+            var resolved = SafeModeWindowProbe.ResolveExecutablePath(
+                "hyprctl",
+                primaryDirectory.FullName,
+                fallbackDirectory.FullName
+            );
+
+            await Assert.That(resolved).IsEqualTo(primaryExecutable);
+        }
+        finally
+        {
+            Directory.Delete(primaryDirectory.FullName, recursive: true);
+            Directory.Delete(fallbackDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task TryInferHyprlandInstanceSignatureUsesSocketDirectory()
+    {
+        var runtimeDirectory = Directory.CreateTempSubdirectory("conduit-runtime-");
+        try
+        {
+            var instanceDirectory = Directory.CreateDirectory(
+                Path.Combine(runtimeDirectory.FullName, "hypr", "instance_1")
+            );
+            await File.WriteAllTextAsync(Path.Combine(instanceDirectory.FullName, ".socket.sock"), string.Empty);
+
+            var signature = SafeModeWindowProbe.TryInferHyprlandInstanceSignature(runtimeDirectory.FullName);
+
+            await Assert.That(signature).IsEqualTo("instance_1");
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task HasConduitPackageSignalReturnsFalseWhenPackageIsAbsent()
     {
         var projectPath = CreateTempProject();

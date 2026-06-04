@@ -7,6 +7,7 @@ namespace Conduit;
 
 static class SafeModeWindowProbe
 {
+    const string HyprctlExecutableName = "hyprctl";
     const int WindowProbeTimeoutMilliseconds = 2000;
 
     internal static bool IsSafeModeWindowTitle(string? title) =>
@@ -98,7 +99,14 @@ static class SafeModeWindowProbe
 
     static ProcessStartInfo CreateHyprlandClientsStartInfo(int processId)
     {
-        var startInfo = new ProcessStartInfo("hyprctl")
+        var processPath = TryReadProcessEnvironmentValue(processId, "PATH");
+        var startInfo = new ProcessStartInfo(
+            ResolveExecutablePath(
+                HyprctlExecutableName,
+                processPath,
+                Environment.GetEnvironmentVariable("PATH")
+            )
+        )
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -107,10 +115,103 @@ static class SafeModeWindowProbe
         };
         startInfo.ArgumentList.Add("clients");
         startInfo.ArgumentList.Add("-j");
-        CopyProcessEnvironmentValue(processId, startInfo, "HYPRLAND_INSTANCE_SIGNATURE");
-        CopyProcessEnvironmentValue(processId, startInfo, "XDG_RUNTIME_DIR");
-        CopyProcessEnvironmentValue(processId, startInfo, "WAYLAND_DISPLAY");
+        if (!string.IsNullOrWhiteSpace(processPath))
+            startInfo.Environment["PATH"] = processPath;
+
+        var xdgRuntimeDirectory = ResolveXdgRuntimeDirectory(TryReadProcessEnvironmentValue(processId, "XDG_RUNTIME_DIR"));
+        if (!string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            startInfo.Environment["XDG_RUNTIME_DIR"] = xdgRuntimeDirectory;
+
+        var waylandDisplay = TryReadProcessEnvironmentValue(processId, "WAYLAND_DISPLAY")
+                             ?? Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
+        if (!string.IsNullOrWhiteSpace(waylandDisplay))
+            startInfo.Environment["WAYLAND_DISPLAY"] = waylandDisplay;
+
+        var signature = TryReadProcessEnvironmentValue(processId, "HYPRLAND_INSTANCE_SIGNATURE")
+                        ?? Environment.GetEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE");
+        if (!string.IsNullOrWhiteSpace(signature))
+            startInfo.Environment["HYPRLAND_INSTANCE_SIGNATURE"] = signature;
+        else if (TryInferHyprlandInstanceSignature(xdgRuntimeDirectory) is { } inferredSignature)
+            startInfo.Environment["HYPRLAND_INSTANCE_SIGNATURE"] = inferredSignature;
+
         return startInfo;
+    }
+
+    static string? ResolveXdgRuntimeDirectory(string? preferredDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(preferredDirectory))
+            return preferredDirectory;
+
+        if (Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") is { Length: > 0 } environmentDirectory)
+            return environmentDirectory;
+
+        if (!OperatingSystem.IsLinux())
+            return null;
+
+        var defaultDirectory = $"/run/user/{getuid()}";
+        return Directory.Exists(defaultDirectory) ? defaultDirectory : null;
+    }
+
+    internal static string ResolveExecutablePath(string executableName, string? primaryPath, string? fallbackPath)
+    {
+        foreach (var directory in EnumeratePathDirectories(primaryPath))
+            if (TryResolveExecutablePath(directory, executableName) is { } executablePath)
+                return executablePath;
+
+        foreach (var directory in EnumeratePathDirectories(fallbackPath))
+            if (TryResolveExecutablePath(directory, executableName) is { } executablePath)
+                return executablePath;
+
+        return executableName;
+    }
+
+    static IEnumerable<string> EnumeratePathDirectories(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            yield break;
+
+        foreach (var directory in path.Split(Path.PathSeparator))
+            if (!string.IsNullOrWhiteSpace(directory))
+                yield return directory;
+    }
+
+    static string? TryResolveExecutablePath(string directory, string executableName)
+    {
+        try
+        {
+            var candidate = Path.Combine(directory, executableName);
+            return File.Exists(candidate) ? candidate : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? TryInferHyprlandInstanceSignature(string? xdgRuntimeDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            return null;
+
+        try
+        {
+            var hyprlandDirectory = Path.Combine(xdgRuntimeDirectory, "hypr");
+            if (!Directory.Exists(hyprlandDirectory))
+                return null;
+
+            var bestCandidate = Directory
+                .EnumerateDirectories(hyprlandDirectory)
+                .Where(directory => File.Exists(Path.Combine(directory, ".socket.sock")))
+                .Select(directory => new DirectoryInfo(directory))
+                .OrderByDescending(directory => directory.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            return bestCandidate?.Name;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     static void CopyProcessEnvironmentValue(int processId, ProcessStartInfo startInfo, string name)
@@ -357,8 +458,13 @@ static class SafeModeWindowProbe
         out IntPtr bytesAfter,
         out IntPtr prop
     );
+
+    [DllImport("libc")]
+    static extern uint getuid();
 #else
     static string? TryReadX11SafeModeWindowSignal(int processId) => null;
+
+    static uint getuid() => 0;
 #endif
 
     static string? TryReadProcessEnvironmentValue(int processId, string name)
