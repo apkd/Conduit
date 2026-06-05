@@ -60,7 +60,7 @@ namespace Conduit
             }
             else
             {
-                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
             }
 
             reimportRefreshReturned = true;
