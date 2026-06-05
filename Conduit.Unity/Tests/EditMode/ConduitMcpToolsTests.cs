@@ -783,15 +783,21 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void Show_SceneHierarchyCompactsThreeOrMoreDuplicateComponentIdentifiers()
+    public void Show_SceneHierarchyUsesCompactTreeLegendAndDuplicateComponentIdentifiers()
     {
         var assetPath = GetTempAssetPath("UnitTests", $"RepeatedComponents_{Guid.NewGuid():N}.unity");
         var originalActiveScene = SceneManager.GetActiveScene();
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
         var gameObject = new GameObject("ConduitRepeatedComponents");
+        var firstChild = new GameObject("ConduitFirstChild");
+        var secondChild = new GameObject("ConduitSecondChild");
+        var grandChild = new GameObject("ConduitGrandChild");
 
         try
         {
+            firstChild.transform.SetParent(gameObject.transform, false);
+            secondChild.transform.SetParent(gameObject.transform, false);
+            grandChild.transform.SetParent(firstChild.transform, false);
             SceneManager.MoveGameObjectToScene(gameObject, scene);
             gameObject.AddComponent<BoxCollider>();
             gameObject.AddComponent<BoxCollider>();
@@ -804,9 +810,20 @@ public sealed class ConduitMcpToolsTests
 
             Assert.That(
                 output,
-                Does.Contain($"ConduitRepeatedComponents [{ConduitUtility.FormatObjectId(gameObject)} | BC | BC | MC ×3]")
+                Does.Contain("Components:\nBC=BoxCollider\nMC=MeshCollider\n\nHierarchy:")
+            );
+            Assert.That(
+                output,
+                Does.Contain(
+                    $"ConduitRepeatedComponents [{ConduitUtility.FormatObjectId(gameObject)} | BC | BC | MC ×3]\n" +
+                    $"├─ConduitFirstChild [{ConduitUtility.FormatObjectId(firstChild)}]\n" +
+                    $"│ └─ConduitGrandChild [{ConduitUtility.FormatObjectId(grandChild)}]\n" +
+                    $"└─ConduitSecondChild [{ConduitUtility.FormatObjectId(secondChild)}]"
+                )
             );
             Assert.That(output, Does.Not.Contain("MC | MC | MC"));
+            Assert.That(output, Does.Not.Contain("- BC = BoxCollider"));
+            Assert.That(output, Does.Not.Contain("├───"));
         }
         finally
         {

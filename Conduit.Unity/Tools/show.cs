@@ -325,22 +325,30 @@ namespace Conduit
         {
             if (!includeSiblings)
             {
-                AppendHierarchyNode(builder, transform, string.Empty, true);
+                AppendHierarchyRoot(builder, transform);
                 return;
             }
 
             var roots = transform.gameObject.scene.GetRootGameObjects();
-            for (var index = 0; index < roots.Length; index++)
-                AppendHierarchyNode(builder, roots[index].transform, string.Empty, index == roots.Length - 1);
+            foreach (var root in roots)
+                AppendHierarchyRoot(builder, root.transform);
+        }
+
+        static void AppendHierarchyRoot(StringBuilder builder, Transform transform)
+        {
+            builder.AppendLine(transform.name);
+
+            for (var index = 0; index < transform.childCount; index++)
+                AppendHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1);
         }
 
         static void AppendHierarchyNode(StringBuilder builder, Transform transform, string prefix, bool isLast)
         {
             builder.Append(prefix);
-            builder.Append(isLast ? "└───" : "├───");
+            builder.Append(isLast ? "└─" : "├─");
             builder.AppendLine(transform.name);
 
-            var childPrefix = prefix + (isLast ? "    " : "│   ");
+            var childPrefix = prefix + (isLast ? "  " : "│ ");
             for (var index = 0; index < transform.childCount; index++)
                 AppendHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1);
         }
@@ -369,15 +377,15 @@ namespace Conduit
                 );
 
                 foreach (var entry in entries)
-                    builder.AppendLine($"- {entry.Value} = {entry.Key.Name}");
+                    builder.AppendLine($"{entry.Value}={entry.Key.Name}");
 
                 builder.AppendLine();
             }
 
             builder.AppendLine("Hierarchy:");
             var roots = scene.GetRootGameObjects();
-            for (var index = 0; index < roots.Length; index++)
-                AppendSceneHierarchy(builder, roots[index].transform, string.Empty, index == roots.Length - 1, componentIdentifiers);
+            foreach (var root in roots)
+                AppendSceneHierarchyRoot(builder, root.transform, componentIdentifiers);
 
             return builder.TrimEnd().ToString();
         }
@@ -474,11 +482,28 @@ namespace Conduit
             return initials.ToString();
         }
 
-        static void AppendSceneHierarchy(StringBuilder builder, Transform transform, string prefix, bool isLast, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneHierarchyRoot(StringBuilder builder, Transform transform, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        {
+            AppendSceneHierarchyLine(builder, transform, componentIdentifiers);
+
+            for (var index = 0; index < transform.childCount; index++)
+                AppendSceneHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1, componentIdentifiers);
+        }
+
+        static void AppendSceneHierarchyNode(StringBuilder builder, Transform transform, string prefix, bool isLast, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        {
+            builder.Append(prefix);
+            builder.Append(isLast ? "└─" : "├─");
+            AppendSceneHierarchyLine(builder, transform, componentIdentifiers);
+
+            var childPrefix = prefix + (isLast ? "  " : "│ ");
+            for (var index = 0; index < transform.childCount; index++)
+                AppendSceneHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers);
+        }
+
+        static void AppendSceneHierarchyLine(StringBuilder builder, Transform transform, IReadOnlyDictionary<Type, string> componentIdentifiers)
         {
             var gameObject = transform.gameObject;
-            builder.Append(prefix);
-            builder.Append(isLast ? "└───" : "├───");
             builder.Append(gameObject.name);
             builder.Append(" [");
             if (!gameObject.activeInHierarchy)
@@ -489,10 +514,6 @@ namespace Conduit
             AppendSceneComponentIdentifiers(builder, gameObject, componentIdentifiers);
 
             builder.AppendLine("]");
-
-            var childPrefix = prefix + (isLast ? "    " : "│   ");
-            for (var index = 0; index < transform.childCount; index++)
-                AppendSceneHierarchy(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers);
         }
 
         static void AppendSceneComponentIdentifiers(StringBuilder builder, GameObject gameObject, IReadOnlyDictionary<Type, string> componentIdentifiers)
