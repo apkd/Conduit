@@ -64,6 +64,120 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    public async Task SwaySafeModeSignalMatchesTargetPidName()
+    {
+        const string json =
+            """
+            {
+              "nodes": [
+                { "pid": 5678, "name": "Enter Safe Mode?" },
+                {
+                  "nodes": [
+                    { "pid": 1234, "name": "Enter Safe Mode?" }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        var title = SafeModeWindowProbe.TryReadSwayTreeSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
+    public async Task SwaySafeModeSignalMatchesFloatingWindowPropertyTitle()
+    {
+        const string json =
+            """
+            {
+              "nodes": [],
+              "floating_nodes": [
+                {
+                  "pid": 1234,
+                  "name": "Unity",
+                  "window_properties": {
+                    "title": "Enter Safe Mode?",
+                    "class": "Unity"
+                  }
+                }
+              ]
+            }
+            """;
+
+        var title = SafeModeWindowProbe.TryReadSwayTreeSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
+    public async Task SwaySafeModeSignalIgnoresOtherPids()
+    {
+        const string json =
+            """
+            {
+              "nodes": [
+                { "pid": 5678, "name": "Enter Safe Mode?" }
+              ]
+            }
+            """;
+
+        var title = SafeModeWindowProbe.TryReadSwayTreeSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsNull();
+    }
+
+    [Test]
+    public async Task NiriSafeModeSignalMatchesTargetPidTitle()
+    {
+        const string json =
+            """
+            [
+              { "id": 1, "pid": 5678, "title": "Enter Safe Mode?", "app_id": "Unity" },
+              { "id": 2, "pid": 1234, "title": "Enter Safe Mode?", "app_id": "Unity" }
+            ]
+            """;
+
+        var title = SafeModeWindowProbe.TryReadNiriWindowsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
+    public async Task NiriSafeModeSignalHandlesRawSocketResponse()
+    {
+        const string json =
+            """
+            {
+              "Ok": {
+                "Windows": [
+                  { "id": 2, "pid": 1234, "title": "Enter Safe Mode?", "app_id": "Unity" }
+                ]
+              }
+            }
+            """;
+
+        var title = SafeModeWindowProbe.TryReadNiriWindowsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsEqualTo("Enter Safe Mode?");
+    }
+
+    [Test]
+    public async Task NiriSafeModeSignalIgnoresOtherPids()
+    {
+        const string json =
+            """
+            [
+              { "id": 1, "pid": 5678, "title": "Enter Safe Mode?", "app_id": "Unity" }
+            ]
+            """;
+
+        var title = SafeModeWindowProbe.TryReadNiriWindowsSafeModeWindowSignal(json, 1234);
+
+        await Assert.That(title).IsNull();
+    }
+
+    [Test]
     public async Task ResolveExecutablePathPrefersPrimaryPath()
     {
         var primaryDirectory = Directory.CreateTempSubdirectory("conduit-primary-path-");
@@ -86,6 +200,87 @@ public sealed class UnityProjectEnvironmentProbeTests
         {
             Directory.Delete(primaryDirectory.FullName, recursive: true);
             Directory.Delete(fallbackDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task TryFindSwaySocketPrefersExplicitSocket()
+    {
+        var runtimeDirectory = Directory.CreateTempSubdirectory("conduit-sway-runtime-");
+        try
+        {
+            var discoveredSocket = Path.Combine(runtimeDirectory.FullName, "sway-ipc.1000.1.sock");
+            var explicitSocket = Path.Combine(runtimeDirectory.FullName, "explicit.sock");
+            await File.WriteAllTextAsync(discoveredSocket, string.Empty);
+            await File.WriteAllTextAsync(explicitSocket, string.Empty);
+
+            var socket = SafeModeWindowProbe.TryFindSwaySocket(runtimeDirectory.FullName, explicitSocket);
+
+            await Assert.That(socket).IsEqualTo(explicitSocket);
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task TryFindSwaySocketDiscoversRuntimeSocket()
+    {
+        var runtimeDirectory = Directory.CreateTempSubdirectory("conduit-sway-runtime-");
+        try
+        {
+            var socketPath = Path.Combine(runtimeDirectory.FullName, "sway-ipc.1000.1.sock");
+            await File.WriteAllTextAsync(socketPath, string.Empty);
+
+            var socket = SafeModeWindowProbe.TryFindSwaySocket(runtimeDirectory.FullName);
+
+            await Assert.That(socket).IsEqualTo(socketPath);
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task TryFindNiriSocketPrefersExplicitSocket()
+    {
+        var runtimeDirectory = Directory.CreateTempSubdirectory("conduit-niri-runtime-");
+        try
+        {
+            var discoveredSocket = Path.Combine(runtimeDirectory.FullName, "niri.wayland-1.1000.sock");
+            var explicitSocket = Path.Combine(runtimeDirectory.FullName, "explicit.sock");
+            await File.WriteAllTextAsync(discoveredSocket, string.Empty);
+            await File.WriteAllTextAsync(explicitSocket, string.Empty);
+
+            var socket = SafeModeWindowProbe.TryFindNiriSocket(runtimeDirectory.FullName, "wayland-1", explicitSocket);
+
+            await Assert.That(socket).IsEqualTo(explicitSocket);
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectory.FullName, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task TryFindNiriSocketDiscoversWaylandDisplaySocket()
+    {
+        var runtimeDirectory = Directory.CreateTempSubdirectory("conduit-niri-runtime-");
+        try
+        {
+            var socketPath = Path.Combine(runtimeDirectory.FullName, "niri.wayland-1.1000.sock");
+            await File.WriteAllTextAsync(socketPath, string.Empty);
+            await File.WriteAllTextAsync(Path.Combine(runtimeDirectory.FullName, "niri.wayland-2.1000.sock"), string.Empty);
+
+            var socket = SafeModeWindowProbe.TryFindNiriSocket(runtimeDirectory.FullName, "wayland-1");
+
+            await Assert.That(socket).IsEqualTo(socketPath);
+        }
+        finally
+        {
+            Directory.Delete(runtimeDirectory.FullName, recursive: true);
         }
     }
 

@@ -8,7 +8,16 @@ namespace Conduit;
 static class SafeModeWindowProbe
 {
     const string HyprctlExecutableName = "hyprctl";
+    const string NiriExecutableName = "niri";
+    const string SwaymsgExecutableName = "swaymsg";
     const int WindowProbeTimeoutMilliseconds = 2000;
+    static readonly string[] StandardExecutableDirectories =
+    [
+        "/run/current-system/sw/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ];
 
     internal static bool IsSafeModeWindowTitle(string? title) =>
         !string.IsNullOrWhiteSpace(title)
@@ -20,7 +29,9 @@ static class SafeModeWindowProbe
             return null;
 
         return TryReadX11SafeModeWindowSignal(processId)
-               ?? TryReadHyprlandSafeModeWindowSignal(processId);
+               ?? TryReadHyprlandSafeModeWindowSignal(processId)
+               ?? TryReadSwaySafeModeWindowSignal(processId)
+               ?? TryReadNiriSafeModeWindowSignal(processId);
     }
 
     internal static string? TryReadHyprlandClientsSafeModeWindowSignal(string? json, int processId)
@@ -62,39 +73,176 @@ static class SafeModeWindowProbe
 
     static string? TryReadSafeModeTitle(JsonElement element, string propertyName)
     {
-        if (!element.TryGetProperty(propertyName, out var titleElement) || titleElement.ValueKind != JsonValueKind.String)
+        var title = TryReadStringProperty(element, propertyName);
+        return IsSafeModeWindowTitle(title) ? title : null;
+    }
+
+    static string? TryReadStringProperty(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
             return null;
 
-        var title = titleElement.GetString();
-        return IsSafeModeWindowTitle(title) ? title : null;
+        return property.GetString();
     }
 
     static string? TryReadHyprlandSafeModeWindowSignal(int processId)
     {
         try
         {
-            using var process = Process.Start(CreateHyprlandClientsStartInfo(processId));
-            if (process == null)
-                return null;
-
-            var outputTask = process.StandardOutput.ReadToEndAsync();
-            var errorTask = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(WindowProbeTimeoutMilliseconds))
-            {
-                TryKillProcessTree(process);
-                return null;
-            }
-
-            _ = errorTask.GetAwaiter().GetResult();
-            if (process.ExitCode != 0)
-                return null;
-
-            return TryReadHyprlandClientsSafeModeWindowSignal(outputTask.GetAwaiter().GetResult(), processId);
+            return RunWindowProbeCommand(CreateHyprlandClientsStartInfo(processId)) is { } output
+                ? TryReadHyprlandClientsSafeModeWindowSignal(output, processId)
+                : null;
         }
         catch
         {
             return null;
         }
+    }
+
+    internal static string? TryReadSwayTreeSafeModeWindowSignal(string? json, int processId)
+    {
+        if (string.IsNullOrWhiteSpace(json) || processId <= 0)
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return TryReadSwayNodeSafeModeWindowSignal(document.RootElement, processId);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static string? TryReadSwayNodeSafeModeWindowSignal(JsonElement node, int processId)
+    {
+        if (node.ValueKind != JsonValueKind.Object)
+            return null;
+
+        if (JsonElementPidMatches(node, processId))
+        {
+            if (TryReadSafeModeTitle(node, "name") is { } name)
+                return name;
+
+            if (node.TryGetProperty("window_properties", out var windowProperties)
+                && windowProperties.ValueKind == JsonValueKind.Object
+                && TryReadSafeModeTitle(windowProperties, "title") is { } title)
+                return title;
+        }
+
+        if (TryReadSwayChildSafeModeWindowSignal(node, "nodes", processId) is { } nodeTitle)
+            return nodeTitle;
+
+        if (TryReadSwayChildSafeModeWindowSignal(node, "floating_nodes", processId) is { } floatingNodeTitle)
+            return floatingNodeTitle;
+
+        return null;
+    }
+
+    static string? TryReadSwayChildSafeModeWindowSignal(JsonElement node, string propertyName, int processId)
+    {
+        if (!node.TryGetProperty(propertyName, out var children) || children.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var child in children.EnumerateArray())
+            if (TryReadSwayNodeSafeModeWindowSignal(child, processId) is { } title)
+                return title;
+
+        return null;
+    }
+
+    static bool JsonElementPidMatches(JsonElement element, int processId)
+    {
+        if (!element.TryGetProperty("pid", out var pidElement) || pidElement.ValueKind != JsonValueKind.Number)
+            return false;
+
+        return pidElement.TryGetInt32(out var nodeProcessId) && nodeProcessId == processId;
+    }
+
+    static string? TryReadSwaySafeModeWindowSignal(int processId)
+    {
+        try
+        {
+            return RunWindowProbeCommand(CreateSwayTreeStartInfo(processId)) is { } output
+                ? TryReadSwayTreeSafeModeWindowSignal(output, processId)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? TryReadNiriWindowsSafeModeWindowSignal(string? json, int processId)
+    {
+        if (string.IsNullOrWhiteSpace(json) || processId <= 0)
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return TryReadNiriWindowsSafeModeWindowSignal(document.RootElement, processId);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static string? TryReadNiriWindowsSafeModeWindowSignal(JsonElement root, int processId)
+    {
+        if (root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("Ok", out var ok)
+            && ok.ValueKind == JsonValueKind.Object
+            && ok.TryGetProperty("Windows", out var socketWindows))
+            return TryReadNiriWindowsSafeModeWindowSignal(socketWindows, processId);
+
+        if (root.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var window in root.EnumerateArray())
+        {
+            if (window.ValueKind != JsonValueKind.Object || !JsonElementPidMatches(window, processId))
+                continue;
+
+            if (TryReadSafeModeTitle(window, "title") is { } title)
+                return title;
+        }
+
+        return null;
+    }
+
+    static string? TryReadNiriSafeModeWindowSignal(int processId)
+    {
+        try
+        {
+            return RunWindowProbeCommand(CreateNiriWindowsStartInfo(processId)) is { } output
+                ? TryReadNiriWindowsSafeModeWindowSignal(output, processId)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static string? RunWindowProbeCommand(ProcessStartInfo startInfo)
+    {
+        using var process = Process.Start(startInfo);
+        if (process == null)
+            return null;
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(WindowProbeTimeoutMilliseconds))
+        {
+            TryKillProcessTree(process);
+            return null;
+        }
+
+        _ = errorTask.GetAwaiter().GetResult();
+        return process.ExitCode == 0 ? outputTask.GetAwaiter().GetResult() : null;
     }
 
     static ProcessStartInfo CreateHyprlandClientsStartInfo(int processId)
@@ -137,6 +285,91 @@ static class SafeModeWindowProbe
         return startInfo;
     }
 
+    static ProcessStartInfo CreateSwayTreeStartInfo(int processId)
+    {
+        var processPath = TryReadProcessEnvironmentValue(processId, "PATH");
+        var startInfo = new ProcessStartInfo(
+            ResolveExecutablePath(
+                SwaymsgExecutableName,
+                processPath,
+                Environment.GetEnvironmentVariable("PATH")
+            )
+        )
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        if (!string.IsNullOrWhiteSpace(processPath))
+            startInfo.Environment["PATH"] = processPath;
+
+        var xdgRuntimeDirectory = ResolveXdgRuntimeDirectory(TryReadProcessEnvironmentValue(processId, "XDG_RUNTIME_DIR"));
+        if (!string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            startInfo.Environment["XDG_RUNTIME_DIR"] = xdgRuntimeDirectory;
+
+        if (TryFindSwaySocket(
+                xdgRuntimeDirectory,
+                TryReadProcessEnvironmentValue(processId, "SWAYSOCK"),
+                TryReadProcessEnvironmentValue(processId, "I3SOCK"),
+                Environment.GetEnvironmentVariable("SWAYSOCK"),
+                Environment.GetEnvironmentVariable("I3SOCK")
+            )
+            is { } socketPath)
+        {
+            startInfo.ArgumentList.Add("--socket");
+            startInfo.ArgumentList.Add(socketPath);
+        }
+
+        startInfo.ArgumentList.Add("-t");
+        startInfo.ArgumentList.Add("get_tree");
+        startInfo.ArgumentList.Add("--raw");
+        return startInfo;
+    }
+
+    static ProcessStartInfo CreateNiriWindowsStartInfo(int processId)
+    {
+        var processPath = TryReadProcessEnvironmentValue(processId, "PATH");
+        var startInfo = new ProcessStartInfo(
+            ResolveExecutablePath(
+                NiriExecutableName,
+                processPath,
+                Environment.GetEnvironmentVariable("PATH")
+            )
+        )
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        if (!string.IsNullOrWhiteSpace(processPath))
+            startInfo.Environment["PATH"] = processPath;
+
+        var xdgRuntimeDirectory = ResolveXdgRuntimeDirectory(TryReadProcessEnvironmentValue(processId, "XDG_RUNTIME_DIR"));
+        if (!string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            startInfo.Environment["XDG_RUNTIME_DIR"] = xdgRuntimeDirectory;
+
+        var waylandDisplay = TryReadProcessEnvironmentValue(processId, "WAYLAND_DISPLAY")
+                             ?? Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
+        if (!string.IsNullOrWhiteSpace(waylandDisplay))
+            startInfo.Environment["WAYLAND_DISPLAY"] = waylandDisplay;
+
+        if (TryFindNiriSocket(
+                xdgRuntimeDirectory,
+                waylandDisplay,
+                TryReadProcessEnvironmentValue(processId, "NIRI_SOCKET"),
+                Environment.GetEnvironmentVariable("NIRI_SOCKET")
+            )
+            is { } socketPath)
+            startInfo.Environment["NIRI_SOCKET"] = socketPath;
+
+        startInfo.ArgumentList.Add("msg");
+        startInfo.ArgumentList.Add("--json");
+        startInfo.ArgumentList.Add("windows");
+        return startInfo;
+    }
+
     static string? ResolveXdgRuntimeDirectory(string? preferredDirectory)
     {
         if (!string.IsNullOrWhiteSpace(preferredDirectory))
@@ -159,6 +392,10 @@ static class SafeModeWindowProbe
                 return executablePath;
 
         foreach (var directory in EnumeratePathDirectories(fallbackPath))
+            if (TryResolveExecutablePath(directory, executableName) is { } executablePath)
+                return executablePath;
+
+        foreach (var directory in StandardExecutableDirectories)
             if (TryResolveExecutablePath(directory, executableName) is { } executablePath)
                 return executablePath;
 
@@ -188,6 +425,72 @@ static class SafeModeWindowProbe
         }
     }
 
+    internal static string? TryFindSwaySocket(string? xdgRuntimeDirectory, params string?[] preferredSocketPaths)
+    {
+        foreach (var socketPath in preferredSocketPaths)
+            if (!string.IsNullOrWhiteSpace(socketPath) && Path.Exists(socketPath))
+                return socketPath;
+
+        if (string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            return null;
+
+        try
+        {
+            if (!Directory.Exists(xdgRuntimeDirectory))
+                return null;
+
+            return Directory
+                .EnumerateFileSystemEntries(xdgRuntimeDirectory, "sway-ipc.*.sock")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .Select(file => file.FullName)
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? TryFindNiriSocket(
+        string? xdgRuntimeDirectory,
+        string? waylandDisplay,
+        params string?[] preferredSocketPaths
+    )
+    {
+        foreach (var socketPath in preferredSocketPaths)
+            if (!string.IsNullOrWhiteSpace(socketPath) && Path.Exists(socketPath))
+                return socketPath;
+
+        if (string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
+            return null;
+
+        try
+        {
+            if (!Directory.Exists(xdgRuntimeDirectory))
+                return null;
+
+            var pattern = IsSimpleFileName(waylandDisplay)
+                ? $"niri.{waylandDisplay}.*.sock"
+                : "niri.wayland-*.sock";
+
+            return Directory
+                .EnumerateFileSystemEntries(xdgRuntimeDirectory, pattern)
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .Select(file => file.FullName)
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static bool IsSimpleFileName(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0;
+
     internal static string? TryInferHyprlandInstanceSignature(string? xdgRuntimeDirectory)
     {
         if (string.IsNullOrWhiteSpace(xdgRuntimeDirectory))
@@ -212,12 +515,6 @@ static class SafeModeWindowProbe
         {
             return null;
         }
-    }
-
-    static void CopyProcessEnvironmentValue(int processId, ProcessStartInfo startInfo, string name)
-    {
-        if (TryReadProcessEnvironmentValue(processId, name) is { } value)
-            startInfo.Environment[name] = value;
     }
 
     static void TryKillProcessTree(Process process)
