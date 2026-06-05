@@ -165,7 +165,7 @@ namespace Conduit
         static bool IsAnyTestRunActive()
             => TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
 
-        static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value, params object[] args)
+        static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value, params object?[] args)
         {
             value = false;
             if (method == null)
