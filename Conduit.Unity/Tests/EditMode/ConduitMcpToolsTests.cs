@@ -783,6 +783,44 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Show_SceneHierarchyCompactsThreeOrMoreDuplicateComponentIdentifiers()
+    {
+        var assetPath = GetTempAssetPath("UnitTests", $"RepeatedComponents_{Guid.NewGuid():N}.unity");
+        var originalActiveScene = SceneManager.GetActiveScene();
+        var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+        var gameObject = new GameObject("ConduitRepeatedComponents");
+
+        try
+        {
+            SceneManager.MoveGameObjectToScene(gameObject, scene);
+            gameObject.AddComponent<BoxCollider>();
+            gameObject.AddComponent<BoxCollider>();
+            gameObject.AddComponent<MeshCollider>();
+            gameObject.AddComponent<MeshCollider>();
+            gameObject.AddComponent<MeshCollider>();
+            Assert.That(EditorSceneManager.SaveScene(scene, assetPath), Is.True);
+
+            var output = show.Show(assetPath);
+
+            Assert.That(
+                output,
+                Does.Contain($"ConduitRepeatedComponents [{ConduitUtility.FormatObjectId(gameObject)} | BC | BC | MC ×3]")
+            );
+            Assert.That(output, Does.Not.Contain("MC | MC | MC"));
+        }
+        finally
+        {
+            if (scene.IsValid() && scene.isLoaded)
+                EditorSceneManager.CloseScene(scene, true);
+
+            if (originalActiveScene.IsValid() && originalActiveScene.isLoaded)
+                SceneManager.SetActiveScene(originalActiveScene);
+
+            DeleteTemporaryAsset(assetPath);
+        }
+    }
+
+    [Test]
     public void Show_CustomImplementation_UsesToStringForMcp()
     {
         var assetPath = GetTempAssetPath("UnitTests", $"CustomShow_{Guid.NewGuid():N}.asset");

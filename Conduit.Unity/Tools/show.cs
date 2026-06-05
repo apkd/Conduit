@@ -486,11 +486,7 @@ namespace Conduit
 
             builder.Append(ConduitUtility.FormatObjectId(gameObject));
 
-            foreach (var componentId in GetSceneComponentIdentifiers(gameObject, componentIdentifiers))
-            {
-                builder.Append(" | ");
-                builder.Append(componentId);
-            }
+            AppendSceneComponentIdentifiers(builder, gameObject, componentIdentifiers);
 
             builder.AppendLine("]");
 
@@ -499,12 +495,73 @@ namespace Conduit
                 AppendSceneHierarchy(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers);
         }
 
-        static IEnumerable<string> GetSceneComponentIdentifiers(GameObject gameObject, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneComponentIdentifiers(StringBuilder builder, GameObject gameObject, IReadOnlyDictionary<Type, string> componentIdentifiers)
         {
+            using var pooledIdentifiers = ConduitUtility.GetPooledList<ComponentIdentifierCount>(out var identifiers);
             foreach (var component in gameObject.GetComponents<Component>())
-                if (component is not (null or Transform or RectTransform))
-                    if (componentIdentifiers.TryGetValue(component.GetType(), out var identifier))
-                        yield return identifier;
+            {
+                if (component is null or Transform or RectTransform)
+                    continue;
+
+                var componentType = component.GetType();
+                if (!componentIdentifiers.TryGetValue(componentType, out var identifier))
+                    continue;
+
+                var index = FindComponentIndex(identifiers, componentType);
+                if (index < 0)
+                {
+                    identifiers.Add(new(componentType, identifier));
+                    continue;
+                }
+
+                var count = identifiers[index];
+                count.Count++;
+                identifiers[index] = count;
+            }
+
+            foreach (var identifier in identifiers)
+            {
+                if (identifier.Count >= 3)
+                {
+                    builder.Append(" | ");
+                    builder.Append(identifier.Identifier);
+                    builder.Append(" ×");
+                    builder.Append(identifier.Count.ToString(CultureInfo.InvariantCulture));
+                    continue;
+                }
+
+                for (var index = 0; index < identifier.Count; index++)
+                    AppendSceneComponentIdentifier(builder, identifier.Identifier);
+            }
+        }
+
+        static void AppendSceneComponentIdentifier(StringBuilder builder, string identifier)
+        {
+            builder.Append(" | ");
+            builder.Append(identifier);
+        }
+
+        static int FindComponentIndex(List<ComponentIdentifierCount> identifiers, Type componentType)
+        {
+            for (var index = 0; index < identifiers.Count; index++)
+                if (identifiers[index].ComponentType == componentType)
+                    return index;
+
+            return -1;
+        }
+
+        struct ComponentIdentifierCount
+        {
+            public readonly Type ComponentType;
+            public readonly string Identifier;
+            public int Count;
+
+            public ComponentIdentifierCount(Type componentType, string identifier)
+            {
+                ComponentType = componentType;
+                Identifier = identifier;
+                Count = 1;
+            }
         }
 
         static void AppendGameObject(StringBuilder builder, GameObject gameObject)
