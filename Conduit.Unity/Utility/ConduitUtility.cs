@@ -271,7 +271,8 @@ namespace Conduit
         /// <summary>
         /// Formats an object identifier for display in tool output.
         /// </summary>
-        public static string FormatObjectId(ulong objectId) => $"eid:{objectId}";
+        public static string FormatObjectId(ulong objectId)
+            => $"eid:{unchecked((int)objectId).ToString(CultureInfo.InvariantCulture)}";
 #else
         /// <summary>
         /// Resolves the stable object identifier for a Unity object using instance IDs on older Unity.

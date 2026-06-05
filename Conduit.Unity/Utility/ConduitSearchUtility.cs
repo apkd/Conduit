@@ -148,7 +148,7 @@ namespace Conduit
 #if UNITY_6000_4_OR_NEWER
                 || !ulong.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rawEntityId))
 #else
-                || !int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rawEntityId))
+                || !TryParseLegacyEntityId(candidate, out var rawEntityId))
 #endif
                 return false;
 
@@ -180,6 +180,20 @@ namespace Conduit
             // Unity 6000.2 exposes entity IDs, but not the editor-side reverse lookup helper yet.
             _ = entityId;
             return EditorUtility.InstanceIDToObject(instanceId);
+        }
+#endif
+
+#if !UNITY_6000_4_OR_NEWER
+        static bool TryParseLegacyEntityId(ReadOnlySpan<char> candidate, out int entityId)
+        {
+            if (int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out entityId))
+                return true;
+
+            if (!ulong.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsignedEntityId))
+                return false;
+
+            entityId = unchecked((int)unsignedEntityId);
+            return true;
         }
 #endif
 #else
