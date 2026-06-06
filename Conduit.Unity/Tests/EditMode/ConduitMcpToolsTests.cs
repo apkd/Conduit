@@ -3,6 +3,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -834,6 +835,51 @@ public sealed class ConduitMcpToolsTests
                 SceneManager.SetActiveScene(originalActiveScene);
 
             DeleteTemporaryAsset(assetPath);
+        }
+    }
+
+    [Test]
+    public void Show_LargeGameObjectHierarchyShowsParentDetailsAndCompactTree()
+    {
+        var root = new GameObject("ConduitCompactRoot");
+        root.AddComponent<BoxCollider>();
+        GameObject? firstChild = null;
+
+        try
+        {
+            for (var index = 0; index < 8; index++)
+            {
+                var childName = $"ConduitCompactChild{index.ToString(CultureInfo.InvariantCulture)}";
+                var child = new GameObject(childName);
+                child.transform.SetParent(root.transform, false);
+                if (index == 0)
+                {
+                    child.AddComponent<MeshCollider>();
+                    firstChild = child;
+                }
+            }
+
+            Assert.That(firstChild, Is.Not.Null);
+
+            var output = show.Show(ConduitUtility.FormatObjectId(root));
+
+            Assert.That(output, Does.Contain($"GameObject: ConduitCompactRoot [{ConduitUtility.FormatObjectId(root)}]"));
+            Assert.That(output, Does.Contain("Components:\nBC=BoxCollider\nMC=MeshCollider\n\nHierarchy:"));
+            Assert.That(
+                output,
+                Does.Contain(
+                    $"ConduitCompactRoot [{ConduitUtility.FormatObjectId(root)} | BC]\n" +
+                    $"├─ConduitCompactChild0 [{ConduitUtility.FormatObjectId(firstChild!)} | MC]"
+                )
+            );
+            Assert.That(
+                output,
+                Does.Not.Contain($"GameObject: ConduitCompactRoot/ConduitCompactChild0 [{ConduitUtility.FormatObjectId(firstChild!)}]")
+            );
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(root);
         }
     }
 

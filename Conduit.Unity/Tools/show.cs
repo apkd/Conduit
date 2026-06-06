@@ -22,6 +22,7 @@ namespace Conduit
     {
         const int MaxStringLength = 256;
         const int MaxCollectionPreview = 4;
+        const int CompactHierarchyGameObjectThreshold = 8;
         static readonly ConcurrentDictionary<Type, FieldInfo[]> fieldCache = new();
         static readonly ConcurrentDictionary<Type, IndexableAccess> indexableAccessCache = new();
 
@@ -219,12 +220,7 @@ namespace Conduit
                 builder.AppendLine($"Asset: {assetPath}");
                 builder.AppendLine($"Main Object: {DescribeObject(root)}");
                 builder.AppendLine();
-                builder.AppendLine("Hierarchy:");
-                AppendHierarchy(builder, root.transform, includeSiblings: false);
-                builder.AppendLine();
-
-                foreach (var transform in root.GetComponentsInChildren<Transform>(true))
-                    AppendGameObject(builder, transform.gameObject);
+                AppendGameObjectHierarchyDetails(builder, root);
 
                 using var pooledSubassets = ConduitUtility.GetPooledList<Object>(out var subassets);
                 foreach (var assetObject in AssetDatabase.LoadAllAssetsAtPath(assetPath))
@@ -292,12 +288,7 @@ namespace Conduit
             builder.AppendLine($"Object: {DescribeObject(gameObject)}");
             builder.AppendLine(!string.IsNullOrWhiteSpace(assetPath) ? $"Asset: {assetPath}" : $"Scene: {FormatSceneName(gameObject.scene)}");
             builder.AppendLine();
-            builder.AppendLine("Hierarchy:");
-            AppendHierarchy(builder, gameObject.transform, includeSiblings: false);
-            builder.AppendLine();
-
-            foreach (var transform in gameObject.GetComponentsInChildren<Transform>(true))
-                AppendGameObject(builder, transform.gameObject);
+            AppendGameObjectHierarchyDetails(builder, gameObject);
 
             return builder.TrimEnd().ToString();
         }
@@ -360,27 +351,7 @@ namespace Conduit
             builder.AppendLine();
 
             var componentIdentifiers = BuildSceneComponentIdentifiers(scene);
-            if (componentIdentifiers.Count > 0)
-            {
-                builder.AppendLine("Components:");
-                using var pooledEntries = ConduitUtility.GetPooledList<KeyValuePair<Type, string>>(out var entries);
-                foreach (var entry in componentIdentifiers)
-                    entries.Add(entry);
-
-                entries.Sort(static (left, right) =>
-                    {
-                        var identifierComparison = StringComparer.Ordinal.Compare(left.Value, right.Value);
-                        return identifierComparison != 0
-                            ? identifierComparison
-                            : StringComparer.Ordinal.Compare(left.Key.Name, right.Key.Name);
-                    }
-                );
-
-                foreach (var entry in entries)
-                    builder.AppendLine($"{entry.Value}={entry.Key.Name}");
-
-                builder.AppendLine();
-            }
+            AppendComponentLegend(builder, componentIdentifiers);
 
             builder.AppendLine("Hierarchy:");
             var roots = scene.GetRootGameObjects();
@@ -406,9 +377,25 @@ namespace Conduit
 
         static Dictionary<Type, string> BuildSceneComponentIdentifiers(Scene scene)
         {
+            using var pooledRoots = ConduitUtility.GetPooledList<Transform>(out var roots);
+            foreach (var root in scene.GetRootGameObjects())
+                roots.Add(root.transform);
+
+            return BuildComponentIdentifiers(roots);
+        }
+
+        static Dictionary<Type, string> BuildHierarchyComponentIdentifiers(Transform root)
+        {
+            using var pooledRoots = ConduitUtility.GetPooledList<Transform>(out var roots);
+            roots.Add(root);
+            return BuildComponentIdentifiers(roots);
+        }
+
+        static Dictionary<Type, string> BuildComponentIdentifiers(List<Transform> roots)
+        {
             using var pooledTypes = ConduitUtility.GetPooledList<Type>(out var types);
             using var pooledSeenTypes = ConduitUtility.GetPooledSet<Type>(out var seenTypes);
-            foreach (var root in scene.GetRootGameObjects())
+            foreach (var root in roots)
             foreach (var transform in root.GetComponentsInChildren<Transform>(true))
             foreach (var component in transform.GetComponents<Component>())
             {
@@ -432,6 +419,31 @@ namespace Conduit
             }
 
             return identifiers;
+        }
+
+        static void AppendComponentLegend(StringBuilder builder, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        {
+            if (componentIdentifiers.Count == 0)
+                return;
+
+            builder.AppendLine("Components:");
+            using var pooledEntries = ConduitUtility.GetPooledList<KeyValuePair<Type, string>>(out var entries);
+            foreach (var entry in componentIdentifiers)
+                entries.Add(entry);
+
+            entries.Sort(static (left, right) =>
+                {
+                    var identifierComparison = StringComparer.Ordinal.Compare(left.Value, right.Value);
+                    return identifierComparison != 0
+                        ? identifierComparison
+                        : StringComparer.Ordinal.Compare(left.Key.Name, right.Key.Name);
+                }
+            );
+
+            foreach (var entry in entries)
+                builder.AppendLine($"{entry.Value}={entry.Key.Name}");
+
+            builder.AppendLine();
         }
 
         static string CreateComponentIdentifier(string componentName, ISet<string> used)
@@ -583,6 +595,51 @@ namespace Conduit
                 Identifier = identifier;
                 Count = 1;
             }
+        }
+
+        static void AppendGameObjectHierarchyDetails(StringBuilder builder, GameObject gameObject)
+        {
+            if (ShouldUseCompactHierarchy(gameObject.transform))
+            {
+                AppendGameObject(builder, gameObject);
+                AppendCompactGameObjectHierarchy(builder, gameObject.transform);
+                return;
+            }
+
+            builder.AppendLine("Hierarchy:");
+            AppendHierarchy(builder, gameObject.transform, includeSiblings: false);
+            builder.AppendLine();
+
+            foreach (var transform in gameObject.GetComponentsInChildren<Transform>(true))
+                AppendGameObject(builder, transform.gameObject);
+        }
+
+        static bool ShouldUseCompactHierarchy(Transform transform)
+            => CountHierarchyGameObjects(transform, CompactHierarchyGameObjectThreshold + 1) > CompactHierarchyGameObjectThreshold;
+
+        static int CountHierarchyGameObjects(Transform transform, int limit)
+        {
+            var count = 1;
+            if (count >= limit)
+                return count;
+
+            for (var index = 0; index < transform.childCount; index++)
+            {
+                count += CountHierarchyGameObjects(transform.GetChild(index), limit - count);
+                if (count >= limit)
+                    return count;
+            }
+
+            return count;
+        }
+
+        static void AppendCompactGameObjectHierarchy(StringBuilder builder, Transform root)
+        {
+            var componentIdentifiers = BuildHierarchyComponentIdentifiers(root);
+            AppendComponentLegend(builder, componentIdentifiers);
+
+            builder.AppendLine("Hierarchy:");
+            AppendSceneHierarchyRoot(builder, root, componentIdentifiers);
         }
 
         static void AppendGameObject(StringBuilder builder, GameObject gameObject)
