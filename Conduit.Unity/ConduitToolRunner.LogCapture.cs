@@ -351,7 +351,9 @@ namespace Conduit
                && frame.EndsWith(":SetResult", StringComparison.Ordinal)
                || frame.StartsWith("System.Threading.Tasks.TaskCompletionSource", StringComparison.Ordinal)
                && frame.EndsWith(":TrySetResult", StringComparison.Ordinal)
-               || frame is "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling";
+               || frame.StartsWith(
+                   "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling",
+                   StringComparison.Ordinal);
 
         static void AppendCompilerMessage(string message)
         {

@@ -2422,12 +2422,20 @@ public sealed class ConduitMcpToolsTests
             "System.Threading.Tasks.TaskCompletionSource`1<UnityEditor.Compilation.CompilerMessage[]>:TrySetResult",
             "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling");
 
+        var parameterizedCompilerCallbackTail = string.Join("\n",
+            "UnityEngine.Debug:Log",
+            "System.Reflection.MethodBase:Invoke",
+            "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult",
+            "System.Threading.Tasks.TaskCompletionSource`1<UnityEditor.Compilation.CompilerMessage[]>:TrySetResult",
+            "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling (bool&)");
+
         var truncatedCompilerCallbackTail = string.Join("\n",
             "UnityEngine.Debug:Log",
             "System.Reflection.MethodBase:Invoke",
             "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult");
 
         Assert.That(ConduitToolRunner.TrimCommonLogTail(fullCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
+        Assert.That(ConduitToolRunner.TrimCommonLogTail(parameterizedCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
         Assert.That(ConduitToolRunner.TrimCommonLogTail(truncatedCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
     }
 
