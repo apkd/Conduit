@@ -203,7 +203,7 @@ namespace Conduit
             isObjectIdQuery = TryGetObjectIdValue(query, out var candidate);
             if (!isObjectIdQuery
                 || candidate.IsEmpty
-                || !int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var instanceId))
+                || !TryParseInstanceId(candidate, out var instanceId))
                 return false;
 
             var target = EditorUtility.InstanceIDToObject(instanceId);
@@ -211,6 +211,18 @@ namespace Conduit
                 return false;
 
             match = CreateMatch(target, ResolvedObjectMatchSource.InstanceId);
+            return true;
+        }
+
+        static bool TryParseInstanceId(ReadOnlySpan<char> candidate, out int instanceId)
+        {
+            if (int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out instanceId))
+                return true;
+
+            if (!uint.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsignedInstanceId))
+                return false;
+
+            instanceId = unchecked((int)unsignedInstanceId);
             return true;
         }
 #endif
