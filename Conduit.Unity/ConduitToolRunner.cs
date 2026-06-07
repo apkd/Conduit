@@ -100,6 +100,7 @@ namespace Conduit
                 return;
 
             initialized = true;
+            ConduitOpenSceneDiskChangeGuard.Initialize();
             execute_code.Initialize();
             EnsureTestCallbacksRegistered();
         }

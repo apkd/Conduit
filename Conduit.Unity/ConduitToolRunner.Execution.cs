@@ -36,6 +36,10 @@ namespace Conduit
             if (TryCompleteReimportPlayModeBlock(operation.command_type))
                 return;
 
+            // reload externally changed open scenes before asset refresh can raise unity's modal prompt.
+            if (TryCompleteOpenSceneDiskChangeBlock(operation.command_type))
+                return;
+
             var commandKind = ParseIncomingCommand(operation.command_type).Kind;
             List<string>? assetPaths = null;
             if (commandKind == ParsedBridgeCommandKind.ReimportAssets)
@@ -117,6 +121,22 @@ namespace Conduit
                 {
                     outcome = ToolOutcome.Exception,
                     diagnostic = BuildReimportPlayModeDiagnostic(commandType),
+                }
+            );
+
+            return true;
+        }
+
+        static bool TryCompleteOpenSceneDiskChangeBlock(string commandType)
+        {
+            if (ConduitOpenSceneDiskChangeGuard.PrepareOpenScenesForAssetRefresh(commandType) is not { Length: > 0 } diagnostic)
+                return false;
+
+            _ = CompleteCurrentAsync(
+                new()
+                {
+                    outcome = ToolOutcome.DirtyScene,
+                    diagnostic = diagnostic,
                 }
             );
 
