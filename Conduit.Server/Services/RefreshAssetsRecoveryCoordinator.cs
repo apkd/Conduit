@@ -7,6 +7,7 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
     UnityBridgeClient bridgeClient,
     UnityProjectRegistry projectRegistry,
     UnityProjectEnvironmentInspector environmentInspector,
+    UnitySceneReloadPromptRecovery sceneReloadPromptRecovery,
     ILogger<RefreshAssetDatabaseRecoveryCoordinator> logger)
 {
     public async Task<RefreshAssetDatabaseRecoveryResult> ExecuteAsync(
@@ -43,6 +44,26 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
         logger.ZLogWarning(
             $"'{command.CommandType}' entered recovery for project {projectPath} after {commandTimeout}. FailureKind={failureKind}, Diagnostic={initialExecution.FailureDiagnostic ?? "<none>"}"
         );
+
+        // a native reload prompt keeps the pipe connected but stops editor updates from completing requests.
+        if (await sceneReloadPromptRecovery.TryDismissAsync(
+                projectPath,
+                monitoredProcessId ?? initialExecution.Handshake?.EditorProcessId,
+                ct
+            ))
+        {
+            var replayAfterDismiss = await ExecuteAndTrackAsync(requestId, command, commandTimeout);
+            if (replayAfterDismiss.Result is { } replayAfterDismissResult)
+                return CompleteWith(replayAfterDismissResult);
+
+            if (replayAfterDismiss.FailureKind is BridgeRuntimeFailureKind.ProcessExited)
+                return FailWith(command.CommandType, replayAfterDismiss, commandTimeout);
+
+            if (!UnityProjectOperations.ShouldReplayRequest(replayAfterDismiss))
+                return FailWith(command.CommandType, replayAfterDismiss, commandTimeout);
+
+            initialExecution = replayAfterDismiss;
+        }
 
         string? lastObservedState = null;
         string? lastStatusIssue = null;

@@ -17,6 +17,17 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    [Arguments("The following open scene(s) have been changed on disk:\nAssets/Scenes/Foo.unity\n\nDo you want to reload the scene(s)?", true)]
+    [Arguments("The open scene(s) have been modified externally. Reload?", true)]
+    [Arguments("Reload assemblies?", false)]
+    [Arguments("Open project", false)]
+    [Arguments("", false)]
+    public async Task SceneReloadPromptTextRecognizesChangedOpenSceneDialog(string text, bool expected)
+    {
+        await Assert.That(UnitySceneReloadPromptRecovery.IsSceneReloadPromptText(text)).IsEqualTo(expected);
+    }
+
+    [Test]
     public async Task HyprlandSafeModeSignalMatchesTargetPidTitle()
     {
         const string json =

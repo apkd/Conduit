@@ -147,6 +147,7 @@ static void ConfigureCommon(
     services.AddSingleton<UnityBridgeClient>();
     services.AddSingleton<UnityProjectEnvironmentInspector>();
     services.AddSingleton<UnityEditorProcessController>();
+    services.AddSingleton<UnitySceneReloadPromptRecovery>();
     services.AddSingleton<UnityProjectOperations>();
 }
 

@@ -14,6 +14,7 @@ public sealed class UnityProjectOperations(
     UnityBridgeClient bridgeClient,
     UnityProjectEnvironmentInspector environmentInspector,
     UnityEditorProcessController processController,
+    UnitySceneReloadPromptRecovery sceneReloadPromptRecovery,
     IHostApplicationLifetime applicationLifetime,
     ILoggerFactory loggerFactory)
 {
@@ -38,7 +39,7 @@ public sealed class UnityProjectOperations(
         = new(StringComparer.OrdinalIgnoreCase);
 
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
-        = new(bridgeClient, projectRegistry, environmentInspector, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
+        = new(bridgeClient, projectRegistry, environmentInspector, sceneReloadPromptRecovery, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
 
     public async Task<string> StatusAsync(string projectPath, CT ct)
     {
@@ -530,6 +531,13 @@ public sealed class UnityProjectOperations(
             await ApplyHandshakeAsync(execution);
             if (!ShouldReplayRequest(execution))
                 return execution;
+
+            // recover the common case where unity accepted the command but is blocked in a native reload prompt.
+            await sceneReloadPromptRecovery.TryDismissAsync(
+                queuedCommand.Session.ProjectPath,
+                monitoredProcessId ?? execution.Handshake?.EditorProcessId,
+                ct
+            );
 
             var retriedExecution = await bridgeClient.ExecuteCommandAsync(
                 queuedCommand.Session.ProjectPath,
