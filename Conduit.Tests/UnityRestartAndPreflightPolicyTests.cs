@@ -244,7 +244,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.Environment["HOME"]).IsEqualTo("/home/sample");
         await Assert.That(startInfo.Environment["DISPLAY"]).IsEqualTo(":7");
         await Assert.That(startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"]).IsEqualTo("unix:path=/run/user/1234/bus");
-        await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("wayland");
+        await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("x11");
         await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("SampleTheme:dark");
         await Assert.That(startInfo.Environment["QT_QPA_PLATFORM"]).IsEqualTo("wayland;xcb");
         await Assert.That(startInfo.Environment["WAYLAND_DISPLAY"]).IsEqualTo("wayland-7");
@@ -369,7 +369,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
-    public async Task DesktopSessionDefaultsDeriveWaylandHyprlandValuesFromRuntimeDirectory()
+    public async Task DesktopSessionDefaultsPreferGtkX11WhenXDisplayExists()
     {
         var runtimeDirectoryPath = Path.Combine(Path.GetTempPath(), $"conduit-runtime-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(runtimeDirectoryPath, "hypr"));
@@ -382,7 +382,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         {
             UnityEditorProcessController.ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath, "wayland-1", ":0");
 
-            await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("wayland,x11");
+            await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("x11");
             await Assert.That(startInfo.Environment["NIXOS_OZONE_WL"]).IsEqualTo("1");
             await Assert.That(startInfo.Environment["NO_AT_BRIDGE"]).IsEqualTo("1");
             await Assert.That(startInfo.Environment["QT_QPA_PLATFORM"]).IsEqualTo("wayland;xcb");
@@ -394,6 +394,22 @@ public sealed class UnityRestartAndPreflightPolicyTests
         {
             Directory.Delete(runtimeDirectoryPath, recursive: true);
         }
+    }
+
+    [Test]
+    public async Task DesktopSessionDefaultsUseGtkX11ForX11OnlySession()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+
+        UnityEditorProcessController.ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath: null, waylandDisplay: null, ":0");
+
+        await Assert.That(startInfo.Environment["GDK_BACKEND"]).IsEqualTo("x11");
+        await Assert.That(startInfo.Environment["QT_QPA_PLATFORM"]).IsEqualTo("xcb");
+        await Assert.That(startInfo.Environment["XDG_SESSION_TYPE"]).IsEqualTo("x11");
     }
 
     [Test]

@@ -406,7 +406,12 @@ public sealed class UnityEditorProcessController(
         SetEnvironmentVariableIfMissing(startInfo, "DBUS_SESSION_BUS_ADDRESS", ResolveSessionBusAddress(runtimeDirectoryPath));
         SetEnvironmentVariableIfMissing(startInfo, "XAUTHORITY", ResolveXAuthorityPath());
 
-        ApplyDesktopSessionDefaults(startInfo, runtimeDirectoryPath, waylandDisplay, x11Display);
+        ApplyDesktopSessionDefaults(
+            startInfo,
+            ReadEnvironmentVariable(startInfo, "XDG_RUNTIME_DIR") ?? runtimeDirectoryPath,
+            ReadEnvironmentVariable(startInfo, "WAYLAND_DISPLAY") ?? waylandDisplay,
+            ReadEnvironmentVariable(startInfo, "DISPLAY") ?? x11Display
+        );
         ApplyGtkUserSettingsEnvironment(startInfo);
         ApplyNixOsGraphicalSessionEnvironment(startInfo);
         ApplyUnityLinuxGioMitigations(startInfo);
@@ -475,23 +480,35 @@ public sealed class UnityEditorProcessController(
     {
         if (!string.IsNullOrWhiteSpace(waylandDisplay))
         {
-            SetEnvironmentVariableIfMissing(startInfo, "GDK_BACKEND", "wayland,x11");
             SetEnvironmentVariableIfMissing(startInfo, "NIXOS_OZONE_WL", "1");
             SetEnvironmentVariableIfMissing(startInfo, "QT_QPA_PLATFORM", "wayland;xcb");
             SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_TYPE", "wayland");
         }
         else if (!string.IsNullOrWhiteSpace(x11Display))
         {
-            SetEnvironmentVariableIfMissing(startInfo, "GDK_BACKEND", "x11");
             SetEnvironmentVariableIfMissing(startInfo, "QT_QPA_PLATFORM", "xcb");
             SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_TYPE", "x11");
         }
 
+        ApplyUnityEditorGtkBackend(startInfo, x11Display, waylandDisplay);
         SetEnvironmentVariableIfMissing(startInfo, "NO_AT_BRIDGE", "1");
 
         var currentDesktop = ResolveCurrentDesktop(runtimeDirectoryPath);
         SetEnvironmentVariableIfMissing(startInfo, "XDG_CURRENT_DESKTOP", currentDesktop);
         SetEnvironmentVariableIfMissing(startInfo, "XDG_SESSION_DESKTOP", currentDesktop);
+    }
+
+    static void ApplyUnityEditorGtkBackend(ProcessStartInfo startInfo, string? x11Display, string? waylandDisplay)
+    {
+        // Unity's Linux editor commonly runs through XWayland, so GTK clipboard calls need the X11 backend when DISPLAY is present.
+        if (!string.IsNullOrWhiteSpace(x11Display))
+        {
+            startInfo.Environment["GDK_BACKEND"] = "x11";
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(waylandDisplay))
+            startInfo.Environment["GDK_BACKEND"] = "wayland,x11";
     }
 
     internal static void ApplyXdgBaseDirectoryDefaults(ProcessStartInfo startInfo)
@@ -684,6 +701,9 @@ public sealed class UnityEditorProcessController(
 
         startInfo.Environment[variableName] = value;
     }
+
+    static string? ReadEnvironmentVariable(ProcessStartInfo startInfo, string variableName) =>
+        startInfo.Environment.TryGetValue(variableName, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
 
     static string? ResolveRuntimeDirectoryPath()
         => ResolveRuntimeDirectoryPath(
