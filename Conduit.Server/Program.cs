@@ -26,11 +26,6 @@ var portOption = new Option<ushort?>("--port")
     Description = "HTTP port when running with --http. Uses 127.0.0.1 unless --url is provided.",
 };
 
-var versionOption = new Option<bool>("--version")
-{
-    Description = "Print the Conduit server version and exit.",
-};
-
 var updateOption = new Option<bool>("--update", "-U")
 {
     Description = "Download the latest GitHub release executable and replace the current one.",
@@ -42,17 +37,10 @@ var rootCommand = new RootCommand("Conduit MCP server")
     urlOption,
     portOption,
     updateOption,
-    versionOption,
 };
 
 rootCommand.SetAction(async parseResult =>
     {
-        if (parseResult.GetValue(versionOption))
-        {
-            Console.Out.WriteLine(ConduitServerMetadata.GetDisplayVersion());
-            return 0;
-        }
-
         if (parseResult.GetValue(updateOption))
         {
             try
