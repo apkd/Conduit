@@ -268,6 +268,33 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ProfilerOverview_SamplePathsUseCompactMarkerNames()
+    {
+        var path = string.Join(
+            "/",
+            "EditorLoop",
+            "Application.Tick",
+            "UnityEngine.IMGUIModule.dll!UnityEngine::GUIUtility.ProcessEvent()",
+            "UnityEngine.UIElementsModule.dll!::<>c.<.cctor>b__1_2()",
+            "UnityEngine.UIElementsModule.dll!UnityEngine.UIElements::Panel.Render()",
+            "UnityEditor.CoreModule.dll!Unity.Profiling.Editor::ProfilerModule.DrawChartView()",
+            "UnityEngine.CoreModule.dll!Unity.Profiling::ProfilerMarker.Auto()",
+            "UnityEditor.CoreModule.dll!UnityEditorInternal::Chart.DrawChartItemLine()"
+        );
+
+        var formatted = profiler.FormatSamplePathForTest(path);
+
+        Assert.That(
+            formatted,
+            Is.EqualTo(
+                "EditorLoop/Application.Tick/GUIUtility.ProcessEvent/<>c.<.cctor>b__1_2/Panel.Render/Unity.Profiling.Editor::ProfilerModule.DrawChartView/Unity.Profiling::ProfilerMarker.Auto/UnityEditorInternal::Chart.DrawChartItemLine"
+            )
+        );
+        Assert.That(formatted, Does.Not.Contain(".dll!"));
+        Assert.That(formatted, Does.Not.Contain("()"));
+    }
+
+    [Test]
     public void Status_IncludesProfilerStatusLineInSnapshot()
     {
         var snapshot = status.Status();

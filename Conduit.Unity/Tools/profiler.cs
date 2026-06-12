@@ -1069,7 +1069,7 @@ namespace Conduit
                 builder.Append(FormatKb(row.GcBytes).PadRight(7));
                 builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
                 builder.Append(FormatPercent(row.TotalMs, row.FrameTimeMs).PadRight(9));
-                builder.AppendLine(includeRank ? FormatSamplePath(row.DisplayPath) : row.Name);
+                builder.AppendLine(includeRank ? FormatSamplePath(row.DisplayPath) : FormatSampleName(row.Name));
             }
         }
 
@@ -1084,7 +1084,7 @@ namespace Conduit
             builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
             builder.Append(FormatPercent(row.TotalMs, frameTimeMs).PadRight(9));
             builder.Append(new string(' ', Math.Max(0, relativeDepth * 2)));
-            builder.AppendLine(row.Name);
+            builder.AppendLine(FormatSampleName(row.Name));
         }
 
         static void AppendWarnings(StringBuilder builder, List<string> warnings)
@@ -1215,7 +1215,52 @@ namespace Conduit
             => (frameOrdinal >= 0 ? frameOrdinal : frameIndex).ToString(CultureInfo.InvariantCulture);
 
         static string FormatSamplePath(string displayPath)
-            => string.IsNullOrWhiteSpace(displayPath) ? "<unnamed>" : displayPath;
+        {
+            if (string.IsNullOrWhiteSpace(displayPath))
+                return "<unnamed>";
+
+            var segments = displayPath.Split('/');
+            var firstDetailedSegmentIndex = Math.Max(0, segments.Length - 3);
+            for (var i = 0; i < segments.Length; i++)
+                segments[i] = FormatSampleSegment(segments[i], keepNamespace: i >= firstDetailedSegmentIndex);
+
+            return string.Join("/", segments);
+        }
+
+        static string FormatSampleName(string name) => FormatSampleSegment(name, keepNamespace: true);
+
+        static string FormatSampleSegment(string segment, bool keepNamespace)
+        {
+            var value = StripProfilerAssemblyPrefix(segment).Replace("()", string.Empty).Trim();
+            if (!keepNamespace)
+                value = StripNamespace(value);
+
+            return value.Length == 0 ? "<unnamed>" : value;
+        }
+
+        /*
+         * Unity profiler markers frequently include assembly-qualified method names.
+         * Overview paths stay readable by keeping exact qualification only near the leaf.
+         */
+        static string StripProfilerAssemblyPrefix(string value)
+        {
+            var separatorIndex = value.IndexOf('!');
+            return separatorIndex < 0 ? value : value[(separatorIndex + 1)..];
+        }
+
+        static string StripNamespace(string value)
+        {
+            var namespaceSeparatorIndex = value.IndexOf("::", StringComparison.Ordinal);
+            if (namespaceSeparatorIndex >= 0)
+                return value[(namespaceSeparatorIndex + 2)..].Trim();
+
+            var lastDotIndex = value.LastIndexOf('.');
+            if (lastDotIndex < 0)
+                return value;
+
+            var typeSeparatorIndex = value.LastIndexOf('.', lastDotIndex - 1);
+            return typeSeparatorIndex < 0 ? value : value[(typeSeparatorIndex + 1)..].Trim();
+        }
 
         static string FormatNumber(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
@@ -1341,6 +1386,8 @@ namespace Conduit
 
         internal static double GetActionableCpuMsForTest(double totalMs, double selfMs, int childCount)
             => GetActionableCpuMs(new() { TotalMs = totalMs, SelfMs = selfMs, ChildCount = childCount });
+
+        internal static string FormatSamplePathForTest(string displayPath) => FormatSamplePath(displayPath);
 
         internal struct CapturePath
         {
