@@ -143,7 +143,7 @@ namespace Conduit
                 case ParsedBridgeCommandKind.ReimportAssets:
                     InstallReimportHooks();
                     MarkRestoredReimportAsResumed();
-                    TryFinishReimport();
+                    TryFinishReimport(countIdleUpdate: false);
                     return;
             }
         }

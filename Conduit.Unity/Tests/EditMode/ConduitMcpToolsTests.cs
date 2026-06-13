@@ -2385,13 +2385,11 @@ public sealed class ConduitMcpToolsTests
         var originalOperation = ConduitToolRunner.activeOperation;
         var originalCommand = ConduitToolRunner.activeCommand;
         var refreshReturnedField = typeof(ConduitToolRunner).GetField("reimportRefreshReturned", BindingFlags.Static | BindingFlags.NonPublic);
-        var sawImportedScriptsField = typeof(ConduitToolRunner).GetField("reimportSawImportedScripts", BindingFlags.Static | BindingFlags.NonPublic);
-        var observedCompilationField = typeof(ConduitToolRunner).GetField("reimportObservedCompilation", BindingFlags.Static | BindingFlags.NonPublic);
+        var idleUpdateCountField = typeof(ConduitToolRunner).GetField("reimportIdleUpdateCount", BindingFlags.Static | BindingFlags.NonPublic);
         var pendingResultField = typeof(ConduitToolRunner).GetField("pendingResult", BindingFlags.Static | BindingFlags.NonPublic);
         var pendingResultType = typeof(ConduitToolRunner).GetNestedType("PersistedPendingResultState", BindingFlags.NonPublic);
         var originalRefreshReturned = refreshReturnedField?.GetValue(null);
-        var originalSawImportedScripts = sawImportedScriptsField?.GetValue(null);
-        var originalObservedCompilation = observedCompilationField?.GetValue(null);
+        var originalIdleUpdateCount = idleUpdateCountField?.GetValue(null);
         var originalPendingResult = pendingResultField?.GetValue(null);
         var resumeMethod = typeof(ConduitToolRunner).GetMethod("ResumeRestoredOperation", BindingFlags.Static | BindingFlags.NonPublic);
         var removeReimportHooksMethod = typeof(ConduitToolRunner).GetMethod("RemoveReimportHooks", BindingFlags.Static | BindingFlags.NonPublic);
@@ -2399,8 +2397,7 @@ public sealed class ConduitMcpToolsTests
         try
         {
             Assert.That(refreshReturnedField, Is.Not.Null);
-            Assert.That(sawImportedScriptsField, Is.Not.Null);
-            Assert.That(observedCompilationField, Is.Not.Null);
+            Assert.That(idleUpdateCountField, Is.Not.Null);
             Assert.That(pendingResultField, Is.Not.Null);
             Assert.That(pendingResultType, Is.Not.Null);
             Assert.That(resumeMethod, Is.Not.Null);
@@ -2410,8 +2407,7 @@ public sealed class ConduitMcpToolsTests
             ConduitToolRunner.activeOperation = null;
             ConduitToolRunner.activeCommand = default;
             refreshReturnedField!.SetValue(null, false);
-            sawImportedScriptsField!.SetValue(null, false);
-            observedCompilationField!.SetValue(null, false);
+            idleUpdateCountField!.SetValue(null, 0);
             pendingResultField!.SetValue(null, null);
 
             ConduitToolRunner.PersistActiveOperation(pendingOperation, ConduitToolRunner.ParsedBridgeCommandKind.RefreshAssetDatabase);
@@ -2431,8 +2427,7 @@ public sealed class ConduitMcpToolsTests
             ConduitToolRunner.activeOperation = originalOperation;
             ConduitToolRunner.activeCommand = originalCommand;
             refreshReturnedField?.SetValue(null, originalRefreshReturned);
-            sawImportedScriptsField?.SetValue(null, originalSawImportedScripts);
-            observedCompilationField?.SetValue(null, originalObservedCompilation);
+            idleUpdateCountField?.SetValue(null, originalIdleUpdateCount);
             pendingResultField?.SetValue(null, originalPendingResult);
         }
     }
@@ -2469,20 +2464,16 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void ReimportSettlement_WaitsOnlyForScriptCompilation()
+    public void ReimportSettlement_WaitsForIdleSettleWindow()
     {
-        Assert.That(ConduitToolRunner.ContainsCompileAffectingAssetImports(new[] { "Assets/Test.prefab" }), Is.False);
-        Assert.That(ConduitToolRunner.ContainsCompileAffectingAssetImports(new[] { "Assets/Test.cs" }), Is.True);
-        Assert.That(ConduitToolRunner.ContainsCompileAffectingAssetImports(new[] { "Assets/Test.asmdef" }), Is.True);
-        Assert.That(ConduitToolRunner.ContainsCompileAffectingAssetImports(new[] { "Assets/Test.dll" }), Is.True);
+        Assert.That(ConduitToolRunner.ReimportIdleSettleUpdates, Is.EqualTo(8));
 
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(false, false, false, false, false), Is.False);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, false, false, false, false), Is.True);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, true, true, false, false), Is.True);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, true, false, true, false), Is.True);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, true, false, false, false), Is.False);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, false, false, false, true), Is.False);
-        Assert.That(ConduitToolRunner.ShouldWaitForReimportScriptCompilation(true, false, false, true, true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(false, false, false, 8), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, true, false, 8), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, false, true, 8), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, false, false, 0), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, false, false, 7), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, false, false, 8), Is.False);
     }
 
     [Test]

@@ -31,6 +31,7 @@ namespace Conduit
         const string PendingResultStateKey = "Conduit.PendingResult";
         const string PlayTargetEditMode = "edit";
         const string PlayTargetPlayMode = "play";
+        internal const int ReimportIdleSettleUpdates = 8;
         static readonly TestRunCallbacks testCallbacks = new();
         static readonly TimeSpan enterPlayModeBusyWaitTimeout = TimeSpan.FromSeconds(1);
         internal static PendingOperationState? activeOperation;
@@ -41,8 +42,7 @@ namespace Conduit
         static bool reimportHooksInstalled;
         static bool playModeHooksInstalled;
         static bool reimportRefreshReturned;
-        static bool reimportSawImportedScripts;
-        static bool reimportObservedCompilation;
+        static int reimportIdleUpdateCount;
         static string? activeTestRunGuid;
         static BridgeCommandResult? pendingTestRunResult;
         static bool testRunCompletionHooksInstalled;

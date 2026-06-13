@@ -68,7 +68,7 @@ namespace Conduit
             }
 
             reimportRefreshReturned = true;
-            TryFinishReimport();
+            TryFinishReimport(countIdleUpdate: false);
         }
 
         static void StartTestRun(TestMode mode, bool playerRun, string? rawTestFilter)
@@ -212,7 +212,6 @@ namespace Conduit
 
         static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
         {
-            reimportObservedCompilation = true;
             foreach (var message in messages)
             {
                 if (message.type != CompilerMessageType.Error)
@@ -222,7 +221,7 @@ namespace Conduit
             }
         }
 
-        static void OnReimportUpdate() => TryFinishReimport();
+        static void OnReimportUpdate() => TryFinishReimport(countIdleUpdate: true);
 
         static void InstallTestRunCompletionHooks()
         {
@@ -265,7 +264,7 @@ namespace Conduit
 
         static void OnPlayModeUpdate() => TryAdvancePlayToggle();
 
-        static void TryFinishReimport()
+        static void TryFinishReimport(bool countIdleUpdate)
         {
             PendingOperationState? operation;
             ParsedBridgeCommand command;
@@ -283,17 +282,16 @@ namespace Conduit
 
             var isCompiling = EditorApplication.isCompiling;
             var isUpdating = EditorApplication.isUpdating;
-            var isPlaying = EditorApplication.isPlaying;
-            if (ShouldWaitForReimportScriptCompilation(
-                    reimportSawImportedScripts,
-                    reimportObservedCompilation,
-                    isCompiling,
-                    isUpdating,
-                    isPlaying
-                ))
+            if (isCompiling || isUpdating)
+            {
+                ResetReimportIdleSettleState();
                 return;
+            }
 
-            if (isUpdating)
+            if (countIdleUpdate && reimportIdleUpdateCount < ReimportIdleSettleUpdates)
+                reimportIdleUpdateCount++;
+
+            if (ShouldWaitForReimportIdle(reimportRefreshReturned, isCompiling, isUpdating, reimportIdleUpdateCount))
                 return;
 
             var compilerMessages = GetCompilerMessages();
@@ -314,26 +312,6 @@ namespace Conduit
                         : compilerMessages,
                 }
             );
-        }
-
-        internal static void NotifyReimportedAssets(string[] importedAssets)
-        {
-            PendingOperationState? operation;
-            ParsedBridgeCommand command;
-            lock (stateGate)
-            {
-                operation = activeOperation;
-                command = activeCommand;
-            }
-
-            if (operation == null || !IsAssetImportCommand(command.Kind))
-                return;
-
-            if (importedAssets == null || importedAssets.Length == 0)
-                return;
-
-            if (ContainsCompileAffectingAssetImports(importedAssets))
-                reimportSawImportedScripts = true;
         }
 
         static void TryAdvancePlayToggle()
@@ -536,25 +514,11 @@ namespace Conduit
             enterPlayModeRequested = false;
         }
 
-        internal static bool ShouldWaitForReimportScriptCompilation(bool sawImportedScripts, bool observedCompilation, bool isCompiling, bool isUpdating, bool isPlaying)
-            => sawImportedScripts
-               && (isUpdating || !isPlaying && (isCompiling || !observedCompilation));
-
-        internal static bool ContainsCompileAffectingAssetImports(string[] importedAssets)
-        {
-            foreach (var assetPath in importedAssets)
-                if (IsCompileAffectingAssetPath(assetPath))
-                    return true;
-
-            return false;
-        }
-
-        static bool IsCompileAffectingAssetPath(string assetPath)
-            => assetPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
-               || assetPath.EndsWith(".asmdef", StringComparison.OrdinalIgnoreCase)
-               || assetPath.EndsWith(".asmref", StringComparison.OrdinalIgnoreCase)
-               || assetPath.EndsWith(".rsp", StringComparison.OrdinalIgnoreCase)
-               || assetPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+        internal static bool ShouldWaitForReimportIdle(bool refreshReturned, bool isCompiling, bool isUpdating, int idleUpdateCount)
+            => !refreshReturned
+               || isCompiling
+               || isUpdating
+               || idleUpdateCount < ReimportIdleSettleUpdates;
 
         static bool TryPrepareReimportAssets(PendingOperationState operation, out List<string> assetPaths)
         {
@@ -617,9 +581,11 @@ namespace Conduit
         static void ResetReimportSettlementState()
         {
             reimportRefreshReturned = false;
-            reimportSawImportedScripts = false;
-            reimportObservedCompilation = false;
+            ResetReimportIdleSettleState();
         }
+
+        static void ResetReimportIdleSettleState()
+            => reimportIdleUpdateCount = 0;
 
         static void ResetTestRunCompletionState()
         {
@@ -630,8 +596,7 @@ namespace Conduit
         static void MarkRestoredReimportAsResumed()
         {
             reimportRefreshReturned = true;
-            reimportSawImportedScripts = true;
-            reimportObservedCompilation = true;
+            reimportIdleUpdateCount = ReimportIdleSettleUpdates;
         }
 
         internal static string BuildRestoredReimportCompileErrorDiagnostic()
