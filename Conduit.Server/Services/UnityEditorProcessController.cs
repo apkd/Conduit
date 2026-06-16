@@ -412,8 +412,8 @@ public sealed class UnityEditorProcessController(
             ReadEnvironmentVariable(startInfo, "WAYLAND_DISPLAY") ?? waylandDisplay,
             ReadEnvironmentVariable(startInfo, "DISPLAY") ?? x11Display
         );
-        ApplyGtkUserSettingsEnvironment(startInfo);
         ApplyNixOsGraphicalSessionEnvironment(startInfo);
+        ApplyGtkUserSettingsEnvironment(startInfo);
         ApplyUnityLinuxGioMitigations(startInfo);
     }
 
@@ -678,8 +678,125 @@ public sealed class UnityEditorProcessController(
 
     internal static void ApplyNixOsGraphicalSessionEnvironment(ProcessStartInfo startInfo, string systemProfilePath)
     {
+        ApplyNixOsXdgProfileEnvironment(startInfo, systemProfilePath);
         SetEnvironmentVariableIfMissing(startInfo, "NIX_XDG_DESKTOP_PORTAL_DIR", ResolveNixXdgDesktopPortalDirectory(systemProfilePath));
         SetEnvironmentVariableIfMissing(startInfo, "GIO_EXTRA_MODULES", ResolveNixGioExtraModules(systemProfilePath));
+    }
+
+    internal static void ApplyNixOsXdgProfileEnvironment(ProcessStartInfo startInfo, string systemProfilePath)
+    {
+        // Codex starts Conduit with a sparse sandbox environment, so Unity needs deterministic desktop search paths.
+        MergeEnvironmentPathList(
+            startInfo,
+            "XDG_CONFIG_DIRS",
+            JoinExistingPaths(
+                "/etc/xdg",
+                CombineHomePath(startInfo, ".nix-profile", "etc", "xdg"),
+                "/nix/profile/etc/xdg",
+                CombineXdgStateHomePath(startInfo, "nix", "profile", "etc", "xdg"),
+                CombineUserProfilePath(startInfo, "etc", "xdg"),
+                "/nix/var/nix/profiles/default/etc/xdg",
+                Path.Combine(systemProfilePath, "etc", "xdg")
+            )
+        );
+        MergeEnvironmentPathList(
+            startInfo,
+            "XDG_DATA_DIRS",
+            JoinExistingPaths(
+                CombineHomePath(startInfo, ".nix-profile", "share"),
+                "/nix/profile/share",
+                CombineXdgStateHomePath(startInfo, "nix", "profile", "share"),
+                CombineUserProfilePath(startInfo, "share"),
+                "/nix/var/nix/profiles/default/share",
+                Path.Combine(systemProfilePath, "share"),
+                "/usr/local/share",
+                "/usr/share"
+            ),
+            "/usr/local/share",
+            "/usr/share"
+        );
+        MergeEnvironmentPathList(
+            startInfo,
+            "XCURSOR_PATH",
+            JoinExistingPaths(
+                CombineHomePath(startInfo, ".icons"),
+                CombineXdgDataHomePath(startInfo, "icons"),
+                CombineHomePath(startInfo, ".nix-profile", "share", "icons"),
+                CombineHomePath(startInfo, ".nix-profile", "share", "pixmaps"),
+                "/nix/profile/share/icons",
+                "/nix/profile/share/pixmaps",
+                CombineXdgStateHomePath(startInfo, "nix", "profile", "share", "icons"),
+                CombineXdgStateHomePath(startInfo, "nix", "profile", "share", "pixmaps"),
+                CombineUserProfilePath(startInfo, "share", "icons"),
+                CombineUserProfilePath(startInfo, "share", "pixmaps"),
+                "/nix/var/nix/profiles/default/share/icons",
+                "/nix/var/nix/profiles/default/share/pixmaps",
+                Path.Combine(systemProfilePath, "share", "icons"),
+                Path.Combine(systemProfilePath, "share", "pixmaps")
+            )
+        );
+    }
+
+    static string? CombineHomePath(ProcessStartInfo startInfo, params string[] segments)
+    {
+        if (ReadEnvironmentVariable(startInfo, "HOME") is not { Length: > 0 } homePath)
+            return null;
+
+        return CombinePath(homePath, segments);
+    }
+
+    static string? CombineXdgDataHomePath(ProcessStartInfo startInfo, params string[] segments)
+    {
+        if (ReadEnvironmentVariable(startInfo, "XDG_DATA_HOME") is { Length: > 0 } dataHomePath)
+            return CombinePath(dataHomePath, segments);
+
+        return CombineHomePath(startInfo, PrependSegments(".local", "share", segments));
+    }
+
+    static string? CombineXdgStateHomePath(ProcessStartInfo startInfo, params string[] segments)
+    {
+        if (ReadEnvironmentVariable(startInfo, "XDG_STATE_HOME") is { Length: > 0 } stateHomePath)
+            return CombinePath(stateHomePath, segments);
+
+        return CombineHomePath(startInfo, PrependSegments(".local", "state", segments));
+    }
+
+    static string? CombineUserProfilePath(ProcessStartInfo startInfo, params string[] segments)
+    {
+        var userName = ReadEnvironmentVariable(startInfo, "USER")
+                       ?? ReadEnvironmentVariable(startInfo, "LOGNAME")
+                       ?? Environment.UserName;
+        if (string.IsNullOrWhiteSpace(userName))
+            return null;
+
+        return CombinePath(Path.Combine("/etc/profiles/per-user", userName), segments);
+    }
+
+    static string CombinePath(string rootPath, string[] segments)
+    {
+        var paths = new string[segments.Length + 1];
+        paths[0] = rootPath;
+        Array.Copy(segments, 0, paths, 1, segments.Length);
+        return Path.Combine(paths);
+    }
+
+    static string[] PrependSegments(string first, string second, string[] segments)
+    {
+        var paths = new string[segments.Length + 2];
+        paths[0] = first;
+        paths[1] = second;
+        Array.Copy(segments, 0, paths, 2, segments.Length);
+        return paths;
+    }
+
+    static string? JoinExistingPaths(params string?[] paths)
+    {
+        var existingPaths = new List<string>();
+        foreach (var path in paths)
+            if (!string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path) && Directory.Exists(path))
+                existingPaths.Add(path);
+
+        return existingPaths.Count > 0 ? string.Join(Path.PathSeparator, existingPaths) : null;
     }
 
     internal static void ApplyUnityLinuxGioMitigations(ProcessStartInfo startInfo)
@@ -701,6 +818,60 @@ public sealed class UnityEditorProcessController(
 
         startInfo.Environment[variableName] = value;
     }
+
+    static void MergeEnvironmentPathList(
+        ProcessStartInfo startInfo,
+        string variableName,
+        string? value,
+        params string[] insertBefore
+    )
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+
+        if (!startInfo.Environment.TryGetValue(variableName, out var existingValue) || string.IsNullOrWhiteSpace(existingValue))
+        {
+            startInfo.Environment[variableName] = value;
+            return;
+        }
+
+        startInfo.Environment[variableName] = MergeEnvironmentPathList(existingValue, value, insertBefore);
+    }
+
+    internal static string MergeEnvironmentPathList(string existingValue, string value, params string[] insertBefore)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var existingPaths = EnumerateEnvironmentPaths(existingValue)
+            .Where(path => seen.Add(path))
+            .ToArray();
+        var addedPaths = EnumerateEnvironmentPaths(value)
+            .Where(path => seen.Add(path))
+            .ToArray();
+        if (addedPaths.Length == 0)
+            return string.Join(Path.PathSeparator, existingPaths);
+
+        var insertionPoints = insertBefore.ToHashSet(StringComparer.Ordinal);
+        var result = new List<string>(existingPaths.Length + addedPaths.Length);
+        var inserted = false;
+        foreach (var path in existingPaths)
+        {
+            if (!inserted && insertionPoints.Contains(path))
+            {
+                result.AddRange(addedPaths);
+                inserted = true;
+            }
+
+            result.Add(path);
+        }
+
+        if (!inserted)
+            result.AddRange(addedPaths);
+
+        return string.Join(Path.PathSeparator, result);
+    }
+
+    static IEnumerable<string> EnumerateEnvironmentPaths(string value) =>
+        value.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     static string? ReadEnvironmentVariable(ProcessStartInfo startInfo, string variableName) =>
         startInfo.Environment.TryGetValue(variableName, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;

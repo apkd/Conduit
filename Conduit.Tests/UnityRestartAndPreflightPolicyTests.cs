@@ -447,6 +447,126 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task NixOsXdgProfileEnvironmentAddsDesktopSearchPathsFromProfiles()
+    {
+        var rootPath = Path.Combine(Path.GetTempPath(), $"conduit-nix-profile-{Guid.NewGuid():N}");
+        var homePath = Path.Combine(rootPath, "home");
+        var systemProfilePath = Path.Combine(rootPath, "system-profile");
+        var homeProfileSharePath = Path.Combine(homePath, ".nix-profile", "share");
+        var homeProfileConfigPath = Path.Combine(homePath, ".nix-profile", "etc", "xdg");
+        var stateProfileSharePath = Path.Combine(homePath, ".local", "state", "nix", "profile", "share");
+        var stateProfileConfigPath = Path.Combine(homePath, ".local", "state", "nix", "profile", "etc", "xdg");
+        var systemSharePath = Path.Combine(systemProfilePath, "share");
+        var systemConfigPath = Path.Combine(systemProfilePath, "etc", "xdg");
+        Directory.CreateDirectory(homeProfileSharePath);
+        Directory.CreateDirectory(homeProfileConfigPath);
+        Directory.CreateDirectory(stateProfileSharePath);
+        Directory.CreateDirectory(stateProfileConfigPath);
+        Directory.CreateDirectory(Path.Combine(homePath, ".icons"));
+        Directory.CreateDirectory(Path.Combine(homePath, ".local", "share", "icons"));
+        Directory.CreateDirectory(Path.Combine(systemSharePath, "icons"));
+        Directory.CreateDirectory(Path.Combine(systemSharePath, "pixmaps"));
+        Directory.CreateDirectory(systemConfigPath);
+
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["HOME"] = homePath;
+        startInfo.Environment["USER"] = "sample";
+        startInfo.Environment["XDG_DATA_DIRS"] = "/usr/local/share:/usr/share";
+        startInfo.Environment["XDG_CONFIG_DIRS"] = "/etc/xdg";
+        try
+        {
+            UnityEditorProcessController.ApplyNixOsXdgProfileEnvironment(startInfo, systemProfilePath);
+
+            var dataPaths = SplitEnvironmentPaths(startInfo.Environment["XDG_DATA_DIRS"]!);
+            var configPaths = SplitEnvironmentPaths(startInfo.Environment["XDG_CONFIG_DIRS"]!);
+            var cursorPaths = SplitEnvironmentPaths(startInfo.Environment["XCURSOR_PATH"]!);
+
+            await Assert.That(dataPaths.Contains(homeProfileSharePath)).IsTrue();
+            await Assert.That(dataPaths.Contains(stateProfileSharePath)).IsTrue();
+            await Assert.That(dataPaths.Contains(systemSharePath)).IsTrue();
+            await Assert.That(Array.IndexOf(dataPaths, systemSharePath) < Array.IndexOf(dataPaths, "/usr/share")).IsTrue();
+            await Assert.That(configPaths.Contains(homeProfileConfigPath)).IsTrue();
+            await Assert.That(configPaths.Contains(stateProfileConfigPath)).IsTrue();
+            await Assert.That(configPaths.Contains(systemConfigPath)).IsTrue();
+            await Assert.That(cursorPaths.Contains(Path.Combine(homePath, ".icons"))).IsTrue();
+            await Assert.That(cursorPaths.Contains(Path.Combine(homePath, ".local", "share", "icons"))).IsTrue();
+            await Assert.That(cursorPaths.Contains(Path.Combine(systemSharePath, "icons"))).IsTrue();
+            await Assert.That(cursorPaths.Contains(Path.Combine(systemSharePath, "pixmaps"))).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task NixOsXdgProfileEnvironmentKeepsSystemProfileThemeNames()
+    {
+        var rootPath = Path.Combine(Path.GetTempPath(), $"conduit-nix-theme-{Guid.NewGuid():N}");
+        var homePath = Path.Combine(rootPath, "home");
+        var systemProfilePath = Path.Combine(rootPath, "system-profile");
+        Directory.CreateDirectory(Path.Combine(systemProfilePath, "share", "themes", "Example-dark"));
+        var settingsDirectoryPath = Path.Combine(homePath, ".config", "gtk-3.0");
+        Directory.CreateDirectory(settingsDirectoryPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(settingsDirectoryPath, "settings.ini"),
+            """
+            [Settings]
+            gtk-theme-name=Example-dark
+            gtk-application-prefer-dark-theme=true
+            """
+        );
+
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = false,
+        };
+        startInfo.Environment.Clear();
+        startInfo.Environment["HOME"] = homePath;
+        try
+        {
+            UnityEditorProcessController.ApplyXdgBaseDirectoryDefaults(startInfo);
+            UnityEditorProcessController.ApplyNixOsXdgProfileEnvironment(startInfo, systemProfilePath);
+            UnityEditorProcessController.ApplyGtkUserSettingsEnvironment(startInfo);
+
+            await Assert.That(startInfo.Environment["GTK_THEME"]).IsEqualTo("Example-dark");
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task EnvironmentPathListMergeInsertsNixPathsBeforeSystemFallbacks()
+    {
+        var merged = UnityEditorProcessController.MergeEnvironmentPathList(
+            string.Join(Path.PathSeparator, "/custom/share", "/usr/local/share", "/usr/share"),
+            string.Join(Path.PathSeparator, "/nix/profile/share", "/run/current-system/sw/share", "/usr/share"),
+            "/usr/local/share",
+            "/usr/share"
+        );
+
+        await Assert.That(merged).IsEqualTo(
+            string.Join(
+                Path.PathSeparator,
+                "/custom/share",
+                "/nix/profile/share",
+                "/run/current-system/sw/share",
+                "/usr/local/share",
+                "/usr/share"
+            )
+        );
+    }
+
+    static string[] SplitEnvironmentPaths(string value) =>
+        value.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    [Test]
     public async Task GraphicalSessionEnvironmentAppliesUnityGioMitigations()
     {
         var startInfo = new ProcessStartInfo("Unity")
