@@ -139,6 +139,30 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task RefreshAssetDatabaseSafeModeDiagnosticAddsRestartGuidance()
+    {
+        var diagnostic = UnityProjectOperations.FormatBlockedDiagnosticForCommand(
+            BridgeCommandTypes.RefreshAssetDatabase,
+            UnityProjectEnvironmentProbe.SafeModeDiagnostic
+        );
+
+        await Assert.That(diagnostic).IsEqualTo(
+            "The Unity Editor is in safe mode. (To recompile scripts in safe mode, use the `restart` tool.)"
+        );
+    }
+
+    [Test]
+    public async Task OtherCommandsUseGenericSafeModeDiagnostic()
+    {
+        var diagnostic = UnityProjectOperations.FormatBlockedDiagnosticForCommand(
+            BridgeCommandTypes.Status,
+            UnityProjectEnvironmentProbe.SafeModeDiagnostic
+        );
+
+        await Assert.That(diagnostic).IsEqualTo("The Unity Editor is in safe mode.");
+    }
+
+    [Test]
     public async Task ProbeStatusRequiresAnActualCommandResult()
     {
         await Assert.That(UnityProjectOperations.ShouldUseProbeExecutionForStatus(BridgeClientResult.Connected(handshake))).IsFalse();

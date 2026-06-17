@@ -350,7 +350,7 @@ public sealed class UnityProjectOperations(
     {
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         var session = projectRegistry.GetOrAddProject(normalizedProjectPath);
-        var blockedResult = await TryPrepareProjectAsync(normalizedProjectPath, session, ct);
+        var blockedResult = await TryPrepareProjectAsync(normalizedProjectPath, session, command.CommandType, ct);
         if (blockedResult is { } preparationResult)
             return preparationResult;
 
@@ -441,7 +441,7 @@ public sealed class UnityProjectOperations(
      * Commands can trust the cached bridge only while it is live. Otherwise fall back
      * to the normal preflight path so failure diagnostics stay accurate.
      */
-    async Task<ToolExecutionResult?> TryPrepareProjectAsync(string normalizedProjectPath, ProjectSession session, CT ct)
+    async Task<ToolExecutionResult?> TryPrepareProjectAsync(string normalizedProjectPath, ProjectSession session, string commandType, CT ct)
     {
         if (TrySkipOfflinePreflight(session, normalizedProjectPath, out var cachedHandshake))
         {
@@ -461,7 +461,10 @@ public sealed class UnityProjectOperations(
         );
 
         if (preflight.IsBlocked)
-            return ToolExecutionResult.NotConnected(normalizedProjectPath, preflight.Diagnostic);
+            return ToolExecutionResult.NotConnected(
+                normalizedProjectPath,
+                FormatBlockedDiagnosticForCommand(commandType, preflight.Diagnostic)
+            );
 
         await UpdateProjectRegistryAsync(normalizedProjectPath, preflight.ProbeExecution?.Handshake, ct);
         return null;
@@ -647,13 +650,23 @@ public sealed class UnityProjectOperations(
             snapshot
         );
 
-        if (string.IsNullOrWhiteSpace(diagnostic) || diagnostic == fallback.Diagnostic)
+        if (string.IsNullOrWhiteSpace(diagnostic))
+            return fallback;
+
+        diagnostic = FormatBlockedDiagnosticForCommand(commandType, diagnostic);
+        if (diagnostic == fallback.Diagnostic)
             return fallback;
 
         return fallback.Outcome == ToolOutcome.Timeout
             ? ToolExecutionResult.Timeout(timeout, diagnostic)
             : ToolExecutionResult.NotConnected(projectPath, diagnostic);
     }
+
+    internal static string FormatBlockedDiagnosticForCommand(string commandType, string diagnostic) =>
+        commandType == BridgeCommandTypes.RefreshAssetDatabase
+        && diagnostic == UnityProjectEnvironmentProbe.SafeModeDiagnostic
+            ? UnityProjectEnvironmentProbe.RefreshAssetDatabaseSafeModeDiagnostic
+            : diagnostic;
 
     public static bool ShouldReplayRequest(BridgeClientResult execution) =>
         execution.Handshake is not null

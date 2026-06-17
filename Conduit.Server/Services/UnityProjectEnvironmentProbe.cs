@@ -8,7 +8,9 @@ namespace Conduit;
 
 sealed partial class UnityProjectEnvironmentProbe
 {
-    const string SafeModeDiagnostic = "The unity editor is in safe mode.";
+    internal const string SafeModeDiagnostic = "The Unity Editor is in safe mode.";
+    internal const string RefreshAssetDatabaseSafeModeDiagnostic =
+        "The Unity Editor is in safe mode. (To recompile scripts in safe mode, use the `restart` tool.)";
 
     [GeneratedRegex("-projectPath\\s+(?:\"(?<path>[^\"]+)\"|(?<path>\\S+))", RegexOptions.IgnoreCase, "en-US")]
     private static partial Regex ProjectPathArgumentRegex();
