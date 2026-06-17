@@ -83,6 +83,19 @@ namespace Conduit
             return true;
         }
 
+        internal static bool IsCancelledTestResult(ITestResultAdaptor result)
+            => IsCancelledResultState(result.ResultState);
+
+        internal static bool IsCancelledResultState(string? resultState)
+            => resultState?.EndsWith("Cancelled", StringComparison.OrdinalIgnoreCase) == true;
+
+        internal static BridgeCommandResult CreateCancelledTestRunResult(ITestResultAdaptor result)
+            => new()
+            {
+                outcome = ToolOutcome.Cancelled,
+                diagnostic = BuildFilteredTestRunDiagnostic(BuildCancelledTestRunDiagnostic(result)),
+            };
+
         internal static string BuildFailureSummary(ITestResultAdaptor result)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
@@ -194,6 +207,18 @@ namespace Conduit
             => isPlayModeTestCommand
                && message is { Length: > 0 }
                && message.IndexOf(UserStoppedPlayModeTestRunSignal, StringComparison.Ordinal) >= 0;
+
+        static string BuildCancelledTestRunDiagnostic(ITestResultAdaptor result)
+        {
+            var message = string.IsNullOrWhiteSpace(result.Message)
+                ? "The Unity test run was cancelled before it reported run completion."
+                : result.Message.Trim();
+            var testLabel = string.IsNullOrWhiteSpace(result.FullName) ? result.Name : result.FullName;
+            if (string.IsNullOrWhiteSpace(testLabel))
+                return message;
+
+            return $"{message}\n\nCANCELLED TEST:\n{testLabel}";
+        }
 
         static bool AppendFailures(ITestResultAdaptor result, StringBuilder builder)
         {

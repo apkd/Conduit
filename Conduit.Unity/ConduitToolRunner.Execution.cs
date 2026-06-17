@@ -443,7 +443,27 @@ namespace Conduit
             bool isUpdating,
             bool isPlaying,
             bool isPlayingOrWillChangePlaymode)
-            => isTestRunnerActive || isCompiling || isUpdating || isPlaying || isPlayingOrWillChangePlaymode;
+            => ShouldWaitForTestRunCompletion(
+                isTestRunnerActive,
+                isCompiling,
+                isUpdating,
+                isPlaying,
+                isPlayingOrWillChangePlaymode,
+                completeDespiteStuckTestRunner: false
+            );
+
+        internal static bool ShouldWaitForTestRunCompletion(
+            bool isTestRunnerActive,
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlaying,
+            bool isPlayingOrWillChangePlaymode,
+            bool completeDespiteStuckTestRunner)
+            => isCompiling
+               || isUpdating
+               || isPlaying
+               || isPlayingOrWillChangePlaymode
+               || isTestRunnerActive && !completeDespiteStuckTestRunner;
 
         internal static string BuildEnterPlayBusyDiagnostic(bool isCompiling, bool isUpdating, bool isPlayingOrWillChangePlaymode)
         {

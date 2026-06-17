@@ -49,22 +49,31 @@ namespace Conduit
 
         static void HandleTestFinished(ITestResultAdaptor result)
         {
+            BridgeCommandResult? cancelledCompletion = null;
             lock (stateGate)
             {
                 if (!IsTestCommand(activeCommand.Kind))
                     return;
 
+                if (run_tests.IsCancelledTestResult(result))
+                    cancelledCompletion = run_tests.CreateCancelledTestRunResult(result);
+
                 var label = GetTestLabel(result);
                 RemoveActiveTestScope(label);
-                if (!activeTestLogTargets.TryGetValue(label, out var target))
-                    return;
-
-                activeTestLogTargets.Remove(label);
-                if (result.FailCount > 0 && !HasChildResults(result))
-                    failedTestLogTargets.Add(target);
-                else
-                    RecycleLogTarget(target);
+                if (activeTestLogTargets.TryGetValue(label, out var target))
+                {
+                    activeTestLogTargets.Remove(label);
+                    if (result.FailCount > 0 && !HasChildResults(result))
+                        failedTestLogTargets.Add(target);
+                    else
+                        RecycleLogTarget(target);
+                }
             }
+
+            // Unity can stop a play mode run after the final test reports Failed:Cancelled
+            // without issuing RunFinished or OnError, leaving the bridge scheduler blocked.
+            if (cancelledCompletion != null)
+                QueueTestRunCompletion(cancelledCompletion, discardLogs: true);
         }
 
         static void HandleTestRunError(string message)
@@ -137,7 +146,8 @@ namespace Conduit
                         isCompiling,
                         isUpdating,
                         isPlaying,
-                        isPlayingOrWillChangePlaymode
+                        isPlayingOrWillChangePlaymode,
+                        CanCompleteDespiteStuckTestRunner(pendingTestRunResult!)
                     ))
                     return;
 
@@ -183,6 +193,9 @@ namespace Conduit
 
             return false;
         }
+
+        static bool CanCompleteDespiteStuckTestRunner(BridgeCommandResult result)
+            => result.outcome is ToolOutcome.Cancelled or ToolOutcome.Exception;
 
         static BridgeExceptionInfo ToExceptionInfo(Exception exception)
             => ConduitUtility.ToExceptionInfo(exception);

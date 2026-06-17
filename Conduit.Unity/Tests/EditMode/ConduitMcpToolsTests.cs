@@ -2307,6 +2307,16 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void TestRunCompletionGuard_CancelledResultCanBypassStuckRunnerWhenEditorIsIdle()
+    {
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, false, false, false, true), Is.False);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, true, false, false, false, true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, true, false, false, true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, false, true, false, true), Is.True);
+        Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, false, false, true, true), Is.True);
+    }
+
+    [Test]
     public void PlayBusyGuard_BlocksCompilingUpdatingAndPlayModeTransition()
     {
         Assert.That(ConduitToolRunner.ShouldWaitToEnterPlayMode(true, false, false), Is.True);
@@ -2461,6 +2471,15 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(matched, Is.False);
         Assert.That(result, Is.Null);
+    }
+
+    [Test]
+    public void CancelledTestResultState_DetectsUnityCancelledLabels()
+    {
+        Assert.That(run_tests.IsCancelledResultState("Failed:Cancelled"), Is.True);
+        Assert.That(run_tests.IsCancelledResultState("Cancelled"), Is.True);
+        Assert.That(run_tests.IsCancelledResultState("Failed:Error"), Is.False);
+        Assert.That(run_tests.IsCancelledResultState(null), Is.False);
     }
 
     [Test]
