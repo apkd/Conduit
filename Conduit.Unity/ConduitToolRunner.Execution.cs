@@ -640,9 +640,9 @@ namespace Conduit
                 nextQueuedCommandShouldStart = queuedOperations.Count > 0;
             }
 
-            var logs = DrainLogs(operation.command_type, result.outcome);
-            result.logs = discardLogs ? string.Empty : logs;
             result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
+            var logs = DrainLogs(operation.command_type, result.outcome, result.diagnostic);
+            result.logs = discardLogs ? string.Empty : logs;
             RemoveReimportHooks();
             RemovePlayModeHooks();
             RemoveTestRunCompletionHooks();

@@ -217,7 +217,7 @@ namespace Conduit
             Application.logMessageReceivedThreaded += OnLogMessageReceived;
         }
 
-        static string DrainLogs(string commandType, string outcome)
+        static string DrainLogs(string commandType, string outcome, string? diagnostic)
         {
             if (logCaptureHooked)
             {
@@ -229,7 +229,7 @@ namespace Conduit
             {
                 var logs = IsTestCommand(ParseIncomingCommand(commandType).Kind)
                     ? BuildTestLogs(outcome)
-                    : BuildCapturedLogs(commandLogTarget);
+                    : BuildCapturedLogs(commandLogTarget, diagnostic);
 
                 ResetLogCaptureStateUnderLock();
                 return logs;
@@ -386,13 +386,13 @@ namespace Conduit
                 return compilerMessageBuffer.ToString().Trim();
         }
 
-        static string BuildCapturedLogs(CapturedLogTarget target)
+        static string BuildCapturedLogs(CapturedLogTarget target, string? diagnostic)
         {
             if (target.EntryIndexes.Count == 0)
                 return string.Empty;
 
             var builder = new StringBuilder();
-            AppendCapturedLogEntries(target, builder);
+            AppendCapturedLogEntries(target, builder, diagnostic);
             return builder.ToString().Trim();
         }
 
@@ -423,18 +423,37 @@ namespace Conduit
             return builder.ToString().Trim();
         }
 
-        static void AppendCapturedLogEntries(CapturedLogTarget target, StringBuilder builder)
+        static void AppendCapturedLogEntries(CapturedLogTarget target, StringBuilder builder, string? diagnostic = null)
         {
             var isFirstEntry = true;
             foreach (var entryIndex in target.EntryIndexes)
             {
+                var entry = capturedLogEntries[entryIndex];
+                if (ShouldOmitDiagnosticLogEntry(entry.Message, diagnostic))
+                    continue;
+
                 if (!isFirstEntry)
                     AppendSectionSeparator(builder);
 
-                AppendCapturedLogEntry(builder, capturedLogEntries[entryIndex]);
+                AppendCapturedLogEntry(builder, entry);
                 isFirstEntry = false;
             }
         }
+
+        internal static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
+        {
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(diagnostic))
+                return false;
+
+            // compiler diagnostics can arrive through both the command result and
+            // unity's console callback during the same operation.
+            return IsCompilerDiagnosticLogMessage(message)
+                   && diagnostic!.Contains(message, StringComparison.Ordinal);
+        }
+
+        static bool IsCompilerDiagnosticLogMessage(string message) =>
+            message.Contains("): error ", StringComparison.Ordinal)
+            || message.Contains("): warning ", StringComparison.Ordinal);
 
         static string GetTestLabel(ITestAdaptor test)
             => string.IsNullOrWhiteSpace(test.FullName) ? test.Name : test.FullName;

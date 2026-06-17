@@ -2523,6 +2523,24 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void LogCapture_OmitsCompilerMessagesAlreadyShownInDiagnostic()
+    {
+        const string logMessage = "Assets/Scripts/Foo.cs(12,34): error CS0103: The name 'Missing' does not exist in the current context";
+        const string diagnostic = "Library/ScriptAssemblies/Assembly-CSharp.dll: Assets/Scripts/Foo.cs(12,34): error CS0103: The name 'Missing' does not exist in the current context (Assets/Scripts/Foo.cs:12)";
+
+        Assert.That(ConduitToolRunner.ShouldOmitDiagnosticLogEntry(logMessage, diagnostic), Is.True);
+    }
+
+    [Test]
+    public void LogCapture_KeepsNonCompilerMessages()
+    {
+        const string logMessage = "Failed to import Assets/Scripts/Foo.cs";
+        const string diagnostic = "Failed to import Assets/Scripts/Foo.cs";
+
+        Assert.That(ConduitToolRunner.ShouldOmitDiagnosticLogEntry(logMessage, diagnostic), Is.False);
+    }
+
+    [Test]
     public void TestFilterRegex_UsesSubstringMatchByDefaultAndSupportsGlobTokens()
     {
         Assert.That(run_tests.BuildTestNameRegexPattern("Resolve"), Is.EqualTo("^.*Resolve.*$"));
