@@ -84,8 +84,6 @@ public sealed class UnityEditorProcessController(
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
             var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
             ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
-            if (!string.Equals(startInfo.FileName, editorPath, StringComparison.Ordinal))
-                builder.AppendLine($"Launching Unity through: {startInfo.FileName}");
             restartedProcess = Process.Start(startInfo);
 
             if (restartedProcess == null)
