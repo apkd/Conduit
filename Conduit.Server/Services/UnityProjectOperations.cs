@@ -16,6 +16,7 @@ public sealed class UnityProjectOperations(
     UnityEditorProcessController processController,
     UnitySceneReloadPromptRecovery sceneReloadPromptRecovery,
     IHostApplicationLifetime applicationLifetime,
+    TimeProvider timeProvider,
     ILoggerFactory loggerFactory)
 {
     static readonly TimeSpan recentReachablePreflightBypassWindow = TimeSpan.FromSeconds(10);
@@ -420,18 +421,45 @@ public sealed class UnityProjectOperations(
             ct
         );
 
+        var timeout = preflight.Snapshot.MatchedProcess is null
+            ? UnityToolTimeouts.StatusWithoutKnownProcess
+            : UnityToolTimeouts.StatusCommand;
+
         if (preflight.IsBlocked)
+        {
+            if (ShouldWaitForBlockedStatusProgressWindow(preflight.Snapshot, preflight.Diagnostic, preflight.ProbeExecution)
+                && await TryWaitForStatusProgressWindowAsync(
+                    normalizedProjectPath,
+                    preflight.Snapshot,
+                    preflight.ProbeExecution,
+                    timeout,
+                    ct
+                )
+                is { } progressExecution)
+            {
+                await UpdateProjectRegistryAsync(normalizedProjectPath, progressExecution.Handshake, ct);
+                return BuildStatusResponse(normalizedProjectPath, progressExecution, preflight.Snapshot, timeout);
+            }
+
             return environmentInspector.FormatPingFailure(
                 preflight.Snapshot,
                 ToolExecutionResult.NotConnected(normalizedProjectPath, preflight.Diagnostic)
             );
+        }
 
-        var timeout = preflight.Snapshot.MatchedProcess is null
-            ? UnityToolTimeouts.StatusWithoutKnownProcess
-            : UnityToolTimeouts.StatusCommand;
         var execution = ShouldUseProbeExecutionForStatus(preflight.ProbeExecution)
             ? preflight.ProbeExecution!
             : await ExecuteRecoverableStatusCommandAsync(normalizedProjectPath, preflight.Snapshot.MatchedProcess?.ProcessId, timeout, ct);
+
+        if (await TryWaitForStatusProgressWindowAsync(
+                normalizedProjectPath,
+                preflight.Snapshot,
+                execution,
+                timeout,
+                ct
+            )
+            is { } recoveredExecution)
+            execution = recoveredExecution;
 
         await UpdateProjectRegistryAsync(normalizedProjectPath, execution.Handshake, ct);
         return BuildStatusResponse(normalizedProjectPath, execution, preflight.Snapshot, timeout);
@@ -694,6 +722,126 @@ public sealed class UnityProjectOperations(
 
     internal static bool ShouldUseProbeExecutionForStatus(BridgeClientResult? probeExecution)
         => probeExecution?.Result is not null;
+
+    internal static bool ShouldWaitForBlockedStatusProgressWindow(
+        UnityProjectEnvironmentSnapshot snapshot,
+        string diagnostic,
+        BridgeClientResult? execution
+    ) =>
+        !IsTerminalOfflineDiagnostic(diagnostic)
+        && ShouldWaitForStatusProgressWindow(snapshot, execution);
+
+    internal static bool ShouldWaitForStatusProgressWindow(UnityProjectEnvironmentSnapshot snapshot, BridgeClientResult? execution)
+    {
+        if (snapshot.MatchedProcess is null || execution is null)
+            return false;
+
+        if (execution.Result?.Outcome == ToolOutcome.Success)
+            return false;
+
+        if (execution.FailureKind is null)
+            return execution.Result?.Outcome is ToolOutcome.Timeout or ToolOutcome.NotConnected;
+
+        return execution.FailureKind is not BridgeRuntimeFailureKind.ProcessExited
+            and not BridgeRuntimeFailureKind.ProjectMismatch;
+    }
+
+    internal static TimeSpan GetStatusProgressTitleChangeWindow(int completedTitleChangeExtensions) =>
+        completedTitleChangeExtensions <= 0
+            ? UnityToolTimeouts.StatusProgressFirstTitleChangeWindow
+            : UnityToolTimeouts.StatusProgressTitleChangeWindow;
+
+    async Task<BridgeClientResult?> TryWaitForStatusProgressWindowAsync(
+        string normalizedProjectPath,
+        UnityProjectEnvironmentSnapshot snapshot,
+        BridgeClientResult? latestExecution,
+        TimeSpan statusTimeout,
+        CT ct
+    )
+    {
+        // unity blocks editor updates during native progress windows, so the bridge can look dead while the editor is still making progress.
+        if (!ShouldWaitForStatusProgressWindow(snapshot, latestExecution)
+            || snapshot.MatchedProcess is not { } matchedProcess)
+            return null;
+
+        var processId = matchedProcess.ProcessId;
+        if (TryReadProgressWindowTitle(processId) is not { } progressTitle)
+            return null;
+
+        logger.LogInformation(
+            "Status detected Unity progress window '{Title}' for project '{ProjectPath}'. Waiting for the editor to respond.",
+            progressTitle,
+            normalizedProjectPath
+        );
+
+        var currentTitle = progressTitle;
+        var windowDeadlineUtc = timeProvider.GetUtcNow() + UnityToolTimeouts.StatusProgressInitialWindow;
+        var titleChangedInWindow = false;
+        var completedTitleChangeExtensions = 0;
+        var lastExecution = latestExecution;
+
+        while (true)
+        {
+            lastExecution = await ExecuteRecoverableStatusCommandAsync(
+                normalizedProjectPath,
+                processId,
+                statusTimeout,
+                ct
+            );
+            if (TryParsePingSnapshot(lastExecution, out _))
+                return lastExecution;
+
+            if (!ShouldWaitForStatusProgressWindow(snapshot, lastExecution))
+                return lastExecution;
+
+            if (TryReadProgressWindowTitle(processId) is not { } nextTitle)
+                return lastExecution;
+
+            if (!string.Equals(currentTitle, nextTitle, StringComparison.Ordinal))
+            {
+                logger.LogInformation(
+                    "Unity progress window title changed from '{PreviousTitle}' to '{CurrentTitle}' for project '{ProjectPath}'. Extending status wait.",
+                    currentTitle,
+                    nextTitle,
+                    normalizedProjectPath
+                );
+                currentTitle = nextTitle;
+                titleChangedInWindow = true;
+            }
+
+            var nowUtc = timeProvider.GetUtcNow();
+            if (nowUtc >= windowDeadlineUtc)
+            {
+                if (!titleChangedInWindow)
+                    return lastExecution;
+
+                var extension = GetStatusProgressTitleChangeWindow(completedTitleChangeExtensions++);
+                windowDeadlineUtc = nowUtc + extension;
+                titleChangedInWindow = false;
+                continue;
+            }
+
+            var delay = windowDeadlineUtc - nowUtc;
+            if (delay > UnityToolTimeouts.StatusProgressPollInterval)
+                delay = UnityToolTimeouts.StatusProgressPollInterval;
+            if (delay <= TimeSpan.Zero)
+                continue;
+
+            await Task.Delay(delay, timeProvider, ct);
+        }
+    }
+
+    static bool IsTerminalOfflineDiagnostic(string diagnostic) =>
+        diagnostic == UnityProjectOfflinePreflight.InvalidProjectDiagnostic
+        || diagnostic == UnityProjectOfflinePreflight.MissingPackageDiagnostic
+        || diagnostic == UnityProjectOfflinePreflight.OfflineDiagnostic
+        || diagnostic == UnityProjectEnvironmentProbe.SafeModeDiagnostic
+        || diagnostic == UnityProjectEnvironmentProbe.RefreshAssetDatabaseSafeModeDiagnostic;
+
+    static string? TryReadProgressWindowTitle(int processId) =>
+        UnityWindowTitleProbe
+            .TryFindMatchingProcessWindowTitle(processId, UnityWindowTitleClassifier.IsProgressTitle)
+            ?.Title;
 
     async Task<BridgeClientResult> ExecuteRecoverableStatusCommandAsync(string normalizedProjectPath, int? processIdHint, TimeSpan timeout, CT ct)
     {

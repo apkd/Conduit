@@ -6,6 +6,10 @@ static class UnityToolTimeouts
 {
     public static readonly TimeSpan StatusCommand = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan StatusWithoutKnownProcess = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan StatusProgressInitialWindow = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan StatusProgressFirstTitleChangeWindow = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan StatusProgressTitleChangeWindow = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan StatusProgressPollInterval = TimeSpan.FromSeconds(2);
     public static readonly TimeSpan RefreshAssetDatabaseActivation = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan RefreshAssetDatabaseRecoveryPollInterval = TimeSpan.FromMilliseconds(500);
     public static readonly TimeSpan RestartShutdownGracePeriod = TimeSpan.FromSeconds(15);

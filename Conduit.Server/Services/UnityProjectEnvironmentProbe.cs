@@ -88,7 +88,7 @@ sealed partial class UnityProjectEnvironmentProbe
         if (snapshot.MatchedProcess is not { } matchedProcess)
             return null;
 
-        var mainWindowTitle = TryReadMainWindowTitle(matchedProcess.ProcessId) ?? "";
+        var mainWindowTitle = UnityWindowTitleProbe.TryReadMainWindowTitle(matchedProcess.ProcessId) ?? "";
         if (SafeModeWindowProbe.IsSafeModeWindowTitle(mainWindowTitle))
             return SafeModeDiagnostic;
 
@@ -338,25 +338,6 @@ sealed partial class UnityProjectEnvironmentProbe
             return null;
 
         return Path.GetFullPath(configuredLogPath, ProjectPathNormalizer.ToPlatformPath(normalizedProjectPath));
-    }
-
-    static string? TryReadMainWindowTitle(int processId)
-    {
-        using var process = ConduitUtility.TryGetProcess(processId);
-        if (process == null)
-            return null;
-
-        try
-        {
-            process.Refresh();
-            return string.IsNullOrWhiteSpace(process.MainWindowTitle)
-                ? null
-                : process.MainWindowTitle;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     static string? TryReadUiAutomationSafeModeSignal(int processId)

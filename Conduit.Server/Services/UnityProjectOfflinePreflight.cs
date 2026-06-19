@@ -59,7 +59,7 @@ static class UnityProjectOfflinePreflight
             return new(snapshot, null, false, string.Empty);
 
         projectRegistry.MarkReachable(normalizedProjectPath, false);
-        return new(snapshot, null, true, blockedDiagnostic);
+        return new(snapshot, probeExecution, true, blockedDiagnostic);
     }
 
     internal static string? ResolveBlockedDiagnostic(

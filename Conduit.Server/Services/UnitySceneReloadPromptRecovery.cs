@@ -40,16 +40,8 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         return false;
     }
 
-    internal static bool IsSceneReloadPromptText(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return false;
-
-        return text.Contains("open scene", StringComparison.OrdinalIgnoreCase)
-               && text.Contains("reload", StringComparison.OrdinalIgnoreCase)
-               && (text.Contains("changed on disk", StringComparison.OrdinalIgnoreCase)
-                   || text.Contains("modified externally", StringComparison.OrdinalIgnoreCase));
-    }
+    internal static bool IsSceneReloadPromptText(string? text) =>
+        UnityWindowTitleClassifier.IsSceneReloadPromptText(text);
 
     async Task<bool> TryDismissWindowsAsync(int processId, CancellationToken ct)
     {
