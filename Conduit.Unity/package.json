@@ -1,7 +1,7 @@
 {
   "name": "dev.tryfinally.conduit",
   "displayName": "Conduit",
-  "version": "0.3.51",
+  "version": "0.3.52",
   "unity": "6000.0",
   "description": "Unity bridge for the Conduit MCP server.",
   "author": {
