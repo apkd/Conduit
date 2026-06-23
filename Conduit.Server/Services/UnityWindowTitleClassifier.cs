@@ -5,7 +5,7 @@ namespace Conduit;
 static partial class UnityWindowTitleClassifier
 {
     [GeneratedRegex(
-        @"^(?:Importing|Importing \(iteration [^)]+\).*|Reloading Domain|Hold on\.\.\.|Running managed callbacks)$",
+        @"^(?:Importing.*|Reloading Domain|Hold on\.\.\.|Running managed callbacks|Script preprocess.*|Compiling shader|Compiling Scripts|Package Manager|Running BuildProgram|Compiling C#.*|Postprocessing IL.*|Opening scene)$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
     )]
     private static partial Regex ProgressTitleRegex();
