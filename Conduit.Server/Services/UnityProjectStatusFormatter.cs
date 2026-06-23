@@ -203,8 +203,9 @@ static class UnityProjectStatusFormatter
     static string BuildStatusLine(UnityPingSnapshot pingSnapshot)
     {
         var commandKind = BridgeCommandKinds.Parse(pingSnapshot.ActiveCommandType);
-        var detail = BridgeCommandKinds.IsTest(commandKind)
-            ? "running tests..."
+        var isTestRunActive = BridgeCommandKinds.IsTest(commandKind) || pingSnapshot.IsTestRunnerActive;
+        var detail = isTestRunActive
+            ? FormatTestRunDetail(pingSnapshot.ActiveTestMode)
             : pingSnapshot.IsCompiling
                 ? "compiling..."
                 : pingSnapshot.IsUpdating || BridgeCommandKinds.IsAssetImport(commandKind)
@@ -217,6 +218,11 @@ static class UnityProjectStatusFormatter
 
         return detail is null ? $"{mode} (paused)" : $"{mode} (paused, {detail})";
     }
+
+    static string FormatTestRunDetail(string? activeTestMode)
+        => string.IsNullOrWhiteSpace(activeTestMode)
+            ? "running tests..."
+            : $"running {activeTestMode} tests...";
 
     static void AppendCompilationDiagnosticsFooter(ref Utf16ValueStringBuilder builder, CompilationDiagnosticSummary diagnostics)
     {

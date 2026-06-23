@@ -27,6 +27,8 @@ namespace Conduit
                 is_paused = EditorApplication.isPaused,
                 is_compiling = EditorApplication.isCompiling,
                 is_updating = EditorApplication.isUpdating,
+                is_test_runner_active = ConduitToolRunner.IsTestRunnerActive(),
+                active_test_mode = ConduitToolRunner.GetActiveTestRunMode(),
                 active_command_type = ConduitToolRunner.GetActiveCommandType(),
                 profiler_status_line = profiler.BuildStatusLine(),
                 scenes = BuildScenes(),
@@ -113,6 +115,8 @@ namespace Conduit
             public bool is_paused;
             public bool is_compiling;
             public bool is_updating;
+            public bool is_test_runner_active;
+            public string? active_test_mode;
             public string? active_command_type;
             public string? profiler_status_line;
             public string[] scenes = Array.Empty<string>();

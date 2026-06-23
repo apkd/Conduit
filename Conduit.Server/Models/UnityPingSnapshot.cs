@@ -20,6 +20,10 @@ sealed class UnityPingSnapshot
 
     public bool IsUpdating { get; set; }
 
+    public bool IsTestRunnerActive { get; set; }
+
+    public string? ActiveTestMode { get; set; }
+
     public string? ActiveCommandType { get; set; }
 
     public string? ProfilerStatusLine { get; set; }

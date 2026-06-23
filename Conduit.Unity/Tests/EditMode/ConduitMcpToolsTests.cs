@@ -304,6 +304,15 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Status_IncludesTestRunnerStateInSnapshot()
+    {
+        var snapshot = status.Status();
+
+        Assert.That(snapshot, Does.Contain("\"is_test_runner_active\""));
+        Assert.That(snapshot, Does.Contain("\"active_test_mode\""));
+    }
+
+    [Test]
     public void ReflectTypes_SearchesByTypeNameAndKind()
     {
         var result = reflect.Reflect(new[] { "classes", "ConduitReflectDerivedFixture", string.Empty });

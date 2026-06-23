@@ -62,6 +62,22 @@ public sealed class UnityProjectStatusFormatterTests
     }
 
     [Test]
+    public async Task PingReportShowsActiveTestRun()
+    {
+        var report = UnityProjectStatusFormatter.FormatPingReport(
+            new()
+            {
+                UnityVersion = "6000.5.0f1",
+                EditorMode = "play mode",
+                IsTestRunnerActive = true,
+                ActiveTestMode = "play mode",
+            }
+        );
+
+        await Assert.That(report).Contains("Status: play mode (running play mode tests...)");
+    }
+
+    [Test]
     public async Task PingFailureIncludesEditorLogPath()
     {
         var snapshot = new UnityProjectEnvironmentSnapshot(

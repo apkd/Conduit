@@ -59,6 +59,23 @@ namespace Conduit
             null,
             new[] { typeof(string) },
             null);
+        static readonly PropertyInfo? testRunnerJobDataHolderProperty = typeof(TestRunnerApi).GetProperty(
+            "m_testJobDataHolder",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        static readonly MethodInfo? testJobDataHolderGetAllRunnersMethod = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobDataHolder")
+            ?.GetMethod("GetAllRunners", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly MethodInfo? testJobRunnerGetDataMethod = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobRunner")
+            ?.GetMethod("GetData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? testJobDataIsRunningField = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
+            ?.GetField("isRunning", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? testJobDataExecutionSettingsField = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
+            ?.GetField("executionSettings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? executionSettingsHasTargetPlatformField = typeof(ExecutionSettings)
+            .GetField("m_HasTargetPlatform", BindingFlags.Instance | BindingFlags.NonPublic);
 
         internal enum ParsedBridgeCommandKind : byte
         {
@@ -119,6 +136,65 @@ namespace Conduit
             lock (stateGate)
                 return activeOperation?.command_type;
         }
+
+        internal static bool IsTestRunnerActive() => IsAnyTestRunActive();
+
+        internal static string? GetActiveTestRunMode()
+        {
+            if (TryGetActiveTestExecutionSettings() is not { } settings)
+                return null;
+
+            return GetTestExecutionMode(settings);
+        }
+
+        static ExecutionSettings? TryGetActiveTestExecutionSettings()
+        {
+            try
+            {
+                var holder = testRunnerJobDataHolderProperty?.GetValue(null);
+                if (holder == null || testJobDataHolderGetAllRunnersMethod == null)
+                    return null;
+
+                if (testJobDataHolderGetAllRunnersMethod.Invoke(holder, null) is not Array runners)
+                    return null;
+
+                foreach (var runner in runners)
+                {
+                    var data = testJobRunnerGetDataMethod?.Invoke(runner, null);
+                    if (data == null || testJobDataIsRunningField?.GetValue(data) is not true)
+                        continue;
+
+                    if (testJobDataExecutionSettingsField?.GetValue(data) is ExecutionSettings settings)
+                        return settings;
+                }
+            }
+            catch (Exception) { }
+
+            return null;
+        }
+
+        static string? GetTestExecutionMode(ExecutionSettings settings)
+        {
+            var filters = settings.filters ?? Array.Empty<Filter>();
+            var hasEditMode = false;
+            var hasPlayMode = false;
+            foreach (var filter in filters)
+            {
+                hasEditMode |= IncludesTestMode(filter.testMode, TestMode.EditMode);
+                hasPlayMode |= IncludesTestMode(filter.testMode, TestMode.PlayMode);
+            }
+
+            if (hasPlayMode)
+                return HasTargetPlatform(settings) ? "player" : "play mode";
+
+            return hasEditMode ? "edit mode" : null;
+        }
+
+        static bool IncludesTestMode(TestMode testMode, TestMode mode)
+            => (testMode & mode) == mode;
+
+        static bool HasTargetPlatform(ExecutionSettings settings)
+            => executionSettingsHasTargetPlatformField?.GetValue(settings) is true;
 
         internal static bool HasOutstandingClientWork(int clientId)
         {

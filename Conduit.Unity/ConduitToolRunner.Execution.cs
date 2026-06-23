@@ -81,9 +81,11 @@ namespace Conduit
             lock (stateGate)
                 activeTestRunGuid = runGuid;
 
-            // async test runs release the MCP command queue while Unity's test runner continues in the editor.
             if (@async)
-                _ = CompleteCurrentAsync(CreateAsyncTestRunStartedResult(mode));
+            {
+                InstallTestRunCompletionHooks();
+                TryCompleteAsyncTestRunStartup();
+            }
         }
 
         static bool TryCompleteDirtySceneBlock(string? commandType)
@@ -232,7 +234,11 @@ namespace Conduit
             EditorApplication.update -= OnTestRunCompletionUpdate;
         }
 
-        static void OnTestRunCompletionUpdate() => TryCompletePendingTestRun();
+        static void OnTestRunCompletionUpdate()
+        {
+            TryCompleteAsyncTestRunStartup();
+            TryCompletePendingTestRun();
+        }
 
         static void InstallPlayModeHooks()
         {
@@ -513,6 +519,38 @@ namespace Conduit
 
         static string GetTestModeDisplayName(TestMode mode)
             => mode == TestMode.EditMode ? "Edit mode" : "Play mode";
+
+        static void TryCompleteAsyncTestRunStartup()
+        {
+            string? runGuid;
+            ParsedBridgeCommand command;
+            lock (stateGate)
+            {
+                if (activeOperation is not { @async: true } || !IsTestCommand(activeCommand.Kind))
+                    return;
+
+                runGuid = activeTestRunGuid;
+                command = activeCommand;
+            }
+
+            if (IsTestRunActive(runGuid))
+            {
+                if (command.Kind == ParsedBridgeCommandKind.RunTestsPlayMode && !EditorApplication.isPlaying)
+                    return;
+
+                var mode = command.Kind == ParsedBridgeCommandKind.RunTestsEditMode ? TestMode.EditMode : TestMode.PlayMode;
+                _ = CompleteCurrentAsync(CreateAsyncTestRunStartedResult(mode));
+            }
+        }
+
+        static bool IsTestRunActive(string? runGuid)
+        {
+            if (!string.IsNullOrEmpty(runGuid)
+                && TryInvokeTestRunnerBoolMethod(testRunnerIsRunningMethod, out var isRunning, runGuid))
+                return isRunning;
+
+            return IsAnyTestRunActive();
+        }
 
         internal static bool ShouldWaitForReimportIdle(bool refreshReturned, bool isCompiling, bool isUpdating, int idleUpdateCount)
             => !refreshReturned
