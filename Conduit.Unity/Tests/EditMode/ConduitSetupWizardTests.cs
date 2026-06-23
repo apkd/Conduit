@@ -90,7 +90,8 @@ public sealed class ConduitSetupWizardTests
 
         var config = File.ReadAllText(configPath!);
         Assert.That(config, Does.Contain("[mcp_servers.other]"));
-        Assert.That(config, Does.Contain("tools.play.approval_mode = \"approve\""));
+        Assert.That(config, Does.Contain("tools.playmode.approval_mode = \"approve\""));
+        Assert.That(config, Does.Contain("tools.editmode.approval_mode = \"approve\""));
         Assert.That(config, Does.Not.Contain("startup_timeout_sec = 15"));
     }
 

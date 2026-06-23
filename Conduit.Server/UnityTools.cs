@@ -20,15 +20,25 @@ public sealed class UnityTools
         CancellationToken ct
     ) => operations.StatusAsync(projectPath, ct);
 
-    [McpServerTool(Name = CMD.Play, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
+    [McpServerTool(Name = CMD.PlayMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
-        """Toggles between play mode and edit mode, and returns the mode that Unity entered"""
+        """Enters play mode, and reports when Unity is already in play mode"""
     )]
-    public static Task<string> Play(
+    public static Task<string> PlayMode(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
         CancellationToken ct
-    ) => ToPlainTextToolResponseAsync(operations.PlayAsync(projectPath, ct));
+    ) => ToPlainTextToolResponseAsync(operations.EnterPlayModeAsync(projectPath, ct));
+
+    [McpServerTool(Name = CMD.EditMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
+    [Description(
+        """Enters edit mode, and reports when Unity is already in edit mode"""
+    )]
+    public static Task<string> EditMode(
+        [Description("Project path")] string projectPath,
+        UnityProjectOperations operations,
+        CancellationToken ct
+    ) => ToPlainTextToolResponseAsync(operations.EnterEditModeAsync(projectPath, ct));
 
     [McpServerTool(Name = CMD.Screenshot, ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
@@ -287,8 +297,10 @@ public sealed class UnityTools
         UnityProjectOperations operations,
         CancellationToken ct,
         [Description("Optional glob-like filter matched against full test names")]
-        string? testFilter = null
-    ) => ToPlainTextToolResponseAsync(operations.RunTestsEditModeAsync(projectPath, testFilter, ct));
+        string? testFilter = null,
+        [Description("True starts the test run and returns immediately while tests continue asynchronously.")]
+        bool @async = false
+    ) => ToPlainTextToolResponseAsync(operations.RunTestsEditModeAsync(projectPath, testFilter, @async, ct));
 
     [McpServerTool(Name = CMD.RunTestsPlayMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Runs the play mode test suite")]
@@ -297,8 +309,10 @@ public sealed class UnityTools
         UnityProjectOperations operations,
         CancellationToken ct,
         [Description("Optional glob-like filter matched against full test names")]
-        string? testFilter = null
-    ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayModeAsync(projectPath, testFilter, ct));
+        string? testFilter = null,
+        [Description("True starts the test run and returns immediately while tests continue asynchronously.")]
+        bool @async = false
+    ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayModeAsync(projectPath, testFilter, @async, ct));
 
     [McpServerTool(Name = CMD.RunTestsPlayer, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Builds the Unity player and runs the test suite using the current build target and settings")]

@@ -105,7 +105,8 @@ public sealed class ConduitMcpEndToEndTests
         foreach (var tool in new[]
                  {
                      BridgeCommandTypes.Status,
-                     BridgeCommandTypes.Play,
+                     BridgeCommandTypes.PlayMode,
+                     BridgeCommandTypes.EditMode,
                      BridgeCommandTypes.Screenshot,
                      BridgeCommandTypes.GetDependencies,
                      BridgeCommandTypes.FindReferencesTo,
@@ -583,7 +584,7 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(17)]
-    public async Task Play_TogglesBetweenEditModeAndPlayMode()
+    public async Task PlayModeAndEditMode_EnterRequestedMode()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
         var originalOptions = EditorSettings.enterPlayModeOptions;
@@ -594,18 +595,32 @@ public sealed class ConduitMcpEndToEndTests
             EditorSettings.enterPlayModeOptions = EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
 
             var enteredPlay = await client.CallToolAsync(
-                BridgeCommandTypes.Play,
+                BridgeCommandTypes.PlayMode,
                 Args(("projectPath", projectPath))
             );
 
             AssertSuccessful(enteredPlay, "Entered play mode", "Paused:");
 
+            var alreadyPlay = await client.CallToolAsync(
+                BridgeCommandTypes.PlayMode,
+                Args(("projectPath", projectPath))
+            );
+
+            AssertSuccessful(alreadyPlay, "Already in play mode", "Paused:");
+
             var enteredEdit = await client.CallToolAsync(
-                BridgeCommandTypes.Play,
+                BridgeCommandTypes.EditMode,
                 Args(("projectPath", projectPath))
             );
 
             AssertSuccessful(enteredEdit, "Entered edit mode.");
+
+            var alreadyEdit = await client.CallToolAsync(
+                BridgeCommandTypes.EditMode,
+                Args(("projectPath", projectPath))
+            );
+
+            AssertSuccessful(alreadyEdit, "Already in edit mode.");
         }
         finally
         {
@@ -745,7 +760,7 @@ public sealed class ConduitMcpEndToEndTests
             EditorSettings.enterPlayModeOptions = EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
 
             var enteredPlay = await client.CallToolAsync(
-                BridgeCommandTypes.Play,
+                BridgeCommandTypes.PlayMode,
                 Args(("projectPath", projectPath))
             );
 

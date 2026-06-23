@@ -29,8 +29,6 @@ namespace Conduit
         internal static readonly List<PendingOperationState> queuedOperations = new();
         const string ActiveOperationStateKey = "Conduit.ActiveOperation";
         const string PendingResultStateKey = "Conduit.PendingResult";
-        const string PlayTargetEditMode = "edit";
-        const string PlayTargetPlayMode = "play";
         internal const int ReimportIdleSettleUpdates = 8;
         static readonly TestRunCallbacks testCallbacks = new();
         static readonly TimeSpan enterPlayModeBusyWaitTimeout = TimeSpan.FromSeconds(1);
@@ -48,6 +46,7 @@ namespace Conduit
         static bool testRunCompletionHooksInstalled;
         static double enterPlayModeBusyWaitDeadline;
         static bool enterPlayModeRequested;
+        static bool exitPlayModeRequested;
         static bool discardCapturedLogsOnCompletion;
         static bool testCallbacksRegistered;
         static TestRunnerApi? testRunnerApi;
@@ -65,7 +64,8 @@ namespace Conduit
         {
             Unknown,
             Status,
-            Play,
+            PlayMode,
+            EditMode,
             Screenshot,
             GetDependencies,
             FindReferencesTo,
@@ -242,11 +242,10 @@ namespace Conduit
                         request_id = message.request_id,
                         command_type = message.command.command_type,
                         client_id = clientId,
-                        target = incomingCommand.Kind == ParsedBridgeCommandKind.Play
-                            ? GetPlayTarget(EditorApplication.isPlaying)
-                            : message.command.target,
+                        target = message.command.target,
                         snippet = message.command.snippet,
                         test_filter = message.command.test_filter,
+                        @async = message.command.@async,
                         rebuild_cache = message.command.rebuild_cache,
                         args = message.command.args ?? Array.Empty<string>(),
                     };
@@ -310,8 +309,9 @@ namespace Conduit
 
                 switch (incomingCommand.Kind)
                 {
-                    case ParsedBridgeCommandKind.Play:
-                        StartPlayToggle(pendingOperation);
+                    case ParsedBridgeCommandKind.PlayMode:
+                    case ParsedBridgeCommandKind.EditMode:
+                        StartPlayToggle();
                         break;
                     case ParsedBridgeCommandKind.Screenshot:
                         await ExecuteScreenshotAsync(pendingOperation);
@@ -357,10 +357,10 @@ namespace Conduit
                         await ExecuteReflectAsync(pendingOperation);
                         break;
                     case ParsedBridgeCommandKind.RunTestsEditMode:
-                        StartTestRun(TestMode.EditMode, false, pendingOperation.test_filter);
+                        StartTestRun(TestMode.EditMode, false, pendingOperation.test_filter, pendingOperation.@async);
                         break;
                     case ParsedBridgeCommandKind.RunTestsPlayMode:
-                        StartTestRun(TestMode.PlayMode, false, pendingOperation.test_filter);
+                        StartTestRun(TestMode.PlayMode, false, pendingOperation.test_filter, pendingOperation.@async);
                         break;
                     case ParsedBridgeCommandKind.RunTestsPlayer:
                         StartTestRun(TestMode.PlayMode, true, pendingOperation.test_filter);
@@ -502,7 +502,8 @@ namespace Conduit
             => commandType switch
             {
                 BridgeCommandTypes.Status               => new() { Kind = ParsedBridgeCommandKind.Status },
-                BridgeCommandTypes.Play                 => new() { Kind = ParsedBridgeCommandKind.Play },
+                BridgeCommandTypes.PlayMode             => new() { Kind = ParsedBridgeCommandKind.PlayMode },
+                BridgeCommandTypes.EditMode             => new() { Kind = ParsedBridgeCommandKind.EditMode },
                 BridgeCommandTypes.Screenshot           => new() { Kind = ParsedBridgeCommandKind.Screenshot },
                 BridgeCommandTypes.GetDependencies      => new() { Kind = ParsedBridgeCommandKind.GetDependencies },
                 BridgeCommandTypes.FindReferencesTo     => new() { Kind = ParsedBridgeCommandKind.FindReferencesTo },

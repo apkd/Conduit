@@ -2296,6 +2296,16 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void BridgeCommandJson_DeserializesAsyncFlag()
+    {
+        var command = JsonUtility.FromJson<BridgeCommand>(
+            "{\"command_type\":\"run_tests_editmode\",\"async\":true}"
+        );
+
+        Assert.That(command.@async, Is.True);
+    }
+
+    [Test]
     public void TestRunCompletionGuard_WaitsForRunnerAndEditorLifecycle()
     {
         Assert.That(ConduitToolRunner.ShouldWaitForTestRunCompletion(true, false, false, false, false), Is.True);
@@ -2338,24 +2348,30 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void PlayCompletionDiagnostic_ReportsAlreadyInTargetMode()
+    {
+        Assert.That(ConduitToolRunner.BuildPlayCompletionDiagnostic(true, false, false), Is.EqualTo("Already in play mode. Paused: no."));
+        Assert.That(ConduitToolRunner.BuildPlayCompletionDiagnostic(false, false, false), Is.EqualTo("Already in edit mode."));
+    }
+
+    [Test]
     public void RefreshAssetDatabasePlayModeGuard_BlocksPlayMode()
     {
         Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(true), Is.True);
         Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(false), Is.False);
         Assert.That(ConduitToolRunner.BuildReimportPlayModeDiagnostic(), Is.EqualTo(
-            "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'play' to return to edit mode first."));
+            "Cannot run 'refresh_asset_database' while Unity is in play mode. Use 'editmode' to return to edit mode first."));
         Assert.That(ConduitToolRunner.BuildReimportPlayModeDiagnostic(BridgeCommandTypes.ReimportAssets), Is.EqualTo(
-            "Cannot run 'reimport_assets' while Unity is in play mode. Use 'play' to return to edit mode first."));
+            "Cannot run 'reimport_assets' while Unity is in play mode. Use 'editmode' to return to edit mode first."));
     }
 
     [Test]
-    public void PlayPersistedOperation_RestoresTargetMode()
+    public void PlayModePersistedOperation_RestoresCommand()
     {
         var pendingOperation = new PendingOperationState
         {
             request_id = "play-restore-test",
-            command_type = BridgeCommandTypes.Play,
-            target = "play",
+            command_type = BridgeCommandTypes.PlayMode,
         };
 
         var originalOperation = ConduitToolRunner.activeOperation;
@@ -2366,13 +2382,12 @@ public sealed class ConduitMcpToolsTests
             ConduitToolRunner.activeOperation = null;
             ConduitToolRunner.activeCommand = default;
 
-            ConduitToolRunner.PersistActiveOperation(pendingOperation, ConduitToolRunner.ParsedBridgeCommandKind.Play);
+            ConduitToolRunner.PersistActiveOperation(pendingOperation, ConduitToolRunner.ParsedBridgeCommandKind.PlayMode);
             ConduitToolRunner.RestorePersistedOperation();
 
             var restoredOperation = ConduitToolRunner.activeOperation;
             Assert.That(restoredOperation, Is.Not.Null);
-            Assert.That(restoredOperation!.command_type, Is.EqualTo(BridgeCommandTypes.Play));
-            Assert.That(restoredOperation.target, Is.EqualTo("play"));
+            Assert.That(restoredOperation!.command_type, Is.EqualTo(BridgeCommandTypes.PlayMode));
             Assert.That(restoredOperation.is_restored, Is.EqualTo(true));
         }
         finally

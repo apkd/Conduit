@@ -28,6 +28,29 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    [Arguments("Importing", true)]
+    [Arguments("Importing (iteration 1) Assets", true)]
+    [Arguments("Reloading Domain", true)]
+    [Arguments("Hold on...", true)]
+    [Arguments("Running managed callbacks", true)]
+    [Arguments("Script preprocess", true)]
+    [Arguments("Script preprocessing assemblies", true)]
+    [Arguments("Compiling shader", true)]
+    [Arguments("Compiling Scripts", true)]
+    [Arguments("Package Manager", true)]
+    [Arguments("Running BuildProgram", true)]
+    [Arguments("Compiling C# scripts", true)]
+    [Arguments("Postprocessing IL assemblies", true)]
+    [Arguments("Opening scene", true)]
+    [Arguments("Importing Assets", true)]
+    [Arguments("Reload assemblies?", false)]
+    [Arguments("", false)]
+    public async Task ProgressWindowTitleRecognizesTemporaryEditorFreezeTitles(string title, bool expected)
+    {
+        await Assert.That(UnityWindowTitleClassifier.IsProgressTitle(title)).IsEqualTo(expected);
+    }
+
+    [Test]
     public async Task HyprlandSafeModeSignalMatchesTargetPidTitle()
     {
         const string json =

@@ -129,6 +129,21 @@ public sealed class ToolExecutionResultSerializationTests
     }
 
     [Test]
+    public async Task SerializedBridgeCommandIncludesAsyncFlagWhenEnabled()
+    {
+        var payload = JsonSerializer.Serialize(
+            new BridgeCommand
+            {
+                CommandType = BridgeCommandTypes.RunTestsEditMode,
+                Async = true,
+            },
+            ConduitJsonContext.Default.BridgeCommand
+        );
+
+        await Assert.That(payload).Contains("\"async\":true");
+    }
+
+    [Test]
     public async Task SerializedToolResultKeepsMeaningfulOptionalFields()
     {
         var payload = JsonSerializer.Serialize(

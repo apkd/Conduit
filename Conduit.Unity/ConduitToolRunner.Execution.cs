@@ -11,21 +11,8 @@ namespace Conduit
 {
     static partial class ConduitToolRunner
     {
-        static void StartPlayToggle(PendingOperationState operation)
+        static void StartPlayToggle()
         {
-            if (!TryGetPlayTargetMode(operation.target, out _))
-            {
-                _ = CompleteCurrentAsync(
-                    new()
-                    {
-                        outcome = ToolOutcome.Exception,
-                        diagnostic = "The 'play' command is missing its target mode.",
-                    }
-                );
-
-                return;
-            }
-
             InstallPlayModeHooks();
             ResetPlayModeState();
             TryAdvancePlayToggle();
@@ -71,7 +58,7 @@ namespace Conduit
             TryFinishReimport(countIdleUpdate: false);
         }
 
-        static void StartTestRun(TestMode mode, bool playerRun, string? rawTestFilter)
+        static void StartTestRun(TestMode mode, bool playerRun, string? rawTestFilter, bool @async = false)
         {
             EnsureTestCallbacksRegistered();
             if (TryCompleteDirtySceneBlock(activeOperation?.command_type)
@@ -93,6 +80,10 @@ namespace Conduit
 
             lock (stateGate)
                 activeTestRunGuid = runGuid;
+
+            // async test runs release the MCP command queue while Unity's test runner continues in the editor.
+            if (@async)
+                _ = CompleteCurrentAsync(CreateAsyncTestRunStartedResult(mode));
         }
 
         static bool TryCompleteDirtySceneBlock(string? commandType)
@@ -147,7 +138,7 @@ namespace Conduit
             => isPlaying;
 
         internal static string BuildReimportPlayModeDiagnostic(string commandType = BridgeCommandTypes.RefreshAssetDatabase)
-            => $"Cannot run '{commandType}' while Unity is in play mode. Use 'play' to return to edit mode first.";
+            => $"Cannot run '{commandType}' while Unity is in play mode. Use 'editmode' to return to edit mode first.";
 
         static bool TryCompleteBusyTestStartBlock(string? commandType)
         {
@@ -324,50 +315,42 @@ namespace Conduit
                 command = activeCommand;
             }
 
-            if (operation == null || command.Kind != ParsedBridgeCommandKind.Play)
+            if (operation == null || !IsEditorModeCommand(command.Kind))
                 return;
 
-            if (!TryGetPlayTargetMode(operation.target, out var enterPlayMode))
-            {
-                _ = CompleteCurrentAsync(
-                    new()
-                    {
-                        outcome = ToolOutcome.Exception,
-                        diagnostic = "The active 'play' command is missing its target mode.",
-                    }
-                );
-
-                return;
-            }
+            var enterPlayMode = command.Kind == ParsedBridgeCommandKind.PlayMode;
 
             if (!enterPlayMode)
             {
-                ResetPlayModeState();
-                if (!EditorApplication.isPlaying)
+                if (!EditorApplication.isPlaying && !EditorApplication.isPlayingOrWillChangePlaymode)
                 {
+                    var changedMode = exitPlayModeRequested;
+                    ResetPlayModeState();
                     _ = CompleteCurrentAsync(
                         new()
                         {
                             outcome = ToolOutcome.Success,
-                            return_value = BuildPlayCompletionDiagnostic(false, false),
+                            return_value = BuildPlayCompletionDiagnostic(false, changedMode, false),
                         }
                     );
 
                     return;
                 }
 
+                exitPlayModeRequested = true;
                 EditorApplication.isPlaying = false;
                 return;
             }
 
             if (EditorApplication.isPlaying)
             {
+                var changedMode = enterPlayModeRequested;
                 ResetPlayModeState();
                 _ = CompleteCurrentAsync(
                     new()
                     {
                         outcome = ToolOutcome.Success,
-                        return_value = BuildPlayCompletionDiagnostic(true, EditorApplication.isPaused),
+                        return_value = BuildPlayCompletionDiagnostic(true, changedMode, EditorApplication.isPaused),
                     }
                 );
 
@@ -491,31 +474,17 @@ namespace Conduit
         internal static string BuildEnterPlayCompileErrorDiagnostic()
             => "Cannot enter play mode because the project has compilation errors.";
 
-        static string BuildPlayCompletionDiagnostic(bool enteredPlayMode, bool isPaused)
-            => enteredPlayMode
-                ? $"Entered play mode. Paused: {(isPaused ? "yes" : "no")}."
-                : "Entered edit mode.";
-
-        static string GetPlayTarget(bool isPlaying)
-            => isPlaying ? PlayTargetEditMode : PlayTargetPlayMode;
-
-        static bool TryGetPlayTargetMode(string? target, out bool enterPlayMode)
-        {
-            if (target == PlayTargetPlayMode)
+        internal static string BuildPlayCompletionDiagnostic(bool targetPlayMode, bool changedMode, bool isPaused)
+            => (targetPlayMode, changedMode) switch
             {
-                enterPlayMode = true;
-                return true;
-            }
+                (true, true)   => $"Entered play mode. Paused: {(isPaused ? "yes" : "no")}.",
+                (true, false)  => $"Already in play mode. Paused: {(isPaused ? "yes" : "no")}.",
+                (false, true)  => "Entered edit mode.",
+                (false, false) => "Already in edit mode.",
+            };
 
-            if (target == PlayTargetEditMode)
-            {
-                enterPlayMode = false;
-                return true;
-            }
-
-            enterPlayMode = false;
-            return false;
-        }
+        static bool IsEditorModeCommand(ParsedBridgeCommandKind kind)
+            => kind is ParsedBridgeCommandKind.PlayMode or ParsedBridgeCommandKind.EditMode;
 
         static void EnsureEnterPlayModeBusyWaitDeadline()
         {
@@ -532,7 +501,18 @@ namespace Conduit
         {
             ResetEnterPlayModeBusyWaitDeadline();
             enterPlayModeRequested = false;
+            exitPlayModeRequested = false;
         }
+
+        static BridgeCommandResult CreateAsyncTestRunStartedResult(TestMode mode)
+            => new()
+            {
+                outcome = ToolOutcome.Success,
+                return_value = $"{GetTestModeDisplayName(mode)} tests are running asynchronously. You can use other tools while the test run continues.",
+            };
+
+        static string GetTestModeDisplayName(TestMode mode)
+            => mode == TestMode.EditMode ? "Edit mode" : "Play mode";
 
         internal static bool ShouldWaitForReimportIdle(bool refreshReturned, bool isCompiling, bool isUpdating, int idleUpdateCount)
             => !refreshReturned

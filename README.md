@@ -131,7 +131,8 @@ tools.find_references_to.approval_mode = "approve"
 tools.from_json_overwrite.approval_mode = "approve"
 tools.get_dependencies.approval_mode = "approve"
 tools.help.approval_mode = "approve"
-tools.play.approval_mode = "approve"
+tools.playmode.approval_mode = "approve"
+tools.editmode.approval_mode = "approve"
 tools.profiler_browse.approval_mode = "approve"
 tools.profiler_overview.approval_mode = "approve"
 tools.profiler_record.approval_mode = "approve"
@@ -920,7 +921,8 @@ It returns the result, logs, exceptions, and compilation errors.
 Agents are very proficient at using it for interacting with Unity and debugging code.
 
 - ***`status`***: project and MCP connection state
-- ***`play`***: toggles Play Mode
+- ***`playmode`***: enters Play Mode
+- ***`editmode`***: enters Edit Mode
 - ***`refresh_asset_database`***: imports modified assets, recompiles code
 - ***`reimport_assets`***: forces matching assets to reimport
 - ***`execute_code`***: runs ad hoc C# code

@@ -18,7 +18,7 @@ namespace Conduit
             => kind is ParsedBridgeCommandKind.RefreshAssetDatabase or ParsedBridgeCommandKind.ReimportAssets;
 
         static bool CanRestorePersistedOperation(ParsedBridgeCommandKind kind)
-            => kind is ParsedBridgeCommandKind.Play
+            => IsEditorModeCommand(kind)
                 || IsAssetImportCommand(kind)
                || IsTestCommand(kind);
 
@@ -27,7 +27,7 @@ namespace Conduit
                && !HasPendingResult()
                && command.Kind switch
                {
-                   ParsedBridgeCommandKind.Play                 => false,
+                   _ when IsEditorModeCommand(command.Kind)     => false,
                    _ when IsAssetImportCommand(command.Kind)    => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
                    _ when IsTestCommand(command.Kind)           => !IsAnyTestRunActive() && !EditorApplication.isPlayingOrWillChangePlaymode,
                    _                                            => true,
@@ -107,16 +107,6 @@ namespace Conduit
                 activeCommand = restoredCommand;
             }
 
-            if (restoredCommand.Kind == ParsedBridgeCommandKind.Play && !TryGetPlayTargetMode(restoredState.Target, out _))
-            {
-                lock (stateGate)
-                {
-                    activeOperation = null;
-                    activeCommand = default;
-                }
-
-                ClearPersistedActiveOperation();
-            }
         }
 
         static void ResumeRestoredOperation()
@@ -134,7 +124,8 @@ namespace Conduit
 
             switch (command.Kind)
             {
-                case ParsedBridgeCommandKind.Play:
+                case ParsedBridgeCommandKind.PlayMode:
+                case ParsedBridgeCommandKind.EditMode:
                     InstallPlayModeHooks();
                     ResetPlayModeState();
                     TryAdvancePlayToggle();

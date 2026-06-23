@@ -72,10 +72,17 @@ public sealed class UnityProjectOperations(
         return await processController.RestartAsync(normalizedProjectPath, ct);
     }
 
-    public Task<ToolExecutionResult> PlayAsync(string projectPath, CT ct)
+    public Task<ToolExecutionResult> EnterPlayModeAsync(string projectPath, CT ct)
         => EnqueueAsync(
             projectPath: projectPath,
-            command: new() { CommandType = BridgeCommandTypes.Play },
+            command: new() { CommandType = BridgeCommandTypes.PlayMode },
+            ct: ct
+        );
+
+    public Task<ToolExecutionResult> EnterEditModeAsync(string projectPath, CT ct)
+        => EnqueueAsync(
+            projectPath: projectPath,
+            command: new() { CommandType = BridgeCommandTypes.EditMode },
             ct: ct
         );
 
@@ -233,24 +240,26 @@ public sealed class UnityProjectOperations(
             }
             : null;
 
-    public Task<ToolExecutionResult> RunTestsEditModeAsync(string projectPath, string? testFilter, CT ct)
+    public Task<ToolExecutionResult> RunTestsEditModeAsync(string projectPath, string? testFilter, bool @async, CT ct)
         => EnqueueAsync(
             projectPath,
             new()
             {
                 CommandType = BridgeCommandTypes.RunTestsEditMode,
                 TestFilter = testFilter,
+                Async = @async ? true : null,
             },
             ct
         );
 
-    public Task<ToolExecutionResult> RunTestsPlayModeAsync(string projectPath, string? testFilter, CT ct)
+    public Task<ToolExecutionResult> RunTestsPlayModeAsync(string projectPath, string? testFilter, bool @async, CT ct)
         => EnqueueAsync(
             projectPath,
             new()
             {
                 CommandType = BridgeCommandTypes.RunTestsPlayMode,
                 TestFilter = testFilter,
+                Async = @async ? true : null,
             },
             ct
         );

@@ -8,7 +8,8 @@ namespace Conduit
     static class BridgeCommandTypes
     {
         public const string Status = "status";
-        public const string Play = "play";
+        public const string PlayMode = "playmode";
+        public const string EditMode = "editmode";
         public const string Screenshot = "screenshot";
         public const string GetDependencies = "get_dependencies";
         public const string FindReferencesTo = "find_references_to";
@@ -104,6 +105,7 @@ namespace Conduit
         public string? target;
         public string? snippet;
         public string? test_filter;
+        public bool @async;
         public bool rebuild_cache;
         public bool is_restored;
         public string[] args = Array.Empty<string>();
@@ -135,6 +137,7 @@ namespace Conduit
         public string? target;
         public string? snippet;
         public string? test_filter;
+        public bool @async;
         public bool rebuild_cache;
         public bool is_restored;
         public int client_id;

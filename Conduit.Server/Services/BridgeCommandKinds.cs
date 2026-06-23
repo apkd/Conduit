@@ -4,7 +4,8 @@ enum BridgeCommandKind : byte
 {
     Unknown,
     Status,
-    Play,
+    PlayMode,
+    EditMode,
     Screenshot,
     GetDependencies,
     FindReferencesTo,
@@ -34,7 +35,8 @@ static class BridgeCommandKinds
         commandType switch
         {
             BridgeCommandTypes.Status               => BridgeCommandKind.Status,
-            BridgeCommandTypes.Play                 => BridgeCommandKind.Play,
+            BridgeCommandTypes.PlayMode             => BridgeCommandKind.PlayMode,
+            BridgeCommandTypes.EditMode             => BridgeCommandKind.EditMode,
             BridgeCommandTypes.Screenshot           => BridgeCommandKind.Screenshot,
             BridgeCommandTypes.GetDependencies      => BridgeCommandKind.GetDependencies,
             BridgeCommandTypes.FindReferencesTo     => BridgeCommandKind.FindReferencesTo,

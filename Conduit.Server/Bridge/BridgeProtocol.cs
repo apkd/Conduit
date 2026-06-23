@@ -6,7 +6,8 @@ namespace Conduit;
 public static class BridgeCommandTypes
 {
     public const string Status = "status";
-    public const string Play = "play";
+    public const string PlayMode = "playmode";
+    public const string EditMode = "editmode";
     public const string Screenshot = "screenshot";
     public const string GetDependencies = "get_dependencies";
     public const string FindReferencesTo = "find_references_to";
@@ -114,6 +115,9 @@ sealed class BridgeCommand
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TestFilter { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Async { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? RebuildCache { get; set; }
