@@ -390,12 +390,9 @@ static string ResolveProjectPath(string repoRoot, string? overridePath)
         return normalized;
     }
 
-    foreach (var siblingName in new[] { "ConduitPlayground", "conduit-test" })
-    {
-        var sibling = Path.GetFullPath(Path.Combine(repoRoot, "..", siblingName));
-        if (IsUnityProject(sibling))
-            return sibling;
-    }
+    var sibling = Path.GetFullPath(Path.Combine(repoRoot, "..", "conduit-test"));
+    if (IsUnityProject(sibling))
+        return sibling;
 
     throw new DirectoryNotFoundException(
         $"Default Unity project was not found next to '{repoRoot}'. Pass --project <path>.");
@@ -657,7 +654,7 @@ static void PrintUsage()
     builder.AppendLine();
     builder.AppendLine("Options:");
     builder.AppendLine("  --repo <path>       Repository root. Defaults to walking up from the current directory.");
-    builder.AppendLine("  --project <path>    Unity project path. Defaults to ../ConduitPlayground, then ../conduit-test.");
+    builder.AppendLine("  --project <path>    Unity project path. Defaults to ../conduit-test.");
     builder.AppendLine("  --unity <path>      Unity editor path. Defaults to the version from ProjectVersion.txt.");
     builder.AppendLine("  --unity-wrapper <x> Optional Unity launcher wrapper. Use none, auto, or a wrapper path.");
     builder.AppendLine("                      Defaults to auto on NixOS and none elsewhere.");
