@@ -21,9 +21,14 @@ namespace Conduit
         static readonly Regex burstError = new(@"^.*\(\d+,\d+\):\sBurst\serror", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex sourceLocation = new(@"^(?<prefix>\s*#\s+)(?<file>.+?)\((?<line>\d+),\s*\d+\)(?<rest>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex assemblyQualifier = new(@",\s*[^,\]\)>]+,\s*Version=[0-9.]+,\s*Culture=[^,\]\)>\s]+,\s*PublicKeyToken=(?:null|[0-9a-fA-F]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex fromAssemblyQualifier = new(@"\s+from\s+[^,\]\)>]+,\s*Version=[0-9.]+,\s*Culture=[^,\]\)>\s]+,\s*PublicKeyToken=(?:null|[0-9a-fA-F]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex builtInTypeName = new(@"\b(?:System\.)?(?:Void|Boolean|Byte|SByte|Char|Decimal|Double|Single|Int32|UInt32|Int64|UInt64|Int16|UInt16|Object|String|IntPtr|UIntPtr)\b", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex qualifiedTypeName = new(@"\b(?:[A-Z_][A-Za-z0-9_]*\.)+[A-Z_][A-Za-z0-9_]*(?:\+[A-Z_][A-Za-z0-9_]*)*", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex unityMathematicsName = new(@"\bUnity\.Mathematics\.([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex hashSuffix = new(@"(?<=[A-Za-z0-9_])_[0-9a-fA-F]{32}(?=\b)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex guidId = new(@"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex burstDiagnostic = new(@"(?m)^(?:.*\(\d+,\d+\):\s*)?Burst\s+(?:warning|error)\s+BC\d+\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex ignoredBurstWarning = new(@"(?m)^(?:.*\(\d+,\d+\):\s*)?Burst\s+warning\s+BC1371\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         public static BridgeCommandResult ViewBurstAsm(string targetName)
         {
@@ -307,6 +312,26 @@ namespace Conduit
             var lines = assembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
             for (var i = 0; i < lines.Length; i++)
                 lines[i] = CleanLine(lines[i]).TrimStart();
+
+            return Join(lines, lines.Length);
+        }
+
+        internal static bool ShouldSuppressBurstDiagnostic(string message) =>
+            !string.IsNullOrEmpty(message) && ignoredBurstWarning.IsMatch(message);
+
+        internal static bool IsBurstDiagnostic(string message) =>
+            !string.IsNullOrEmpty(message)
+            && (burstDiagnostic.IsMatch(message)
+                || message.Contains("InvalidOperationException: Burst failed to compile", StringComparison.Ordinal)
+                || message.Contains("BuildFailedException: Burst compiler failed running", StringComparison.Ordinal)
+                || message.Contains("Unexpected exception Burst.Compiler.", StringComparison.Ordinal)
+                || message.Contains("Burst.Compiler.", StringComparison.Ordinal) && message.Contains("Exception:", StringComparison.Ordinal));
+
+        internal static string SimplifyBurstDiagnostic(string diagnostic)
+        {
+            var lines = diagnostic.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+                lines[i] = CleanDiagnosticLine(lines[i]);
 
             return Join(lines, lines.Length);
         }
@@ -881,6 +906,24 @@ namespace Conduit
         static string CleanDisplayName(string displayName) =>
             LimitGuidIds(CleanSymbol(displayName.Trim()));
 
+        static string CleanDiagnosticLine(string line)
+        {
+            line = sourceLocation.Replace(
+                line,
+                match => $"{match.Groups["prefix"].Value}{match.Groups["file"].Value}:{match.Groups["line"].Value}{match.Groups["rest"].Value}"
+            );
+
+            line = fromAssemblyQualifier.Replace(line, string.Empty);
+            line = assemblyQualifier.Replace(line, string.Empty);
+            line = hashSuffix.Replace(line, string.Empty);
+            line = SimplifyMetadataGenerics(line);
+            line = ReplaceBuiltInTypeNames(line);
+            line = StripCommonLowercaseTypeNamespaces(line);
+            line = StripNamespaces(line);
+            line = ReplaceBuiltInTypeNames(line);
+            return LimitGuidIds(line);
+        }
+
         static string CleanQuotedSymbols(string line)
         {
             var firstQuote = line.IndexOf('"');
@@ -945,6 +988,7 @@ namespace Conduit
             symbol = assemblyQualifier.Replace(symbol, string.Empty);
             symbol = SimplifyMetadataGenerics(symbol);
             symbol = ReplaceBuiltInTypeNames(symbol);
+            symbol = StripCommonLowercaseTypeNamespaces(symbol);
             symbol = StripNamespaces(symbol);
             symbol = ReplaceBuiltInTypeNames(symbol);
             return symbol;
@@ -1122,6 +1166,9 @@ namespace Conduit
 
         static string ReplaceBuiltInTypeNames(string symbol) =>
             builtInTypeName.Replace(symbol, match => BuiltInAlias(match.Value));
+
+        static string StripCommonLowercaseTypeNamespaces(string symbol) =>
+            unityMathematicsName.Replace(symbol, "$1");
 
         static string BuiltInAlias(string typeName)
         {
