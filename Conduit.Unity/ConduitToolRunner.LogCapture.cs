@@ -466,7 +466,7 @@ namespace Conduit
         readonly CapturedLogTarget commandLogTarget = new();
         readonly CapturedLogTarget testRunLogTarget = new();
         readonly Dictionary<string, CapturedLogTarget> activeTestLogTargets = new(StringComparer.Ordinal);
-        readonly List<CapturedLogTarget> failedTestLogTargets = new();
+        readonly List<CapturedLogTarget> completedTestLogTargets = new();
         // nested test callbacks make the latest started test the owner of subsequent logs
         readonly List<string> activeTestScopes = new();
         readonly Dictionary<LogSignature, int> capturedLogEntryIndexes = new(LogSignatureComparer.Instance);
@@ -498,7 +498,7 @@ namespace Conduit
             {
                 discardLogs = discardOnCompletion;
                 var logs = BridgeCommandKinds.IsTest(commandKind)
-                    ? BuildTestLogs(outcome)
+                    ? BuildTestLogs()
                     : BuildCapturedLogs(commandLogTarget, diagnostic);
 
                 ResetStateUnderLock();
@@ -536,8 +536,11 @@ namespace Conduit
                     return;
 
                 activeTestLogTargets.Remove(label);
-                if (result.FailCount > 0 && !HasChildResults(result))
-                    failedTestLogTargets.Add(target);
+                if (HasChildResults(result))
+                    return;
+
+                target.Failed = result.FailCount > 0;
+                completedTestLogTargets.Add(target);
             }
         }
 
@@ -591,6 +594,9 @@ namespace Conduit
                 ? view_burst_asm.SimplifyBurstDiagnostic(message)
                 : message;
 
+        public static bool ShouldIncludeTestLogEntry(LogType logType, bool includeAllLogs)
+            => includeAllLogs || IsErrorLogType(logType);
+
         void EnsureHooked()
         {
             if (hooked)
@@ -611,7 +617,7 @@ namespace Conduit
             lock (gate)
             {
                 var target = ResolveLogTargetUnderLock();
-                CaptureLogEntry(target, condition, simplifiedStackTrace);
+                CaptureLogEntry(target, condition, simplifiedStackTrace, logType);
             }
         }
 
@@ -632,14 +638,14 @@ namespace Conduit
             return target;
         }
 
-        void CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace)
+        void CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace, LogType logType)
         {
             var message = condition ?? string.Empty;
             var stack = simplifiedStackTrace ?? string.Empty;
             if (message.Length == 0 && stack.Length == 0)
                 return;
 
-            var signature = new LogSignature(message, stack);
+            var signature = new LogSignature(message, stack, logType);
             if (capturedLogEntryIndexes.TryGetValue(signature, out var entryIndex))
             {
                 capturedLogEntries[entryIndex].RepeatCount++;
@@ -650,7 +656,7 @@ namespace Conduit
 
             entryIndex = capturedLogEntries.Count;
             capturedLogEntryIndexes.Add(signature, entryIndex);
-            capturedLogEntries.Add(new(message, stack));
+            capturedLogEntries.Add(new(message, stack, logType));
             target.EntryIndexes.Add(entryIndex);
         }
 
@@ -673,41 +679,69 @@ namespace Conduit
             return builder.ToString().Trim();
         }
 
-        string BuildTestLogs(string outcome)
+        string BuildTestLogs()
         {
-            if (outcome == ToolOutcome.Success)
-                return string.Empty;
-
-            // failed leaf tests keep focused logs; run-level logs capture setup and teardown failures
+            var includeAllLogs = run_tests.ShouldIncludeAllTestLogs();
             var builder = new StringBuilder();
-            foreach (var failedTestLogTarget in failedTestLogTargets)
+            if (!includeAllLogs && HasAnyTestLogEntries())
             {
-                if (failedTestLogTarget.EntryIndexes.Count == 0)
+                builder.Append(run_tests.LargeTestRunLogNote);
+            }
+
+            foreach (var testLogTarget in completedTestLogTargets)
+            {
+                if (!HasIncludedLogEntries(testLogTarget, includeAllLogs))
                     continue;
 
                 AppendSectionSeparator(builder);
-                builder.Append("FAILED TEST: ");
-                builder.AppendLine(failedTestLogTarget.Label);
-                AppendCapturedLogEntries(failedTestLogTarget, builder);
+                builder.Append(testLogTarget.Failed ? "FAILED TEST: " : "TEST: ");
+                builder.AppendLine(testLogTarget.Label);
+                AppendCapturedLogEntries(testLogTarget, builder, includeAllLogs: includeAllLogs);
             }
 
-            if (testRunLogTarget.EntryIndexes.Count > 0)
+            if (HasIncludedLogEntries(testRunLogTarget, includeAllLogs))
             {
                 AppendSectionSeparator(builder);
                 builder.AppendLine("TEST RUN:");
-                AppendCapturedLogEntries(testRunLogTarget, builder);
+                AppendCapturedLogEntries(testRunLogTarget, builder, includeAllLogs: includeAllLogs);
             }
 
             return builder.ToString().Trim();
         }
 
-        void AppendCapturedLogEntries(CapturedLogTarget target, StringBuilder builder, string? diagnostic = null)
+        bool HasAnyTestLogEntries()
+        {
+            if (testRunLogTarget.EntryIndexes.Count > 0)
+                return true;
+
+            foreach (var testLogTarget in completedTestLogTargets)
+                if (testLogTarget.EntryIndexes.Count > 0)
+                    return true;
+
+            return false;
+        }
+
+        bool HasIncludedLogEntries(CapturedLogTarget target, bool includeAllLogs)
+        {
+            foreach (var entryIndex in target.EntryIndexes)
+                if (ShouldIncludeTestLogEntry(capturedLogEntries[entryIndex].LogType, includeAllLogs))
+                    return true;
+
+            return false;
+        }
+
+        void AppendCapturedLogEntries(
+            CapturedLogTarget target,
+            StringBuilder builder,
+            string? diagnostic = null,
+            bool includeAllLogs = true)
         {
             var isFirstEntry = true;
             foreach (var entryIndex in target.EntryIndexes)
             {
                 var entry = capturedLogEntries[entryIndex];
-                if (ShouldOmitDiagnosticLogEntry(entry.Message, diagnostic))
+                if (!ShouldIncludeTestLogEntry(entry.LogType, includeAllLogs)
+                    || ShouldOmitDiagnosticLogEntry(entry.Message, diagnostic))
                     continue;
 
                 if (!isFirstEntry)
@@ -773,7 +807,7 @@ namespace Conduit
             testRunLogTarget.Reset();
             activeTestScopes.Clear();
             activeTestLogTargets.Clear();
-            failedTestLogTargets.Clear();
+            completedTestLogTargets.Clear();
             capturedLogEntryIndexes.Clear();
             capturedLogEntries.Clear();
             discardOnCompletion = false;
@@ -834,30 +868,37 @@ namespace Conduit
             => message.Contains("): error ", StringComparison.Ordinal)
                || message.Contains("): warning ", StringComparison.Ordinal);
 
+        static bool IsErrorLogType(LogType logType)
+            => logType is LogType.Error or LogType.Assert or LogType.Exception;
+
         sealed class CapturedLogEntry
         {
-            public CapturedLogEntry(string message, string stackTrace)
+            public CapturedLogEntry(string message, string stackTrace, LogType logType)
             {
                 Message = message;
                 StackTrace = stackTrace;
+                LogType = logType;
                 RepeatCount = 1;
             }
 
             public string Message { get; }
             public string StackTrace { get; }
+            public LogType LogType { get; }
             public int RepeatCount { get; set; }
         }
 
         readonly struct LogSignature
         {
-            public LogSignature(string message, string stackTrace)
+            public LogSignature(string message, string stackTrace, LogType logType)
             {
                 Message = message;
                 StackTrace = stackTrace;
+                LogType = logType;
             }
 
             public string Message { get; }
             public string StackTrace { get; }
+            public LogType LogType { get; }
         }
 
         sealed class LogSignatureComparer : IEqualityComparer<LogSignature>
@@ -865,14 +906,15 @@ namespace Conduit
             public static readonly LogSignatureComparer Instance = new();
 
             public bool Equals(LogSignature x, LogSignature y)
-                => x.Message == y.Message && x.StackTrace == y.StackTrace;
+                => x.Message == y.Message && x.StackTrace == y.StackTrace && x.LogType == y.LogType;
 
             public int GetHashCode(LogSignature obj)
             {
                 unchecked
                 {
                     var hashCode = StringComparer.Ordinal.GetHashCode(obj.Message);
-                    return (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(obj.StackTrace);
+                    hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(obj.StackTrace);
+                    return (hashCode * 397) ^ (int)obj.LogType;
                 }
             }
         }
@@ -885,11 +927,13 @@ namespace Conduit
                 => Label = label;
 
             public string Label { get; private set; } = string.Empty;
+            public bool Failed { get; set; }
             public List<int> EntryIndexes { get; } = new();
 
             public void Reset(string label = "")
             {
                 Label = label;
+                Failed = false;
                 EntryIndexes.Clear();
             }
         }

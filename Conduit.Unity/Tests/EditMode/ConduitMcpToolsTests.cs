@@ -2458,6 +2458,24 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void LogCapture_TestRunLogPolicyKeepsFullLogsForSmallRuns()
+    {
+        Assert.That(run_tests.ShouldIncludeAllTestLogs(0), Is.True);
+        Assert.That(run_tests.ShouldIncludeAllTestLogs(1), Is.True);
+        Assert.That(run_tests.ShouldIncludeAllTestLogs(3), Is.True);
+        Assert.That(run_tests.ShouldIncludeAllTestLogs(4), Is.False);
+        Assert.That(run_tests.LargeTestRunLogNote, Is.EqualTo("NOTE: When running more than 3 tests at a time, non-error logs are omitted."));
+
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Log, includeAllLogs: true), Is.True);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Warning, includeAllLogs: true), Is.True);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Error, includeAllLogs: false), Is.True);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Assert, includeAllLogs: false), Is.True);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Exception, includeAllLogs: false), Is.True);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Log, includeAllLogs: false), Is.False);
+        Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Warning, includeAllLogs: false), Is.False);
+    }
+
+    [Test]
     public void LogCapture_DropsIgnoredBurstWarning()
     {
         Assert.That(

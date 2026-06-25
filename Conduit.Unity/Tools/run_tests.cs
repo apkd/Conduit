@@ -10,9 +10,14 @@ namespace Conduit
     static class run_tests
     {
         const string UserStoppedPlayModeTestRunSignal = "Playmode tests were aborted because the player was stopped.";
+        internal const int FullLogTestLimit = 3;
+        internal static readonly string LargeTestRunLogNote =
+            $"NOTE: When running more than {FullLogTestLimit} tests at a time, non-error logs are omitted.";
+        static readonly HashSet<string> startedTestSet = new(StringComparer.Ordinal);
         static readonly List<string> filteredStartedTests = new();
         static readonly HashSet<string> filteredStartedTestSet = new(StringComparer.Ordinal);
         static string? activeTestFilterPattern;
+        static int startedTestCount;
 
         internal static void ApplyFilter(Filter filter, string? rawTestFilter)
         {
@@ -127,14 +132,24 @@ namespace Conduit
 
         internal static void RecordStartedFilteredTest(ITestAdaptor test)
         {
-            if (!HasActiveTestFilter() || test.IsSuite || test.HasChildren)
+            if (test.IsSuite || test.HasChildren)
                 return;
 
-            RecordStartedFilteredTestLabel(GetTestLabel(test));
+            RecordStartedTestLabel(GetTestLabel(test));
         }
 
         internal static void SetActiveFilterPattern(string? rawTestFilter)
             => activeTestFilterPattern = NormalizeTestFilterPattern(rawTestFilter);
+
+        internal static void RecordStartedTestLabel(string label)
+        {
+            if (string.IsNullOrWhiteSpace(label) || !startedTestSet.Add(label))
+                return;
+
+            startedTestCount++;
+            if (HasActiveTestFilter())
+                RecordStartedFilteredTestLabel(label);
+        }
 
         internal static void RecordStartedFilteredTestLabel(string label)
         {
@@ -143,6 +158,14 @@ namespace Conduit
 
             filteredStartedTests.Add(label);
         }
+
+        internal static int StartedTestCount => startedTestCount;
+
+        internal static bool ShouldIncludeAllTestLogs()
+            => ShouldIncludeAllTestLogs(startedTestCount);
+
+        internal static bool ShouldIncludeAllTestLogs(int testCount)
+            => testCount <= FullLogTestLimit;
 
         internal static string BuildFilteredTestRunDiagnostic(string diagnostic)
         {
@@ -199,6 +222,8 @@ namespace Conduit
         internal static void ResetState()
         {
             activeTestFilterPattern = null;
+            startedTestCount = 0;
+            startedTestSet.Clear();
             filteredStartedTests.Clear();
             filteredStartedTestSet.Clear();
         }
