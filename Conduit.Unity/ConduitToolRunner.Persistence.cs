@@ -3,39 +3,17 @@
 using System;
 using UnityEditor;
 using UnityEngine;
-using UnityEngine.Serialization;
 
 namespace Conduit
 {
-    static partial class ConduitToolRunner
+    static class OperationPersistence
     {
-        static bool IsTestCommand(ParsedBridgeCommandKind kind)
-            => kind is ParsedBridgeCommandKind.RunTestsEditMode
-                or ParsedBridgeCommandKind.RunTestsPlayMode
-                or ParsedBridgeCommandKind.RunTestsPlayer;
+        const string ActiveOperationStateKey = "Conduit.ActiveOperation";
+        const string PendingResultStateKey = "Conduit.PendingResult";
 
-        static bool IsAssetImportCommand(ParsedBridgeCommandKind kind)
-            => kind is ParsedBridgeCommandKind.RefreshAssetDatabase or ParsedBridgeCommandKind.ReimportAssets;
-
-        static bool CanRestorePersistedOperation(ParsedBridgeCommandKind kind)
-            => IsEditorModeCommand(kind)
-                || IsAssetImportCommand(kind)
-               || IsTestCommand(kind);
-
-        static bool IsStaleRestoredOperation(PendingOperationState? operation, ParsedBridgeCommand command)
-            => operation is { is_restored: true }
-               && !HasPendingResult()
-               && command.Kind switch
-               {
-                   _ when IsEditorModeCommand(command.Kind)     => false,
-                   _ when IsAssetImportCommand(command.Kind)    => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
-                   _ when IsTestCommand(command.Kind)           => !IsAnyTestRunActive() && !EditorApplication.isPlayingOrWillChangePlaymode,
-                   _                                            => true,
-               };
-
-        internal static void PersistActiveOperation(PendingOperationState operation, ParsedBridgeCommandKind commandKind)
+        public static void SaveActiveOperation(PendingOperationState operation, BridgeCommandKind commandKind)
         {
-            if (!CanRestorePersistedOperation(commandKind))
+            if (!CanRestore(commandKind))
                 return;
 
             SessionState.SetString(
@@ -48,19 +26,16 @@ namespace Conduit
                         Target = operation.target,
                         Snippet = operation.snippet,
                         TestFilter = operation.test_filter,
+                        ReimportAssetPaths = operation.reimport_asset_paths,
                     }
                 )
             );
         }
 
-        internal static void RestorePersistedOperation()
+        public static PendingOperationState? RestoreActiveOperation()
         {
-            lock (stateGate)
-                if (activeOperation != null)
-                    return;
-
             if (SessionState.GetString(ActiveOperationStateKey, string.Empty) is not { Length: > 0 } payload)
-                return;
+                return null;
 
             PersistedOperationState restoredState;
             try
@@ -69,96 +44,61 @@ namespace Conduit
             }
             catch (ArgumentException)
             {
-                ClearPersistedActiveOperation();
-                return;
+                ClearActiveOperation();
+                return null;
             }
 
             if (restoredState == null || string.IsNullOrWhiteSpace(restoredState.RequestID))
             {
-                ClearPersistedActiveOperation();
-                return;
+                ClearActiveOperation();
+                return null;
             }
 
-            var restoredCommand = ParseIncomingCommand(restoredState.CommandType);
-            if (!CanRestorePersistedOperation(restoredCommand.Kind))
+            var commandKind = BridgeCommandKinds.Parse(restoredState.CommandType);
+            if (!CanRestore(commandKind))
             {
-                ClearPersistedActiveOperation();
-                return;
+                ClearActiveOperation();
+                return null;
             }
 
-            lock (stateGate)
+            return new()
             {
-                if (activeOperation != null)
-                    return;
-
-                activeOperation = new()
-                {
-                    request_id = restoredState.RequestID,
-                    command_type = restoredState.CommandType,
-                    client_id = 0,
-                    target = restoredState.Target,
-                    snippet = restoredState.Snippet,
-                    test_filter = restoredState.TestFilter,
-                    args = Array.Empty<string>(),
-                    is_acknowledged = true,
-                    is_restored = true,
-                };
-
-                activeCommand = restoredCommand;
-            }
-
-        }
-
-        static void ResumeRestoredOperation()
-        {
-            PendingOperationState? operation;
-            ParsedBridgeCommand command;
-            lock (stateGate)
-            {
-                operation = activeOperation;
-                command = activeCommand;
-            }
-
-            if (operation is not { is_restored: true })
-                return;
-
-            switch (command.Kind)
-            {
-                case ParsedBridgeCommandKind.PlayMode:
-                case ParsedBridgeCommandKind.EditMode:
-                    InstallPlayModeHooks();
-                    ResetPlayModeState();
-                    TryAdvancePlayToggle();
-                    return;
-                case ParsedBridgeCommandKind.RefreshAssetDatabase:
-                case ParsedBridgeCommandKind.ReimportAssets:
-                    InstallReimportHooks();
-                    MarkRestoredReimportAsResumed();
-                    TryFinishReimport(countIdleUpdate: false);
-                    return;
-            }
-        }
-
-        static void PersistPendingResult(string requestId, string commandType, BridgeCommandResult result)
-        {
-            pendingResult = new()
-            {
-                RequestID = requestId,
-                CommandType = commandType,
-                Result = result,
+                request_id = restoredState.RequestID,
+                command_type = restoredState.CommandType,
+                kind = commandKind,
+                client_id = 0,
+                target = restoredState.Target,
+                snippet = restoredState.Snippet,
+                test_filter = restoredState.TestFilter,
+                args = Array.Empty<string>(),
+                is_acknowledged = true,
+                is_restored = true,
+                reimport_asset_paths = restoredState.ReimportAssetPaths ?? Array.Empty<string>(),
             };
-
-            SessionState.SetString(PendingResultStateKey, JsonUtility.ToJson(pendingResult));
         }
 
-        static void RestorePersistedPendingResult()
+        // session state can outlive the editor activity that originally justified recovery
+        public static bool IsStaleRestoredOperation(
+            PendingOperationState? operation,
+            BridgeCommandKind commandKind,
+            bool hasPendingResult,
+            bool isAnyTestRunActive)
+            => operation is { is_restored: true }
+               && !hasPendingResult
+               && commandKind switch
+               {
+                   _ when BridgeCommandKinds.IsEditorMode(commandKind)  => false,
+                   _ when BridgeCommandKinds.IsAssetImport(commandKind) => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
+                   _ when BridgeCommandKinds.IsTest(commandKind)        => !isAnyTestRunActive && !EditorApplication.isPlayingOrWillChangePlaymode,
+                   _                                                    => true,
+               };
+
+        public static PersistedPendingResultState? RestorePendingResult()
         {
-            if (pendingResult != null)
-                return;
-
             if (SessionState.GetString(PendingResultStateKey, string.Empty) is not { Length: > 0 } payload)
-                return;
+                return null;
 
+            PersistedPendingResultState? pendingResult;
             try
             {
                 pendingResult = JsonUtility.FromJson<PersistedPendingResultState>(payload);
@@ -166,50 +106,50 @@ namespace Conduit
             catch (ArgumentException)
             {
                 ClearPendingResult();
-                return;
+                return null;
             }
 
             if (pendingResult?.Result == null || string.IsNullOrWhiteSpace(pendingResult.RequestID))
+            {
                 ClearPendingResult();
+                return null;
+            }
+
+            return pendingResult;
         }
 
-        static bool HasPendingResult() => pendingResult != null;
+        public static void SavePendingResult(PersistedPendingResultState pendingResult)
+            => SessionState.SetString(PendingResultStateKey, JsonUtility.ToJson(pendingResult));
 
-        internal static void ClearPersistedActiveOperation()
+        public static void ClearActiveOperation()
             => SessionState.EraseString(ActiveOperationStateKey);
 
-        static void ClearPendingResult()
-        {
-            pendingResult = null;
-            SessionState.EraseString(PendingResultStateKey);
-        }
+        public static void ClearPendingResult()
+            => SessionState.EraseString(PendingResultStateKey);
 
-        static async System.Threading.Tasks.Task ReplayPendingResultAsync(int clientId, PersistedPendingResultState pendingResult)
-        {
-            /*
-             * Intentionally do not clear here. The protocol has no explicit
-             * result-consumed ack, so another reconnect for the same request id
-             * may still need this cached payload.
-             */
-            await ConduitConnection.TrySendResultAsync(clientId, pendingResult.RequestID, pendingResult.Result, pendingResult.CommandType);
-        }
+        // editor-owned asynchronous work can survive connection loss or domain reloads
+        static bool CanRestore(BridgeCommandKind commandKind)
+            => BridgeCommandKinds.IsEditorMode(commandKind)
+               || BridgeCommandKinds.IsAssetImport(commandKind)
+               || BridgeCommandKinds.IsTest(commandKind);
 
         [Serializable]
         sealed class PersistedOperationState
         {
-            [FormerlySerializedAs("request_id")] public string RequestID = string.Empty;
-            [FormerlySerializedAs("command_type")] public string CommandType = string.Empty;
-            [FormerlySerializedAs("target")] public string? Target;
-            [FormerlySerializedAs("snippet")] public string? Snippet;
-            [FormerlySerializedAs("test_filter")] public string? TestFilter;
+            public string RequestID = string.Empty;
+            public string CommandType = string.Empty;
+            public string? Target;
+            public string? Snippet;
+            public string? TestFilter;
+            public string[] ReimportAssetPaths = Array.Empty<string>();
         }
+    }
 
-        [Serializable]
-        sealed class PersistedPendingResultState
-        {
-            [FormerlySerializedAs("request_id")] public string RequestID = string.Empty;
-            [FormerlySerializedAs("command_type")] public string CommandType = string.Empty;
-            [FormerlySerializedAs("result")] public BridgeCommandResult Result = new();
-        }
+    [Serializable]
+    sealed class PersistedPendingResultState
+    {
+        public string RequestID = string.Empty;
+        public string CommandType = string.Empty;
+        public BridgeCommandResult Result = new();
     }
 }

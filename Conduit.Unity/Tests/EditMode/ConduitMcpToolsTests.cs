@@ -116,7 +116,7 @@ public sealed class ConduitMcpToolsTests
     {
         var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ViewBurstAsm);
 
-        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ViewBurstAsm));
+        Assert.That(command, Is.EqualTo(BridgeCommandKind.ViewBurstAsm));
     }
 
     [Test]
@@ -124,7 +124,7 @@ public sealed class ConduitMcpToolsTests
     {
         var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.Reflect);
 
-        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.Reflect));
+        Assert.That(command, Is.EqualTo(BridgeCommandKind.Reflect));
     }
 
     [Test]
@@ -132,7 +132,7 @@ public sealed class ConduitMcpToolsTests
     {
         var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ReimportAssets);
 
-        Assert.That(command.Kind, Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ReimportAssets));
+        Assert.That(command, Is.EqualTo(BridgeCommandKind.ReimportAssets));
     }
 
     [Test]
@@ -162,16 +162,16 @@ public sealed class ConduitMcpToolsTests
     public void ProfilerCommands_Parse()
     {
         Assert.That(
-            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerRecord).Kind,
-            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerRecord)
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerRecord),
+            Is.EqualTo(BridgeCommandKind.ProfilerRecord)
         );
         Assert.That(
-            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerOverview).Kind,
-            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerOverview)
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerOverview),
+            Is.EqualTo(BridgeCommandKind.ProfilerOverview)
         );
         Assert.That(
-            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerBrowse).Kind,
-            Is.EqualTo(ConduitToolRunner.ParsedBridgeCommandKind.ProfilerBrowse)
+            ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ProfilerBrowse),
+            Is.EqualTo(BridgeCommandKind.ProfilerBrowse)
         );
     }
 
@@ -2156,129 +2156,62 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void HandleClientDisconnected_PreservesActiveOperationForReconnectReplay()
+    public void ClientWorkSnapshot_TracksOutstandingActiveAndQueuedOperations()
     {
-        var pendingOperation = new PendingOperationState
+        var activeOperation = new PendingOperationState
         {
-            request_id = "disconnect-test",
             command_type = BridgeCommandTypes.ExecuteCode,
             client_id = 17,
         };
         var queuedOperation = new PendingOperationState
         {
-            request_id = "queued-disconnect-test",
-            command_type = BridgeCommandTypes.Show,
-            client_id = 17,
-        };
-
-        var originalOperation = ConduitToolRunner.activeOperation;
-        var originalCommand = ConduitToolRunner.activeCommand;
-        var originalQueuedOperations = ConduitToolRunner.queuedOperations.ToArray();
-        try
-        {
-            ConduitToolRunner.activeOperation = pendingOperation;
-            ConduitToolRunner.activeCommand = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ExecuteCode);
-            ConduitToolRunner.queuedOperations.Clear();
-            ConduitToolRunner.queuedOperations.Add(queuedOperation);
-
-            ConduitToolRunner.HandleClientDisconnected(17);
-
-            Assert.That(ConduitToolRunner.activeOperation, Is.SameAs(pendingOperation));
-            Assert.That(pendingOperation.client_id, Is.EqualTo(0));
-            Assert.That(queuedOperation.client_id, Is.EqualTo(0));
-        }
-        finally
-        {
-            ConduitToolRunner.activeOperation = originalOperation;
-            ConduitToolRunner.activeCommand = originalCommand;
-            ConduitToolRunner.queuedOperations.Clear();
-            foreach (var queued in originalQueuedOperations)
-                ConduitToolRunner.queuedOperations.Add(queued);
-        }
-    }
-
-    [Test]
-    public void HasOutstandingClientWork_TracksQueuedOperationsBeforeAcknowledgement()
-    {
-        var queuedOperation = new PendingOperationState
-        {
-            request_id = "queued-client-work",
             command_type = BridgeCommandTypes.Show,
             client_id = 23,
-            is_acknowledged = false,
         };
 
-        var originalQueuedOperations = ConduitToolRunner.queuedOperations.ToArray();
-        try
-        {
-            ConduitToolRunner.queuedOperations.Clear();
-            ConduitToolRunner.queuedOperations.Add(queuedOperation);
+        var snapshot = ClientWorkSnapshot.Create(
+            activeOperation,
+            new() { queuedOperation },
+            hasPendingResult: false
+        );
 
-            Assert.That(ConduitToolRunner.HasOutstandingClientWork(23), Is.True);
-
-            queuedOperation.is_acknowledged = true;
-            Assert.That(ConduitToolRunner.HasOutstandingClientWork(23), Is.True);
-        }
-        finally
-        {
-            ConduitToolRunner.queuedOperations.Clear();
-            foreach (var queued in originalQueuedOperations)
-                ConduitToolRunner.queuedOperations.Add(queued);
-        }
+        Assert.That(snapshot.ActiveCommandType, Is.EqualTo(BridgeCommandTypes.ExecuteCode));
+        Assert.That(snapshot.HasOutstandingClientWork(17), Is.True);
+        Assert.That(snapshot.HasOutstandingClientWork(23), Is.True);
+        Assert.That(snapshot.HasOutstandingClientWork(0), Is.False);
+        Assert.That(snapshot.HasOutstandingClientWork(99), Is.False);
     }
 
     [Test]
-    public void HasReconnectableWorkForAnyClient_TracksDisconnectedOperationsAndPendingResults()
+    public void ClientWorkSnapshot_TracksReconnectableDisconnectedOperationsAndPendingResults()
     {
         var disconnectedActiveOperation = new PendingOperationState
         {
-            request_id = "restored-active-work",
             command_type = BridgeCommandTypes.RefreshAssetDatabase,
             client_id = 0,
         };
         var disconnectedQueuedOperation = new PendingOperationState
         {
-            request_id = "restored-queued-work",
             command_type = BridgeCommandTypes.Show,
             client_id = 0,
         };
 
-        var originalOperation = ConduitToolRunner.activeOperation;
-        var originalQueuedOperations = ConduitToolRunner.queuedOperations.ToArray();
-        var pendingResultField = typeof(ConduitToolRunner).GetField("pendingResult", BindingFlags.Static | BindingFlags.NonPublic);
-        var pendingResultType = typeof(ConduitToolRunner).GetNestedType("PersistedPendingResultState", BindingFlags.NonPublic);
-        var originalPendingResult = pendingResultField?.GetValue(null);
-        try
-        {
-            ConduitToolRunner.activeOperation = disconnectedActiveOperation;
-            ConduitToolRunner.queuedOperations.Clear();
-            Assert.That(ConduitToolRunner.HasReconnectableWorkForAnyClient(), Is.True);
-
-            ConduitToolRunner.activeOperation = null;
-            ConduitToolRunner.queuedOperations.Add(disconnectedQueuedOperation);
-            Assert.That(ConduitToolRunner.HasReconnectableWorkForAnyClient(), Is.True);
-
-            ConduitToolRunner.queuedOperations.Clear();
-            Assert.That(ConduitToolRunner.HasReconnectableWorkForAnyClient(), Is.False);
-
-            Assert.That(pendingResultField, Is.Not.Null);
-            Assert.That(pendingResultType, Is.Not.Null);
-            var pendingResult = Activator.CreateInstance(pendingResultType!);
-            pendingResultType!.GetField("RequestID")!.SetValue(pendingResult, "restored-result");
-            pendingResultType.GetField("CommandType")!.SetValue(pendingResult, BridgeCommandTypes.RefreshAssetDatabase);
-            pendingResultType.GetField("Result")!.SetValue(pendingResult, new BridgeCommandResult { outcome = ToolOutcome.Success });
-            pendingResultField!.SetValue(null, pendingResult);
-            Assert.That(ConduitToolRunner.HasReconnectableWorkForAnyClient(), Is.True);
-        }
-        finally
-        {
-            ConduitToolRunner.activeOperation = originalOperation;
-            ConduitToolRunner.queuedOperations.Clear();
-            foreach (var queued in originalQueuedOperations)
-                ConduitToolRunner.queuedOperations.Add(queued);
-
-            pendingResultField?.SetValue(null, originalPendingResult);
-        }
+        Assert.That(
+            ClientWorkSnapshot.Create(disconnectedActiveOperation, new(), false).HasReconnectableWorkForAnyClient(),
+            Is.True
+        );
+        Assert.That(
+            ClientWorkSnapshot.Create(null, new() { disconnectedQueuedOperation }, false).HasReconnectableWorkForAnyClient(),
+            Is.True
+        );
+        Assert.That(
+            ClientWorkSnapshot.Create(null, new(), true).HasReconnectableWorkForAnyClient(),
+            Is.True
+        );
+        Assert.That(
+            ClientWorkSnapshot.Create(null, new(), false).HasReconnectableWorkForAnyClient(),
+            Is.False
+        );
     }
 
     [Test]
@@ -2383,86 +2316,46 @@ public sealed class ConduitMcpToolsTests
             command_type = BridgeCommandTypes.PlayMode,
         };
 
-        var originalOperation = ConduitToolRunner.activeOperation;
-        var originalCommand = ConduitToolRunner.activeCommand;
         try
         {
-            ConduitToolRunner.ClearPersistedActiveOperation();
-            ConduitToolRunner.activeOperation = null;
-            ConduitToolRunner.activeCommand = default;
+            OperationPersistence.ClearActiveOperation();
+            OperationPersistence.SaveActiveOperation(pendingOperation, BridgeCommandKind.PlayMode);
 
-            ConduitToolRunner.PersistActiveOperation(pendingOperation, ConduitToolRunner.ParsedBridgeCommandKind.PlayMode);
-            ConduitToolRunner.RestorePersistedOperation();
-
-            var restoredOperation = ConduitToolRunner.activeOperation;
+            var restoredOperation = OperationPersistence.RestoreActiveOperation();
             Assert.That(restoredOperation, Is.Not.Null);
             Assert.That(restoredOperation!.command_type, Is.EqualTo(BridgeCommandTypes.PlayMode));
             Assert.That(restoredOperation.is_restored, Is.EqualTo(true));
         }
         finally
         {
-            ConduitToolRunner.ClearPersistedActiveOperation();
-            ConduitToolRunner.activeOperation = originalOperation;
-            ConduitToolRunner.activeCommand = originalCommand;
+            OperationPersistence.ClearActiveOperation();
         }
     }
 
     [Test]
-    public void RefreshPersistedOperation_ResumeCompletesIntoReconnectablePendingResult()
+    public void PendingResultPersistence_RestoresCompletedResult()
     {
-        var pendingOperation = new PendingOperationState
+        var pendingResult = new PersistedPendingResultState
         {
-            request_id = "refresh-restore-test",
-            command_type = BridgeCommandTypes.RefreshAssetDatabase,
+            RequestID = "refresh-restore-test",
+            CommandType = BridgeCommandTypes.RefreshAssetDatabase,
+            Result = new() { outcome = ToolOutcome.Success },
         };
-
-        var originalOperation = ConduitToolRunner.activeOperation;
-        var originalCommand = ConduitToolRunner.activeCommand;
-        var refreshReturnedField = typeof(ConduitToolRunner).GetField("reimportRefreshReturned", BindingFlags.Static | BindingFlags.NonPublic);
-        var idleUpdateCountField = typeof(ConduitToolRunner).GetField("reimportIdleUpdateCount", BindingFlags.Static | BindingFlags.NonPublic);
-        var pendingResultField = typeof(ConduitToolRunner).GetField("pendingResult", BindingFlags.Static | BindingFlags.NonPublic);
-        var pendingResultType = typeof(ConduitToolRunner).GetNestedType("PersistedPendingResultState", BindingFlags.NonPublic);
-        var originalRefreshReturned = refreshReturnedField?.GetValue(null);
-        var originalIdleUpdateCount = idleUpdateCountField?.GetValue(null);
-        var originalPendingResult = pendingResultField?.GetValue(null);
-        var resumeMethod = typeof(ConduitToolRunner).GetMethod("ResumeRestoredOperation", BindingFlags.Static | BindingFlags.NonPublic);
-        var removeReimportHooksMethod = typeof(ConduitToolRunner).GetMethod("RemoveReimportHooks", BindingFlags.Static | BindingFlags.NonPublic);
 
         try
         {
-            Assert.That(refreshReturnedField, Is.Not.Null);
-            Assert.That(idleUpdateCountField, Is.Not.Null);
-            Assert.That(pendingResultField, Is.Not.Null);
-            Assert.That(pendingResultType, Is.Not.Null);
-            Assert.That(resumeMethod, Is.Not.Null);
-            Assert.That(removeReimportHooksMethod, Is.Not.Null);
+            OperationPersistence.ClearPendingResult();
+            OperationPersistence.SavePendingResult(pendingResult);
 
-            ConduitToolRunner.ClearPersistedActiveOperation();
-            ConduitToolRunner.activeOperation = null;
-            ConduitToolRunner.activeCommand = default;
-            refreshReturnedField!.SetValue(null, false);
-            idleUpdateCountField!.SetValue(null, 0);
-            pendingResultField!.SetValue(null, null);
-
-            ConduitToolRunner.PersistActiveOperation(pendingOperation, ConduitToolRunner.ParsedBridgeCommandKind.RefreshAssetDatabase);
-            ConduitToolRunner.RestorePersistedOperation();
-            resumeMethod!.Invoke(null, null);
-
-            Assert.That(ConduitToolRunner.activeOperation, Is.Null);
-            var pendingResult = pendingResultField.GetValue(null);
-            Assert.That(pendingResult, Is.Not.Null);
-            Assert.That(pendingResultType!.GetField("RequestID")!.GetValue(pendingResult), Is.EqualTo("refresh-restore-test"));
-            Assert.That(pendingResultType.GetField("CommandType")!.GetValue(pendingResult), Is.EqualTo(BridgeCommandTypes.RefreshAssetDatabase));
+            var restoredResult = OperationPersistence.RestorePendingResult();
+            Assert.That(restoredResult, Is.Not.Null);
+            Assert.That(restoredResult!.RequestID, Is.EqualTo("refresh-restore-test"));
+            Assert.That(restoredResult.CommandType, Is.EqualTo(BridgeCommandTypes.RefreshAssetDatabase));
+            Assert.That(restoredResult.Result.outcome, Is.EqualTo(ToolOutcome.Success));
         }
         finally
         {
-            removeReimportHooksMethod?.Invoke(null, null);
-            ConduitToolRunner.ClearPersistedActiveOperation();
-            ConduitToolRunner.activeOperation = originalOperation;
-            ConduitToolRunner.activeCommand = originalCommand;
-            refreshReturnedField?.SetValue(null, originalRefreshReturned);
-            idleUpdateCountField?.SetValue(null, originalIdleUpdateCount);
-            pendingResultField?.SetValue(null, originalPendingResult);
+            OperationPersistence.ClearPendingResult();
         }
     }
 
@@ -2562,6 +2455,57 @@ public sealed class ConduitMcpToolsTests
         const string diagnostic = "Failed to import Assets/Scripts/Foo.cs";
 
         Assert.That(ConduitToolRunner.ShouldOmitDiagnosticLogEntry(logMessage, diagnostic), Is.False);
+    }
+
+    [Test]
+    public void LogCapture_DropsIgnoredBurstWarning()
+    {
+        Assert.That(
+            ConduitToolRunner.ShouldSuppressCapturedLogEntry(
+                "/home/apk/src/hk2/Assets/Foo.cs(164,17): Burst warning BC1371: A discarded call is irrelevant."),
+            Is.True);
+        Assert.That(
+            ConduitToolRunner.ShouldSuppressCapturedLogEntry(
+                "Burst warning BC1371: A discarded call is irrelevant."),
+            Is.True);
+        Assert.That(
+            ConduitToolRunner.ShouldSuppressCapturedLogEntry(
+                "Assets/Foo.cs(12,3): Burst warning BC1370: A relevant warning."),
+            Is.False);
+    }
+
+    [Test]
+    public void LogCapture_SimplifiesBurstDiagnostics()
+    {
+        const string hash = "7435d70d723590c51e89202ae2f9be71";
+        const string gameAssembly = "Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string coreAssembly = "UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string mscorlib = "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089";
+        var input = string.Join("\n",
+            "/home/apk/src/hk2/Assets/Scripts/Foo.cs(164,17): Burst error BC1091: " +
+            "A call to the method Unity.Mathematics.math.any(Unity.Mathematics.bool3 x) -> " +
+            $"System.Boolean, {mscorlib}_{hash} from {gameAssembly} failed.",
+            "While compiling job:",
+            "Unity.Jobs.IJobParallelForExtensions+ParallelForJobStruct`1" +
+            "[[HK.PhysicsCharacterUpdateJobExtensions+DirectWrapper`1" +
+            $"[[HK.CapsuleCollisionSolver+FinalizeSlide, {gameAssembly}]], {gameAssembly}]], {coreAssembly}" +
+            "::Execute(" +
+            "HK.PhysicsCharacterUpdateJobExtensions+DirectWrapper`1" +
+            $"[[HK.CapsuleCollisionSolver+FinalizeSlide, {gameAssembly}]]&, {gameAssembly}" +
+            $"|System.Int32, {mscorlib})");
+
+        var output = ConduitToolRunner.NormalizeCapturedLogMessage(input);
+
+        Assert.That(output, Does.Contain("math.any(bool3 x) -> bool failed."));
+        Assert.That(
+            output,
+            Does.Contain(
+                "IJobParallelForExtensions+ParallelForJobStruct<PhysicsCharacterUpdateJobExtensions+DirectWrapper<CapsuleCollisionSolver+FinalizeSlide>>" +
+                "::Execute(PhysicsCharacterUpdateJobExtensions+DirectWrapper<CapsuleCollisionSolver+FinalizeSlide>&|int)"));
+        Assert.That(output, Does.Not.Contain("Version="));
+        Assert.That(output, Does.Not.Contain("PublicKeyToken"));
+        Assert.That(output, Does.Not.Contain("Unity.Mathematics."));
+        Assert.That(output, Does.Not.Contain(hash));
     }
 
     [Test]

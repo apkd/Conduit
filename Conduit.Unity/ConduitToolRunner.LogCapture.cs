@@ -4,29 +4,156 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.TestTools.TestRunner.Api;
 using UnityEngine;
 
 namespace Conduit
 {
-    static partial class ConduitToolRunner
+    sealed class UnityTestRunMonitor
     {
-        static void EnsureTestCallbacksRegistered()
-        {
-            if (testCallbacksRegistered)
-                return;
+        readonly ToolLogCapture logCapture;
+        readonly Func<BridgeCommandResult, Task> complete;
+        readonly TestRunCallbacks callbacks;
+        TestRunnerApi? testRunnerApi;
+        BridgeCommandKind activeCommandKind;
+        string? activeRunGuid;
+        BridgeCommandResult? pendingResult;
+        bool callbacksRegistered;
+        bool completionHooksInstalled;
+        bool asyncStartupPending;
 
-            testCallbacksRegistered = true;
-            GetOrCreateTestRunnerApi().RegisterCallbacks(testCallbacks);
+        static readonly MethodInfo? testRunnerIsRunActiveMethod = typeof(TestRunnerApi).GetMethod(
+            "IsRunActive",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        static readonly MethodInfo? testRunnerIsRunningMethod = typeof(TestRunnerApi).GetMethod(
+            "IsRunning",
+            BindingFlags.Static | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(string) },
+            null);
+        static readonly PropertyInfo? testRunnerJobDataHolderProperty = typeof(TestRunnerApi).GetProperty(
+            "m_testJobDataHolder",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        static readonly MethodInfo? testJobDataHolderGetAllRunnersMethod = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobDataHolder")
+            ?.GetMethod("GetAllRunners", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly MethodInfo? testJobRunnerGetDataMethod = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobRunner")
+            ?.GetMethod("GetData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? testJobDataIsRunningField = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
+            ?.GetField("isRunning", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? testJobDataExecutionSettingsField = typeof(TestRunnerApi).Assembly
+            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
+            ?.GetField("executionSettings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly FieldInfo? executionSettingsHasTargetPlatformField = typeof(ExecutionSettings)
+            .GetField("m_HasTargetPlatform", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        public UnityTestRunMonitor(ToolLogCapture logCapture, Func<BridgeCommandResult, Task> complete)
+        {
+            this.logCapture = logCapture;
+            this.complete = complete;
+            callbacks = new(this);
         }
 
-        static TestRunnerApi GetOrCreateTestRunnerApi()
-            => testRunnerApi != null ? testRunnerApi : testRunnerApi = ScriptableObject.CreateInstance<TestRunnerApi>();
-
-        static void HandleTestRunFinished(ITestResultAdaptor result)
+        public void EnsureCallbacksRegistered()
         {
-            QueueTestRunCompletion(
+            if (callbacksRegistered)
+                return;
+
+            callbacksRegistered = true;
+            GetOrCreateTestRunnerApi().RegisterCallbacks(callbacks);
+        }
+
+        public void Start(PendingOperationState operation, BridgeCommandKind commandKind, TestMode mode, bool playerRun)
+        {
+            EnsureCallbacksRegistered();
+            activeCommandKind = commandKind;
+            asyncStartupPending = operation.@async;
+
+            if (TryCompleteDirtySceneBlock(operation.command_type)
+                || TryCompleteBusyStartBlock(operation.command_type)
+                || TryCompleteCompileErrorStartBlock(operation.command_type))
+                return;
+
+            var filter = new Filter { testMode = mode };
+            run_tests.ApplyFilter(filter, operation.test_filter);
+            if (playerRun)
+                filter.targetPlatform = EditorUserBuildSettings.activeBuildTarget;
+
+            activeRunGuid = GetOrCreateTestRunnerApi().Execute(
+                new ExecutionSettings(filter)
+                {
+                    playerHeartbeatTimeout = 600,
+                }
+            );
+
+            if (operation.@async)
+            {
+                InstallCompletionHooks();
+                TryCompleteAsyncStartup();
+            }
+        }
+
+        public void ResumeRestored(BridgeCommandKind commandKind)
+        {
+            EnsureCallbacksRegistered();
+            activeCommandKind = commandKind;
+            activeRunGuid = null;
+            pendingResult = null;
+            asyncStartupPending = false;
+        }
+
+        public void Stop()
+        {
+            RemoveCompletionHooks();
+            activeCommandKind = BridgeCommandKind.Unknown;
+            activeRunGuid = null;
+            pendingResult = null;
+            asyncStartupPending = false;
+        }
+
+        public bool IsAnyTestRunActive()
+            => TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
+
+        public string? GetActiveTestRunMode()
+        {
+            if (TryGetActiveTestExecutionSettings() is not { } settings)
+                return null;
+
+            var filters = settings.filters ?? Array.Empty<Filter>();
+            var hasEditMode = false;
+            var hasPlayMode = false;
+            foreach (var filter in filters)
+            {
+                hasEditMode |= IncludesTestMode(filter.testMode, TestMode.EditMode);
+                hasPlayMode |= IncludesTestMode(filter.testMode, TestMode.PlayMode);
+            }
+
+            if (hasPlayMode)
+                return HasTargetPlatform(settings) ? "player" : "play mode";
+
+            return hasEditMode ? "edit mode" : null;
+        }
+
+        public static bool ShouldWaitForCompletion(
+            bool isTestRunnerActive,
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlaying,
+            bool isPlayingOrWillChangePlaymode,
+            bool completeDespiteStuckTestRunner)
+            => isCompiling
+               || isUpdating
+               || isPlaying
+               || isPlayingOrWillChangePlaymode
+               || isTestRunnerActive && !completeDespiteStuckTestRunner;
+
+        void HandleRunFinished(ITestResultAdaptor result)
+        {
+            QueueCompletion(
                 new()
                 {
                     outcome = result.FailCount > 0 ? ToolOutcome.TestFailed : ToolOutcome.Success,
@@ -35,60 +162,44 @@ namespace Conduit
             );
         }
 
-        static void HandleTestStarted(ITestAdaptor test)
+        void HandleTestStarted(ITestAdaptor test)
         {
-            lock (stateGate)
-            {
-                if (!IsTestCommand(activeCommand.Kind))
-                    return;
+            if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                return;
 
-                activeTestScopes.Add(GetTestLabel(test));
-                run_tests.RecordStartedFilteredTest(test);
-            }
+            logCapture.HandleTestStarted(test);
+            run_tests.RecordStartedFilteredTest(test);
         }
 
-        static void HandleTestFinished(ITestResultAdaptor result)
+        void HandleTestFinished(ITestResultAdaptor result)
         {
-            BridgeCommandResult? cancelledCompletion = null;
-            lock (stateGate)
-            {
-                if (!IsTestCommand(activeCommand.Kind))
-                    return;
+            if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                return;
 
-                if (run_tests.IsCancelledTestResult(result))
-                    cancelledCompletion = run_tests.CreateCancelledTestRunResult(result);
+            var cancelledCompletion = run_tests.IsCancelledTestResult(result)
+                ? run_tests.CreateCancelledTestRunResult(result)
+                : null;
 
-                var label = GetTestLabel(result);
-                RemoveActiveTestScope(label);
-                if (activeTestLogTargets.TryGetValue(label, out var target))
-                {
-                    activeTestLogTargets.Remove(label);
-                    if (result.FailCount > 0 && !HasChildResults(result))
-                        failedTestLogTargets.Add(target);
-                    else
-                        RecycleLogTarget(target);
-                }
-            }
+            logCapture.HandleTestFinished(result);
 
-            // Unity can stop a play mode run after the final test reports Failed:Cancelled
-            // without issuing RunFinished or OnError, leaving the bridge scheduler blocked.
+            // unity may stop a play mode run after the final Failed:Cancelled test without RunFinished
             if (cancelledCompletion != null)
-                QueueTestRunCompletion(cancelledCompletion, discardLogs: true);
+                QueueCompletion(cancelledCompletion, discardLogs: true);
         }
 
-        static void HandleTestRunError(string message)
+        void HandleRunError(string message)
         {
             if (run_tests.TryCreateUserStoppedPlayModeTestRunResult(
                     message,
-                    activeCommand.Kind == ParsedBridgeCommandKind.RunTestsPlayMode,
+                    activeCommandKind == BridgeCommandKind.RunTestsPlayMode,
                     out var stoppedResult
                 ))
             {
-                QueueTestRunCompletion(stoppedResult!, discardLogs: true);
+                QueueCompletion(stoppedResult!, discardLogs: true);
                 return;
             }
 
-            QueueTestRunCompletion(
+            QueueCompletion(
                 new()
                 {
                     outcome = ToolOutcome.Exception,
@@ -102,78 +213,214 @@ namespace Conduit
             );
         }
 
-        static void QueueTestRunCompletion(BridgeCommandResult result, bool discardLogs = false)
+        void QueueCompletion(BridgeCommandResult result, bool discardLogs = false)
         {
-            lock (stateGate)
-            {
-                if (!IsTestCommand(activeCommand.Kind))
-                    return;
+            if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                return;
 
-                if (pendingTestRunResult != null && !ShouldReplacePendingTestRunResult(result))
-                    return;
+            if (pendingResult != null && !ShouldReplacePendingResult(result))
+                return;
 
-                pendingTestRunResult = result;
-                if (discardLogs)
-                    discardCapturedLogsOnCompletion = true;
-            }
+            // cancellation and runner errors take precedence over a normal completion callback
+            // callbacks can fire before play mode exits and before all log messages are delivered
+            pendingResult = result;
+            if (discardLogs)
+                logCapture.DiscardOnCompletion();
 
-            InstallTestRunCompletionHooks();
-            TryCompletePendingTestRun();
+            InstallCompletionHooks();
+            TryCompletePendingRun();
         }
 
-        static bool ShouldReplacePendingTestRunResult(BridgeCommandResult result)
+        static bool ShouldReplacePendingResult(BridgeCommandResult result)
             => result.outcome is ToolOutcome.Exception or ToolOutcome.Cancelled;
 
-        static void TryCompletePendingTestRun()
+        void TryCompletePendingRun()
         {
-            lock (stateGate)
-                if (!IsTestCommand(activeCommand.Kind) || pendingTestRunResult == null)
-                    return;
+            if (!BridgeCommandKinds.IsTest(activeCommandKind) || pendingResult == null)
+                return;
 
             var isTestRunnerActive = IsTestRunStillActive();
             var isCompiling = EditorApplication.isCompiling;
             var isUpdating = EditorApplication.isUpdating;
             var isPlaying = EditorApplication.isPlaying;
             var isPlayingOrWillChangePlaymode = EditorApplication.isPlayingOrWillChangePlaymode;
-            BridgeCommandResult result;
-            lock (stateGate)
-            {
-                if (!IsTestCommand(activeCommand.Kind) || pendingTestRunResult == null)
-                    return;
+            if (ShouldWaitForCompletion(
+                    isTestRunnerActive,
+                    isCompiling,
+                    isUpdating,
+                    isPlaying,
+                    isPlayingOrWillChangePlaymode,
+                    CanCompleteDespiteStuckTestRunner(pendingResult)
+                ))
+                return;
 
-                if (ShouldWaitForTestRunCompletion(
-                        isTestRunnerActive,
-                        isCompiling,
-                        isUpdating,
-                        isPlaying,
-                        isPlayingOrWillChangePlaymode,
-                        CanCompleteDespiteStuckTestRunner(pendingTestRunResult!)
-                    ))
-                    return;
-
-                result = pendingTestRunResult!;
-                pendingTestRunResult = null;
-            }
-
-            RemoveTestRunCompletionHooks();
-            _ = CompleteCurrentAsync(result);
+            var result = pendingResult;
+            pendingResult = null;
+            RemoveCompletionHooks();
+            _ = complete(result);
         }
 
-        static bool IsTestRunStillActive()
+        void TryCompleteAsyncStartup()
         {
-            string? runGuid;
-            lock (stateGate)
-                runGuid = activeTestRunGuid;
+            if (!asyncStartupPending || !BridgeCommandKinds.IsTest(activeCommandKind))
+                return;
 
-            if (!string.IsNullOrEmpty(runGuid)
-                && TryInvokeTestRunnerBoolMethod(testRunnerIsRunningMethod, out var isRunning, runGuid))
+            if (!IsTestRunActive(activeRunGuid))
+                return;
+
+            if (activeCommandKind == BridgeCommandKind.RunTestsPlayMode && !EditorApplication.isPlaying)
+                return;
+
+            // async start is reported only after Unity has actually accepted the run
+            var mode = activeCommandKind == BridgeCommandKind.RunTestsEditMode ? TestMode.EditMode : TestMode.PlayMode;
+            _ = complete(CreateAsyncStartedResult(mode));
+        }
+
+        bool IsTestRunStillActive()
+        {
+            if (!string.IsNullOrEmpty(activeRunGuid)
+                && TryInvokeTestRunnerBoolMethod(testRunnerIsRunningMethod, out var isRunning, activeRunGuid))
                 return isRunning;
 
             return IsAnyTestRunActive();
         }
 
-        static bool IsAnyTestRunActive()
-            => TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
+        static bool IsTestRunActive(string? runGuid)
+        {
+            if (!string.IsNullOrEmpty(runGuid)
+                && TryInvokeTestRunnerBoolMethod(testRunnerIsRunningMethod, out var isRunning, runGuid))
+                return isRunning;
+
+            return TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
+        }
+
+        static bool CanCompleteDespiteStuckTestRunner(BridgeCommandResult result)
+            => result.outcome is ToolOutcome.Cancelled or ToolOutcome.Exception;
+
+        static BridgeCommandResult CreateAsyncStartedResult(TestMode mode)
+            => new()
+            {
+                outcome = ToolOutcome.Success,
+                return_value = $"{GetTestModeDisplayName(mode)} tests are running asynchronously. You can use other tools while the test run continues.",
+            };
+
+        static string GetTestModeDisplayName(TestMode mode)
+            => mode == TestMode.EditMode ? "Edit mode" : "Play mode";
+
+        bool TryCompleteDirtySceneBlock(string commandType)
+        {
+            if (ConduitSceneCommandUtility.BuildDirtySceneDiagnostic(commandType) is not { Length: > 0 } diagnostic)
+                return false;
+
+            _ = complete(
+                new()
+                {
+                    outcome = ToolOutcome.DirtyScene,
+                    diagnostic = diagnostic,
+                }
+            );
+            return true;
+        }
+
+        bool TryCompleteBusyStartBlock(string commandType)
+        {
+            var isCompiling = EditorApplication.isCompiling;
+            var isUpdating = EditorApplication.isUpdating;
+            var isPlayingOrWillChangePlaymode = EditorApplication.isPlayingOrWillChangePlaymode;
+            if (!run_tests.ShouldBlockTestRun(isCompiling, isUpdating, isPlayingOrWillChangePlaymode))
+                return false;
+
+            _ = complete(
+                new()
+                {
+                    outcome = ToolOutcome.Exception,
+                    diagnostic = run_tests.BuildBlockedTestRunDiagnostic(
+                        commandType,
+                        isCompiling,
+                        isUpdating,
+                        isPlayingOrWillChangePlaymode
+                    ),
+                }
+            );
+            return true;
+        }
+
+        bool TryCompleteCompileErrorStartBlock(string commandType)
+        {
+            if (!run_tests.ShouldFailTestRunForCompileErrors(EditorUtility.scriptCompilationFailed))
+                return false;
+
+            _ = complete(
+                new()
+                {
+                    outcome = ToolOutcome.CompileError,
+                    diagnostic = run_tests.BuildCompileErrorTestRunDiagnostic(commandType),
+                }
+            );
+            return true;
+        }
+
+        void InstallCompletionHooks()
+        {
+            if (completionHooksInstalled)
+                return;
+
+            completionHooksInstalled = true;
+            EditorApplication.update += OnCompletionUpdate;
+        }
+
+        void RemoveCompletionHooks()
+        {
+            if (!completionHooksInstalled)
+                return;
+
+            completionHooksInstalled = false;
+            EditorApplication.update -= OnCompletionUpdate;
+        }
+
+        void OnCompletionUpdate()
+        {
+            TryCompleteAsyncStartup();
+            TryCompletePendingRun();
+        }
+
+        TestRunnerApi GetOrCreateTestRunnerApi()
+            => testRunnerApi != null ? testRunnerApi : testRunnerApi = ScriptableObject.CreateInstance<TestRunnerApi>();
+
+        static ExecutionSettings? TryGetActiveTestExecutionSettings()
+        {
+            try
+            {
+                var holder = testRunnerJobDataHolderProperty?.GetValue(null);
+                if (holder == null || testJobDataHolderGetAllRunnersMethod == null)
+                    return null;
+
+                if (testJobDataHolderGetAllRunnersMethod.Invoke(holder, null) is not Array runners)
+                    return null;
+
+                foreach (var runner in runners)
+                {
+                    var data = testJobRunnerGetDataMethod?.Invoke(runner, null);
+                    if (data == null || testJobDataIsRunningField?.GetValue(data) is not true)
+                        continue;
+
+                    if (testJobDataExecutionSettingsField?.GetValue(data) is ExecutionSettings settings)
+                        return settings;
+                }
+            }
+            catch (Exception)
+            {
+                // unity test runner internals vary by version; status can fall back to unknown mode
+            }
+
+            return null;
+        }
+
+        static bool IncludesTestMode(TestMode testMode, TestMode mode)
+            => (testMode & mode) == mode;
+
+        static bool HasTargetPlatform(ExecutionSettings settings)
+            => executionSettingsHasTargetPlatformField?.GetValue(settings) is true;
 
         static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value, params object?[] args)
         {
@@ -189,135 +436,112 @@ namespace Conduit
                     return true;
                 }
             }
-            catch (Exception) { }
+            catch (Exception)
+            {
+                // reflection failures are treated as unavailable test runner state
+            }
 
             return false;
         }
 
-        static bool CanCompleteDespiteStuckTestRunner(BridgeCommandResult result)
-            => result.outcome is ToolOutcome.Cancelled or ToolOutcome.Exception;
-
-        static BridgeExceptionInfo ToExceptionInfo(Exception exception)
-            => ConduitUtility.ToExceptionInfo(exception);
-
-        static void StartLogCapture()
+        sealed class TestRunCallbacks : IErrorCallbacks
         {
-            lock (stateGate)
-                ResetLogCaptureStateUnderLock();
+            readonly UnityTestRunMonitor owner;
 
-            EnsureLogCaptureHooked();
+            public TestRunCallbacks(UnityTestRunMonitor owner)
+                => this.owner = owner;
+
+            public void RunStarted(ITestAdaptor testsToRun) { }
+            public void RunFinished(ITestResultAdaptor result) => owner.HandleRunFinished(result);
+            public void TestStarted(ITestAdaptor test) => owner.HandleTestStarted(test);
+            public void TestFinished(ITestResultAdaptor result) => owner.HandleTestFinished(result);
+            public void OnError(string message) => owner.HandleRunError(message);
         }
+    }
 
-        static void EnsureLogCaptureHooked()
+    sealed class ToolLogCapture
+    {
+        // unity invokes logMessageReceivedThreaded from worker threads
+        readonly object gate = new();
+        readonly CapturedLogTarget commandLogTarget = new();
+        readonly CapturedLogTarget testRunLogTarget = new();
+        readonly Dictionary<string, CapturedLogTarget> activeTestLogTargets = new(StringComparer.Ordinal);
+        readonly List<CapturedLogTarget> failedTestLogTargets = new();
+        // nested test callbacks make the latest started test the owner of subsequent logs
+        readonly List<string> activeTestScopes = new();
+        readonly Dictionary<LogSignature, int> capturedLogEntryIndexes = new(LogSignatureComparer.Instance);
+        readonly List<CapturedLogEntry> capturedLogEntries = new();
+        BridgeCommandKind activeCommandKind;
+        bool hooked;
+        bool discardOnCompletion;
+
+        public void Start(BridgeCommandKind commandKind)
         {
-            if (logCaptureHooked)
-                return;
-
-            logCaptureHooked = true;
-            Application.logMessageReceivedThreaded += OnLogMessageReceived;
-        }
-
-        static string DrainLogs(string commandType, string outcome, string? diagnostic)
-        {
-            if (logCaptureHooked)
+            lock (gate)
             {
-                Application.logMessageReceivedThreaded -= OnLogMessageReceived;
-                logCaptureHooked = false;
+                ResetStateUnderLock();
+                activeCommandKind = commandKind;
             }
 
-            lock (stateGate)
+            EnsureHooked();
+        }
+
+        public string Drain(BridgeCommandKind commandKind, string outcome, string? diagnostic, out bool discardLogs)
+        {
+            if (hooked)
             {
-                var logs = IsTestCommand(ParseIncomingCommand(commandType).Kind)
+                Application.logMessageReceivedThreaded -= OnLogMessageReceived;
+                hooked = false;
+            }
+
+            lock (gate)
+            {
+                discardLogs = discardOnCompletion;
+                var logs = BridgeCommandKinds.IsTest(commandKind)
                     ? BuildTestLogs(outcome)
                     : BuildCapturedLogs(commandLogTarget, diagnostic);
 
-                ResetLogCaptureStateUnderLock();
+                ResetStateUnderLock();
                 return logs;
             }
         }
 
-        static void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
+        public void DiscardOnCompletion()
         {
-            var simplifiedStackTrace = TrimCommonLogTail(ConduitUtility.SimplifyStackTrace(stackTrace));
-            lock (stateGate)
+            lock (gate)
+                discardOnCompletion = true;
+        }
+
+        public void HandleTestStarted(ITestAdaptor test)
+        {
+            lock (gate)
             {
-                var target = ResolveLogTargetUnderLock();
-                CaptureLogEntry(target, condition, simplifiedStackTrace);
+                if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                    return;
+
+                activeTestScopes.Add(GetTestLabel(test));
             }
         }
 
-        static CapturedLogTarget ResolveLogTargetUnderLock()
+        public void HandleTestFinished(ITestResultAdaptor result)
         {
-            if (!IsTestCommand(activeCommand.Kind))
-                return commandLogTarget;
-
-            if (activeTestScopes.Count == 0)
-                return testRunLogTarget;
-
-            var label = activeTestScopes[^1];
-            if (activeTestLogTargets.TryGetValue(label, out var target))
-                return target;
-
-            target = recycledTestLogTargets.Count > 0 ? recycledTestLogTargets.Pop() : new();
-            target.Reset(label);
-            activeTestLogTargets.Add(label, target);
-            return target;
-        }
-
-        static void CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace)
-        {
-            var message = condition ?? string.Empty;
-            var stack = simplifiedStackTrace ?? string.Empty;
-            if (message.Length == 0 && stack.Length == 0)
-                return;
-
-            var signature = new LogSignature
+            lock (gate)
             {
-                Message = message,
-                StackTrace = stack,
-            };
+                if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                    return;
 
-            if (capturedLogEntryIndexes.TryGetValue(signature, out var entryIndex))
-            {
-                var existingEntry = capturedLogEntries[entryIndex];
-                existingEntry.RepeatCount++;
-                capturedLogEntries[entryIndex] = existingEntry;
-                return;
-            }
+                var label = GetTestLabel(result);
+                RemoveActiveTestScope(label);
+                if (!activeTestLogTargets.TryGetValue(label, out var target))
+                    return;
 
-            entryIndex = capturedLogEntries.Count;
-            capturedLogEntryIndexes.Add(signature, entryIndex);
-            capturedLogEntries.Add(
-                new()
-                {
-                    Message = message,
-                    StackTrace = stack,
-                    RepeatCount = 1,
-                }
-            );
-
-            target.EntryIndexes.Add(entryIndex);
-        }
-
-        static void AppendQuotedLines(StringBuilder builder, string message)
-        {
-            if (string.IsNullOrEmpty(message))
-                return;
-
-            builder.Append("> ");
-            for (var index = 0; index < message.Length; index++)
-            {
-                var character = message[index];
-                if (character == '\r')
-                    continue;
-
-                builder.Append(character);
-                if (character == '\n' && index + 1 < message.Length)
-                    builder.Append("> ");
+                activeTestLogTargets.Remove(label);
+                if (result.FailCount > 0 && !HasChildResults(result))
+                    failedTestLogTargets.Add(target);
             }
         }
 
-        internal static string? TrimCommonLogTail(string? simplifiedStackTrace)
+        public static string? TrimCommonTail(string? simplifiedStackTrace)
         {
             if (simplifiedStackTrace == null || string.IsNullOrWhiteSpace(simplifiedStackTrace))
                 return simplifiedStackTrace;
@@ -349,44 +573,97 @@ namespace Conduit
             return trimmed.Length == 0 ? null : trimmed;
         }
 
-        static bool IsIgnorableLogTailFrame(string frame)
-            => frame is "System.Reflection.MethodBase:Invoke"
-                or "UnityEngine.UnitySynchronizationContext:ExecuteTasks"
-                or "NUnit.Framework.Internal.MethodWrapper:Invoke"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunNonAsyncTestMethod"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunTestMethod"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:Execute"
-                or "UnityEditor.EditorApplication:Internal_CallUpdateFunctions"
-                || IsExecuteCodeCompilerCallbackFrame(frame);
-
-        static bool IsExecuteCodeCompilerCallbackFrame(string frame)
-            => frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
-               && frame.EndsWith(":SetResult", StringComparison.Ordinal)
-               || frame.StartsWith("System.Threading.Tasks.TaskCompletionSource", StringComparison.Ordinal)
-               && frame.EndsWith(":TrySetResult", StringComparison.Ordinal)
-               || frame.StartsWith(
-                   "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling",
-                   StringComparison.Ordinal);
-
-        static void AppendCompilerMessage(string message)
+        public static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
         {
-            lock (stateGate)
-                compilerMessageBuffer.AppendLine(message);
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(diagnostic))
+                return false;
+
+            // compiler diagnostics can arrive through the result and Unity's log callback
+            return IsCompilerDiagnosticLogMessage(message)
+                   && diagnostic!.Contains(message, StringComparison.Ordinal);
         }
 
-        static void ClearCompilerMessages()
+        public static bool ShouldSuppressCapturedLogEntry(string message)
+            => view_burst_asm.ShouldSuppressBurstDiagnostic(message);
+
+        public static string NormalizeCapturedLogMessage(string message)
+            => view_burst_asm.IsBurstDiagnostic(message)
+                ? view_burst_asm.SimplifyBurstDiagnostic(message)
+                : message;
+
+        void EnsureHooked()
         {
-            lock (stateGate)
-                compilerMessageBuffer.Clear();
+            if (hooked)
+                return;
+
+            hooked = true;
+            Application.logMessageReceivedThreaded += OnLogMessageReceived;
         }
 
-        static string GetCompilerMessages()
+        void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
         {
-            lock (stateGate)
-                return compilerMessageBuffer.ToString().Trim();
+            if (ShouldSuppressCapturedLogEntry(condition))
+                return;
+
+            // burst diagnostics can embed assembly-qualified signatures longer than the useful error text
+            condition = NormalizeCapturedLogMessage(condition);
+            var simplifiedStackTrace = TrimCommonTail(ConduitUtility.SimplifyStackTrace(stackTrace));
+            lock (gate)
+            {
+                var target = ResolveLogTargetUnderLock();
+                CaptureLogEntry(target, condition, simplifiedStackTrace);
+            }
         }
 
-        static string BuildCapturedLogs(CapturedLogTarget target, string? diagnostic)
+        CapturedLogTarget ResolveLogTargetUnderLock()
+        {
+            if (!BridgeCommandKinds.IsTest(activeCommandKind))
+                return commandLogTarget;
+
+            if (activeTestScopes.Count == 0)
+                return testRunLogTarget;
+
+            var label = activeTestScopes[^1];
+            if (activeTestLogTargets.TryGetValue(label, out var target))
+                return target;
+
+            target = new(label);
+            activeTestLogTargets.Add(label, target);
+            return target;
+        }
+
+        void CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace)
+        {
+            var message = condition ?? string.Empty;
+            var stack = simplifiedStackTrace ?? string.Empty;
+            if (message.Length == 0 && stack.Length == 0)
+                return;
+
+            var signature = new LogSignature(message, stack);
+            if (capturedLogEntryIndexes.TryGetValue(signature, out var entryIndex))
+            {
+                capturedLogEntries[entryIndex].RepeatCount++;
+                // entries are deduped globally while each target keeps its own first reference
+                AddTargetEntryIndex(target, entryIndex);
+                return;
+            }
+
+            entryIndex = capturedLogEntries.Count;
+            capturedLogEntryIndexes.Add(signature, entryIndex);
+            capturedLogEntries.Add(new(message, stack));
+            target.EntryIndexes.Add(entryIndex);
+        }
+
+        static void AddTargetEntryIndex(CapturedLogTarget target, int entryIndex)
+        {
+            foreach (var existingEntryIndex in target.EntryIndexes)
+                if (existingEntryIndex == entryIndex)
+                    return;
+
+            target.EntryIndexes.Add(entryIndex);
+        }
+
+        string BuildCapturedLogs(CapturedLogTarget target, string? diagnostic)
         {
             if (target.EntryIndexes.Count == 0)
                 return string.Empty;
@@ -396,11 +673,12 @@ namespace Conduit
             return builder.ToString().Trim();
         }
 
-        static string BuildTestLogs(string outcome)
+        string BuildTestLogs(string outcome)
         {
             if (outcome == ToolOutcome.Success)
                 return string.Empty;
 
+            // failed leaf tests keep focused logs; run-level logs capture setup and teardown failures
             var builder = new StringBuilder();
             foreach (var failedTestLogTarget in failedTestLogTargets)
             {
@@ -423,7 +701,7 @@ namespace Conduit
             return builder.ToString().Trim();
         }
 
-        static void AppendCapturedLogEntries(CapturedLogTarget target, StringBuilder builder, string? diagnostic = null)
+        void AppendCapturedLogEntries(CapturedLogTarget target, StringBuilder builder, string? diagnostic = null)
         {
             var isFirstEntry = true;
             foreach (var entryIndex in target.EntryIndexes)
@@ -437,50 +715,6 @@ namespace Conduit
 
                 AppendCapturedLogEntry(builder, entry);
                 isFirstEntry = false;
-            }
-        }
-
-        internal static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
-        {
-            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(diagnostic))
-                return false;
-
-            // compiler diagnostics can arrive through both the command result and
-            // unity's console callback during the same operation.
-            return IsCompilerDiagnosticLogMessage(message)
-                   && diagnostic!.Contains(message, StringComparison.Ordinal);
-        }
-
-        static bool IsCompilerDiagnosticLogMessage(string message) =>
-            message.Contains("): error ", StringComparison.Ordinal)
-            || message.Contains("): warning ", StringComparison.Ordinal);
-
-        static string GetTestLabel(ITestAdaptor test)
-            => string.IsNullOrWhiteSpace(test.FullName) ? test.Name : test.FullName;
-
-        static string GetTestLabel(ITestResultAdaptor result)
-            => string.IsNullOrWhiteSpace(result.FullName) ? result.Name : result.FullName;
-
-        static bool HasChildResults(ITestResultAdaptor result)
-        {
-            if (result.Children == null)
-                return false;
-
-            foreach (var _ in result.Children)
-                return true;
-
-            return false;
-        }
-
-        static void RemoveActiveTestScope(string label)
-        {
-            for (var index = activeTestScopes.Count - 1; index >= 0; index--)
-            {
-                if (activeTestScopes[index] != label)
-                    continue;
-
-                activeTestScopes.RemoveAt(index);
-                return;
             }
         }
 
@@ -506,6 +740,24 @@ namespace Conduit
             }
         }
 
+        static void AppendQuotedLines(StringBuilder builder, string message)
+        {
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            builder.Append("> ");
+            for (var index = 0; index < message.Length; index++)
+            {
+                var character = message[index];
+                if (character == '\r')
+                    continue;
+
+                builder.Append(character);
+                if (character == '\n' && index + 1 < message.Length)
+                    builder.Append("> ");
+            }
+        }
+
         static void AppendSectionSeparator(StringBuilder builder)
         {
             if (builder.Length == 0)
@@ -514,58 +766,103 @@ namespace Conduit
             builder.AppendLine().AppendLine();
         }
 
-        static void ResetLogCaptureStateUnderLock()
+        void ResetStateUnderLock()
         {
+            activeCommandKind = BridgeCommandKind.Unknown;
             commandLogTarget.Reset();
             testRunLogTarget.Reset();
             activeTestScopes.Clear();
-            discardCapturedLogsOnCompletion = false;
-            run_tests.ResetState();
-            foreach (var target in activeTestLogTargets.Values)
-                RecycleLogTarget(target);
-
             activeTestLogTargets.Clear();
-            foreach (var target in failedTestLogTargets)
-                RecycleLogTarget(target);
-
             failedTestLogTargets.Clear();
             capturedLogEntryIndexes.Clear();
             capturedLogEntries.Clear();
-            compilerMessageBuffer.Clear();
-            ResetTestRunCompletionState();
+            discardOnCompletion = false;
+            run_tests.ResetState();
         }
 
-        static void RecycleLogTarget(CapturedLogTarget target)
+        void RemoveActiveTestScope(string label)
         {
-            target.Reset();
-            recycledTestLogTargets.Push(target);
+            // callbacks are stack-like; preserve outer fixtures when an inner test finishes
+            for (var index = activeTestScopes.Count - 1; index >= 0; index--)
+            {
+                if (activeTestScopes[index] != label)
+                    continue;
+
+                activeTestScopes.RemoveAt(index);
+                return;
+            }
         }
 
-        sealed class TestRunCallbacks : IErrorCallbacks
+        static string GetTestLabel(ITestAdaptor test)
+            => string.IsNullOrWhiteSpace(test.FullName) ? test.Name : test.FullName;
+
+        static string GetTestLabel(ITestResultAdaptor result)
+            => string.IsNullOrWhiteSpace(result.FullName) ? result.Name : result.FullName;
+
+        static bool HasChildResults(ITestResultAdaptor result)
         {
-            public void RunStarted(ITestAdaptor testsToRun) { }
-            public void RunFinished(ITestResultAdaptor result) => HandleTestRunFinished(result);
-            public void TestStarted(ITestAdaptor test) => HandleTestStarted(test);
-            public void TestFinished(ITestResultAdaptor result) => HandleTestFinished(result);
-            public void OnError(string message) => HandleTestRunError(message);
+            if (result.Children == null)
+                return false;
+
+            foreach (var _ in result.Children)
+                return true;
+
+            return false;
         }
 
-        struct CapturedLogEntry
+        static bool IsIgnorableLogTailFrame(string frame)
+            => frame is "System.Reflection.MethodBase:Invoke"
+                or "UnityEngine.UnitySynchronizationContext:ExecuteTasks"
+                or "NUnit.Framework.Internal.MethodWrapper:Invoke"
+                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunNonAsyncTestMethod"
+                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunTestMethod"
+                or "NUnit.Framework.Internal.Commands.TestMethodCommand:Execute"
+                or "UnityEditor.EditorApplication:Internal_CallUpdateFunctions"
+                || IsExecuteCodeCompilerCallbackFrame(frame);
+
+        // these async completion frames point at the editor harness instead of the user's snippet
+        static bool IsExecuteCodeCompilerCallbackFrame(string frame)
+            => frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
+               && frame.EndsWith(":SetResult", StringComparison.Ordinal)
+               || frame.StartsWith("System.Threading.Tasks.TaskCompletionSource", StringComparison.Ordinal)
+               && frame.EndsWith(":TrySetResult", StringComparison.Ordinal)
+               || frame.StartsWith(
+                   "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling",
+                   StringComparison.Ordinal);
+
+        static bool IsCompilerDiagnosticLogMessage(string message)
+            => message.Contains("): error ", StringComparison.Ordinal)
+               || message.Contains("): warning ", StringComparison.Ordinal);
+
+        sealed class CapturedLogEntry
         {
-            public string Message;
-            public string StackTrace;
-            public int RepeatCount;
+            public CapturedLogEntry(string message, string stackTrace)
+            {
+                Message = message;
+                StackTrace = stackTrace;
+                RepeatCount = 1;
+            }
+
+            public string Message { get; }
+            public string StackTrace { get; }
+            public int RepeatCount { get; set; }
         }
 
-        struct LogSignature
+        readonly struct LogSignature
         {
-            public string Message;
-            public string StackTrace;
+            public LogSignature(string message, string stackTrace)
+            {
+                Message = message;
+                StackTrace = stackTrace;
+            }
+
+            public string Message { get; }
+            public string StackTrace { get; }
         }
 
         sealed class LogSignatureComparer : IEqualityComparer<LogSignature>
         {
-            public static LogSignatureComparer Instance { get; } = new();
+            public static readonly LogSignatureComparer Instance = new();
 
             public bool Equals(LogSignature x, LogSignature y)
                 => x.Message == y.Message && x.StackTrace == y.StackTrace;
@@ -582,6 +879,11 @@ namespace Conduit
 
         sealed class CapturedLogTarget
         {
+            public CapturedLogTarget() { }
+
+            public CapturedLogTarget(string label)
+                => Label = label;
+
             public string Label { get; private set; } = string.Empty;
             public List<int> EntryIndexes { get; } = new();
 

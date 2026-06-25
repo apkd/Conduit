@@ -1,115 +1,19 @@
 #nullable enable
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Reflection;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-using UnityEditor;
-using UnityEditor.Compilation;
 using UnityEditor.TestTools.TestRunner.Api;
-using UnityEngine;
-using UnityEngine.Serialization;
-using Assembly = System.Reflection.Assembly;
 
 namespace Conduit
 {
     static partial class ConduitToolRunner
     {
-        static readonly object stateGate = new();
-        static readonly StringBuilder compilerMessageBuffer = new();
-        static readonly CapturedLogTarget commandLogTarget = new();
-        static readonly CapturedLogTarget testRunLogTarget = new();
-        static readonly Dictionary<string, CapturedLogTarget> activeTestLogTargets = new(StringComparer.Ordinal);
-        static readonly List<CapturedLogTarget> failedTestLogTargets = new();
-        static readonly List<string> activeTestScopes = new();
-        static readonly Stack<CapturedLogTarget> recycledTestLogTargets = new();
-        static readonly Dictionary<LogSignature, int> capturedLogEntryIndexes = new(LogSignatureComparer.Instance);
-        static readonly List<CapturedLogEntry> capturedLogEntries = new();
-        internal static readonly List<PendingOperationState> queuedOperations = new();
-        const string ActiveOperationStateKey = "Conduit.ActiveOperation";
-        const string PendingResultStateKey = "Conduit.PendingResult";
-        internal const int ReimportIdleSettleUpdates = 8;
-        static readonly TestRunCallbacks testCallbacks = new();
-        static readonly TimeSpan enterPlayModeBusyWaitTimeout = TimeSpan.FromSeconds(1);
-        internal static PendingOperationState? activeOperation;
-        static PersistedPendingResultState? pendingResult;
-        internal static ParsedBridgeCommand activeCommand;
+        static readonly CommandScheduler scheduler = new();
+        internal const int ReimportIdleSettleUpdates = AssetImportMonitor.IdleSettleUpdates;
         static bool initialized;
-        static bool logCaptureHooked;
-        static bool reimportHooksInstalled;
-        static bool playModeHooksInstalled;
-        static bool reimportRefreshReturned;
-        static int reimportIdleUpdateCount;
-        static string? activeTestRunGuid;
-        static BridgeCommandResult? pendingTestRunResult;
-        static bool testRunCompletionHooksInstalled;
-        static double enterPlayModeBusyWaitDeadline;
-        static bool enterPlayModeRequested;
-        static bool exitPlayModeRequested;
-        static bool discardCapturedLogsOnCompletion;
-        static bool testCallbacksRegistered;
-        static TestRunnerApi? testRunnerApi;
-        static readonly MethodInfo? testRunnerIsRunActiveMethod = typeof(TestRunnerApi).GetMethod(
-            "IsRunActive",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        static readonly MethodInfo? testRunnerIsRunningMethod = typeof(TestRunnerApi).GetMethod(
-            "IsRunning",
-            BindingFlags.Static | BindingFlags.NonPublic,
-            null,
-            new[] { typeof(string) },
-            null);
-        static readonly PropertyInfo? testRunnerJobDataHolderProperty = typeof(TestRunnerApi).GetProperty(
-            "m_testJobDataHolder",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        static readonly MethodInfo? testJobDataHolderGetAllRunnersMethod = typeof(TestRunnerApi).Assembly
-            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobDataHolder")
-            ?.GetMethod("GetAllRunners", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        static readonly MethodInfo? testJobRunnerGetDataMethod = typeof(TestRunnerApi).Assembly
-            .GetType("UnityEditor.TestTools.TestRunner.TestRun.ITestJobRunner")
-            ?.GetMethod("GetData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        static readonly FieldInfo? testJobDataIsRunningField = typeof(TestRunnerApi).Assembly
-            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
-            ?.GetField("isRunning", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        static readonly FieldInfo? testJobDataExecutionSettingsField = typeof(TestRunnerApi).Assembly
-            .GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobData")
-            ?.GetField("executionSettings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        static readonly FieldInfo? executionSettingsHasTargetPlatformField = typeof(ExecutionSettings)
-            .GetField("m_HasTargetPlatform", BindingFlags.Instance | BindingFlags.NonPublic);
-
-        internal enum ParsedBridgeCommandKind : byte
-        {
-            Unknown,
-            Status,
-            PlayMode,
-            EditMode,
-            Screenshot,
-            GetDependencies,
-            FindReferencesTo,
-            FindMissingScripts,
-            Show,
-            Search,
-            ToJson,
-            FromJsonOverwrite,
-            SaveScenes,
-            DiscardScenes,
-            RefreshAssetDatabase,
-            ReimportAssets,
-            ExecuteCode,
-            ViewBurstAsm,
-            Reflect,
-            RunTestsEditMode,
-            RunTestsPlayMode,
-            RunTestsPlayer,
-            ProfilerRecord,
-            ProfilerOverview,
-            ProfilerBrowse,
-        }
-
-        internal struct ParsedBridgeCommand
-        {
-            public ParsedBridgeCommandKind Kind;
-        }
 
         public static void Initialize()
         {
@@ -119,490 +23,745 @@ namespace Conduit
             initialized = true;
             ConduitOpenSceneDiskChangeGuard.Initialize();
             execute_code.Initialize();
-            EnsureTestCallbacksRegistered();
+            scheduler.Initialize();
         }
 
         public static Task OnConnectedAsync()
         {
-            Initialize();
-            RestorePersistedPendingResult();
-            RestorePersistedOperation();
-            ResumeRestoredOperation();
+            scheduler.EnqueueConnected();
             return Task.CompletedTask;
         }
 
         internal static string? GetActiveCommandType()
-        {
-            lock (stateGate)
-                return activeOperation?.command_type;
-        }
+            => scheduler.ActiveCommandType;
 
-        internal static bool IsTestRunnerActive() => IsAnyTestRunActive();
+        internal static bool IsTestRunnerActive()
+            => scheduler.IsTestRunnerActive();
 
         internal static string? GetActiveTestRunMode()
-        {
-            if (TryGetActiveTestExecutionSettings() is not { } settings)
-                return null;
-
-            return GetTestExecutionMode(settings);
-        }
-
-        static ExecutionSettings? TryGetActiveTestExecutionSettings()
-        {
-            try
-            {
-                var holder = testRunnerJobDataHolderProperty?.GetValue(null);
-                if (holder == null || testJobDataHolderGetAllRunnersMethod == null)
-                    return null;
-
-                if (testJobDataHolderGetAllRunnersMethod.Invoke(holder, null) is not Array runners)
-                    return null;
-
-                foreach (var runner in runners)
-                {
-                    var data = testJobRunnerGetDataMethod?.Invoke(runner, null);
-                    if (data == null || testJobDataIsRunningField?.GetValue(data) is not true)
-                        continue;
-
-                    if (testJobDataExecutionSettingsField?.GetValue(data) is ExecutionSettings settings)
-                        return settings;
-                }
-            }
-            catch (Exception) { }
-
-            return null;
-        }
-
-        static string? GetTestExecutionMode(ExecutionSettings settings)
-        {
-            var filters = settings.filters ?? Array.Empty<Filter>();
-            var hasEditMode = false;
-            var hasPlayMode = false;
-            foreach (var filter in filters)
-            {
-                hasEditMode |= IncludesTestMode(filter.testMode, TestMode.EditMode);
-                hasPlayMode |= IncludesTestMode(filter.testMode, TestMode.PlayMode);
-            }
-
-            if (hasPlayMode)
-                return HasTargetPlatform(settings) ? "player" : "play mode";
-
-            return hasEditMode ? "edit mode" : null;
-        }
-
-        static bool IncludesTestMode(TestMode testMode, TestMode mode)
-            => (testMode & mode) == mode;
-
-        static bool HasTargetPlatform(ExecutionSettings settings)
-            => executionSettingsHasTargetPlatformField?.GetValue(settings) is true;
+            => scheduler.GetActiveTestRunMode();
 
         internal static bool HasOutstandingClientWork(int clientId)
-        {
-            if (clientId <= 0)
-                return false;
-
-            lock (stateGate)
-            {
-                if (activeOperation?.client_id == clientId)
-                    return true;
-
-                foreach (var queuedOperation in queuedOperations)
-                    if (queuedOperation.client_id == clientId)
-                        return true;
-            }
-
-            return false;
-        }
+            => scheduler.HasOutstandingClientWork(clientId);
 
         internal static bool HasReconnectableWorkForAnyClient()
-        {
-            lock (stateGate)
-            {
-                if (activeOperation?.client_id == 0)
-                    return true;
-
-                foreach (var queuedOperation in queuedOperations)
-                    if (queuedOperation.client_id == 0)
-                        return true;
-
-                return pendingResult != null;
-            }
-        }
+            => scheduler.HasReconnectableWorkForAnyClient();
 
         internal static void PumpQueuedCommands()
         {
-            PendingOperationState? pendingOperation;
-            ParsedBridgeCommand incomingCommand;
-            lock (stateGate)
-            {
-                if (activeOperation != null || queuedOperations.Count == 0)
-                    return;
-
-                pendingOperation = queuedOperations[0];
-                if (!pendingOperation.is_acknowledged)
-                    return;
-
-                queuedOperations.RemoveAt(0);
-                activeOperation = pendingOperation;
-                incomingCommand = ParseIncomingCommand(pendingOperation.command_type);
-                activeCommand = incomingCommand;
-                PersistActiveOperation(pendingOperation, incomingCommand.Kind);
-            }
-
-            _ = ExecuteAcceptedCommandAsync(pendingOperation, incomingCommand);
+            Initialize();
+            scheduler.Pump();
         }
 
         public static void HandleIncomingCommand(int clientId, BridgeMessage message)
         {
             Initialize();
-
-            if (message.command == null || message.request_id is not { Length: > 0 })
-                return;
-
-            var incomingCommand = ParseIncomingCommand(message.command.command_type);
-            if (incomingCommand.Kind == ParsedBridgeCommandKind.Status)
-            {
-                _ = AcknowledgeAndExecuteStatusAsync(clientId, message.request_id);
-                return;
-            }
-
-            PendingOperationState? pendingOperation = null;
-            PersistedPendingResultState? replayablePendingResult = null;
-            var shouldAcknowledge = false;
-            var shouldReplayPendingResult = false;
-            lock (stateGate)
-            {
-                if (IsStaleRestoredOperation(ConduitToolRunner.activeOperation, activeCommand))
-                {
-                    ConduitToolRunner.activeOperation = null;
-                    activeCommand = default;
-                    ClearPersistedActiveOperation();
-                }
-
-                replayablePendingResult = ConduitToolRunner.pendingResult;
-                if (replayablePendingResult != null)
-                {
-                    // Reconnect retries must observe the same terminal payload for the same request id.
-                    // We keep the cached result until the client moves on because pipe writes are not
-                    // an end-to-end delivery acknowledgement.
-                    if (replayablePendingResult.RequestID == message.request_id
-                        && replayablePendingResult.CommandType == message.command.command_type)
-                    {
-                        shouldReplayPendingResult = true;
-                    }
-                    else
-                    {
-                        ClearPendingResult();
-                    }
-                }
-
-                if (shouldReplayPendingResult)
-                    pendingOperation = null;
-                else if (ConduitToolRunner.activeOperation is { } activeOperation
-                         && activeOperation.request_id == message.request_id
-                         && activeOperation.command_type == message.command.command_type)
-                {
-                    activeOperation.client_id = clientId;
-                    pendingOperation = activeOperation;
-                    shouldAcknowledge = true;
-                }
-                else if (TryFindQueuedOperation(message.request_id, message.command.command_type, out pendingOperation))
-                {
-                    pendingOperation!.client_id = clientId;
-                    shouldAcknowledge = true;
-                }
-                else
-                {
-                    pendingOperation = new()
-                    {
-                        request_id = message.request_id,
-                        command_type = message.command.command_type,
-                        client_id = clientId,
-                        target = message.command.target,
-                        snippet = message.command.snippet,
-                        test_filter = message.command.test_filter,
-                        @async = message.command.@async,
-                        rebuild_cache = message.command.rebuild_cache,
-                        args = message.command.args ?? Array.Empty<string>(),
-                    };
-                    queuedOperations.Add(pendingOperation);
-                    shouldAcknowledge = true;
-                }
-            }
-
-            if (shouldReplayPendingResult && replayablePendingResult != null)
-            {
-                _ = ReplayPendingResultAsync(clientId, replayablePendingResult);
-                return;
-            }
-
-            if (shouldAcknowledge && pendingOperation != null)
-                _ = AcknowledgeQueuedCommandAsync(pendingOperation);
-        }
-
-        static async Task AcknowledgeAndExecuteStatusAsync(int clientId, string requestId)
-        {
-            if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
-                return;
-
-            await ExecuteStatusAsync(clientId, requestId);
-        }
-
-        static async Task AcknowledgeQueuedCommandAsync(PendingOperationState pendingOperation)
-        {
-            if (pendingOperation.is_acknowledged)
-            {
-                if (pendingOperation.client_id > 0)
-                    await ConduitConnection.TrySendCommandStartedAsync(pendingOperation.client_id, pendingOperation.request_id, pendingOperation.command_type);
-
-                return;
-            }
-
-            if (pendingOperation.client_id <= 0)
-                return;
-
-            if (!await ConduitConnection.TrySendCommandStartedAsync(pendingOperation.client_id, pendingOperation.request_id, pendingOperation.command_type))
-            {
-                RemoveQueuedOperation(pendingOperation);
-                return;
-            }
-
-            lock (stateGate)
-            {
-                if (ReferenceEquals(activeOperation, pendingOperation) || queuedOperations.Contains(pendingOperation))
-                    pendingOperation.is_acknowledged = true;
-            }
-
-            PumpQueuedCommands();
-        }
-
-        static async Task ExecuteAcceptedCommandAsync(PendingOperationState pendingOperation, ParsedBridgeCommand incomingCommand)
-        {
-            try
-            {
-                StartLogCapture();
-                ClearCompilerMessages();
-
-                switch (incomingCommand.Kind)
-                {
-                    case ParsedBridgeCommandKind.PlayMode:
-                    case ParsedBridgeCommandKind.EditMode:
-                        StartPlayToggle();
-                        break;
-                    case ParsedBridgeCommandKind.Screenshot:
-                        await ExecuteScreenshotAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.GetDependencies:
-                        await ExecuteGetDependenciesAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.FindReferencesTo:
-                        await ExecuteFindReferencesToAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.FindMissingScripts:
-                        await ExecuteFindMissingScriptsAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.Show:
-                        await ExecuteShowAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.Search:
-                        await ExecuteSearchAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.ToJson:
-                        await ExecuteToJsonAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.FromJsonOverwrite:
-                        await ExecuteFromJsonOverwriteAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.SaveScenes:
-                        await ExecuteSaveScenesAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.DiscardScenes:
-                        await ExecuteDiscardScenesAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.RefreshAssetDatabase:
-                    case ParsedBridgeCommandKind.ReimportAssets:
-                        StartReimport(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.ExecuteCode:
-                        await ExecuteCodeAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.ViewBurstAsm:
-                        await ExecuteViewBurstAsmAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.Reflect:
-                        await ExecuteReflectAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.RunTestsEditMode:
-                        StartTestRun(TestMode.EditMode, false, pendingOperation.test_filter, pendingOperation.@async);
-                        break;
-                    case ParsedBridgeCommandKind.RunTestsPlayMode:
-                        StartTestRun(TestMode.PlayMode, false, pendingOperation.test_filter, pendingOperation.@async);
-                        break;
-                    case ParsedBridgeCommandKind.RunTestsPlayer:
-                        StartTestRun(TestMode.PlayMode, true, pendingOperation.test_filter);
-                        break;
-                    case ParsedBridgeCommandKind.ProfilerRecord:
-                        await ExecuteProfilerRecordAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.ProfilerOverview:
-                        await ExecuteProfilerOverviewAsync(pendingOperation);
-                        break;
-                    case ParsedBridgeCommandKind.ProfilerBrowse:
-                        await ExecuteProfilerBrowseAsync(pendingOperation);
-                        break;
-                    default:
-                        await CompleteCurrentAsync(
-                            new()
-                            {
-                                outcome = ToolOutcome.Exception,
-                                diagnostic = $"Unsupported command '{pendingOperation.command_type}'.",
-                            }
-                        );
-
-                        break;
-                }
-            }
-            catch (Exception exception)
-            {
-                ConduitDiagnostics.Error($"Unhandled exception while executing '{pendingOperation.command_type}'.", exception);
-                await CompleteUnhandledCommandExceptionAsync(pendingOperation, exception);
-            }
-        }
-
-        static void RemoveQueuedOperation(PendingOperationState pendingOperation)
-        {
-            lock (stateGate)
-            {
-                var queuedOperationIndex = queuedOperations.IndexOf(pendingOperation);
-                if (queuedOperationIndex >= 0)
-                    queuedOperations.RemoveAt(queuedOperationIndex);
-            }
-
-            PumpQueuedCommands();
-        }
-
-        static async Task CompleteUnhandledCommandExceptionAsync(PendingOperationState pendingOperation, Exception exception)
-        {
-            try
-            {
-                await CompleteCurrentAsync(
-                    new()
-                    {
-                        outcome = ToolOutcome.Exception,
-                        exception = SafeToExceptionInfo(exception),
-                        diagnostic = exception.Message,
-                    }
-                );
-            }
-            catch (Exception completionException)
-            {
-                ConduitDiagnostics.Error($"Failed to report unhandled exception for '{pendingOperation.command_type}'.", completionException);
-                AbandonActiveOperation(pendingOperation);
-                RemoveReimportHooks();
-            }
-        }
-
-        static BridgeExceptionInfo SafeToExceptionInfo(Exception exception)
-        {
-            try
-            {
-                return ToExceptionInfo(exception);
-            }
-            catch (Exception formattingException)
-            {
-                ConduitDiagnostics.Error("Failed to convert command exception to bridge payload.", formattingException);
-                return new()
-                {
-                    type = exception.GetType().Name,
-                    message = exception.Message,
-                };
-            }
+            scheduler.EnqueueIncomingCommand(clientId, message);
         }
 
         internal static void HandleClientDisconnected(int clientId)
+            => scheduler.EnqueueClientDisconnected(clientId);
+
+        internal static BridgeCommandKind ParseIncomingCommand(string commandType)
+            => BridgeCommandKinds.Parse(commandType);
+
+        static Task CompleteCurrentAsync(BridgeCommandResult result)
+            => scheduler.CompleteCurrentAsync(result);
+
+        static BridgeExceptionInfo ToExceptionInfo(Exception exception)
+            => ConduitUtility.ToExceptionInfo(exception);
+
+        internal static void ClearPersistedActiveOperation()
+            => OperationPersistence.ClearActiveOperation();
+
+        internal static bool ShouldWaitForTestRunCompletion(
+            bool isTestRunnerActive,
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlaying,
+            bool isPlayingOrWillChangePlaymode)
+            => UnityTestRunMonitor.ShouldWaitForCompletion(
+                isTestRunnerActive,
+                isCompiling,
+                isUpdating,
+                isPlaying,
+                isPlayingOrWillChangePlaymode,
+                completeDespiteStuckTestRunner: false
+            );
+
+        internal static bool ShouldWaitForTestRunCompletion(
+            bool isTestRunnerActive,
+            bool isCompiling,
+            bool isUpdating,
+            bool isPlaying,
+            bool isPlayingOrWillChangePlaymode,
+            bool completeDespiteStuckTestRunner)
+            => UnityTestRunMonitor.ShouldWaitForCompletion(
+                isTestRunnerActive,
+                isCompiling,
+                isUpdating,
+                isPlaying,
+                isPlayingOrWillChangePlaymode,
+                completeDespiteStuckTestRunner
+            );
+
+        internal static bool ShouldWaitToEnterPlayMode(bool isCompiling, bool isUpdating, bool isPlayingOrWillChangePlaymode)
+            => EditorModeTransition.ShouldWaitToEnterPlayMode(isCompiling, isUpdating, isPlayingOrWillChangePlaymode);
+
+        internal static bool ShouldFailEnterPlayForCompileErrors(bool scriptCompilationFailed)
+            => EditorModeTransition.ShouldFailEnterPlayForCompileErrors(scriptCompilationFailed);
+
+        internal static string BuildEnterPlayBusyDiagnostic(bool isCompiling, bool isUpdating, bool isPlayingOrWillChangePlaymode)
+            => EditorModeTransition.BuildEnterPlayBusyDiagnostic(isCompiling, isUpdating, isPlayingOrWillChangePlaymode);
+
+        internal static string BuildEnterPlayCompileErrorDiagnostic()
+            => EditorModeTransition.BuildEnterPlayCompileErrorDiagnostic();
+
+        internal static string BuildPlayCompletionDiagnostic(bool targetPlayMode, bool changedMode, bool isPaused)
+            => EditorModeTransition.BuildCompletionDiagnostic(targetPlayMode, changedMode, isPaused);
+
+        internal static bool ShouldBlockReimportForPlayMode(bool isPlaying)
+            => AssetImportMonitor.ShouldBlockForPlayMode(isPlaying);
+
+        internal static string BuildReimportPlayModeDiagnostic(string commandType = BridgeCommandTypes.RefreshAssetDatabase)
+            => AssetImportMonitor.BuildPlayModeDiagnostic(commandType);
+
+        internal static bool ShouldWaitForReimportIdle(bool refreshReturned, bool isCompiling, bool isUpdating, int idleUpdateCount)
+            => AssetImportMonitor.ShouldWaitForIdle(refreshReturned, isCompiling, isUpdating, idleUpdateCount);
+
+        internal static string FormatReimportedAssetFilenames(string? assetPathPayload)
+            => AssetImportMonitor.FormatReimportedAssetFilenames(assetPathPayload);
+
+        internal static string BuildRestoredReimportCompileErrorDiagnostic()
+            => AssetImportMonitor.BuildRestoredCompileErrorDiagnostic();
+
+        internal static string? TrimCommonLogTail(string? simplifiedStackTrace)
+            => ToolLogCapture.TrimCommonTail(simplifiedStackTrace);
+
+        internal static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
+            => ToolLogCapture.ShouldOmitDiagnosticLogEntry(message, diagnostic);
+
+        internal static bool ShouldSuppressCapturedLogEntry(string message)
+            => ToolLogCapture.ShouldSuppressCapturedLogEntry(message);
+
+        internal static string NormalizeCapturedLogMessage(string message)
+            => ToolLogCapture.NormalizeCapturedLogMessage(message);
+
+        sealed class CommandScheduler
         {
-            var disconnectedActiveOperation = false;
+            // connection callbacks may arrive outside editor update; mutable scheduler state stays pump-owned
+            readonly ConcurrentQueue<SchedulerEvent> pendingEvents = new();
+            readonly List<PendingOperationState> queuedOperations = new();
+            readonly ToolLogCapture logCapture = new();
+            readonly EditorModeTransition editorModeTransition;
+            readonly AssetImportMonitor assetImportMonitor;
+            readonly UnityTestRunMonitor testRunMonitor;
+            // connection liveness checks need lock-free reads without touching mutable operation objects
+            ClientWorkSnapshot snapshot = ClientWorkSnapshot.Empty;
             PendingOperationState? activeOperation;
-            lock (stateGate)
+            PersistedPendingResultState? pendingResult;
+
+            public CommandScheduler()
             {
-                activeOperation = ConduitToolRunner.activeOperation;
-                if (activeOperation?.client_id == clientId)
+                editorModeTransition = new(CompleteCurrentAsync);
+                assetImportMonitor = new(CompleteCurrentAsync);
+                testRunMonitor = new(logCapture, CompleteCurrentAsync);
+                UpdateSnapshot();
+            }
+
+            public string? ActiveCommandType => Volatile.Read(ref snapshot).ActiveCommandType;
+
+            public void Initialize() => testRunMonitor.EnsureCallbacksRegistered();
+
+            public bool IsTestRunnerActive() => testRunMonitor.IsAnyTestRunActive();
+
+            public string? GetActiveTestRunMode() => testRunMonitor.GetActiveTestRunMode();
+
+            public bool HasOutstandingClientWork(int clientId)
+                => Volatile.Read(ref snapshot).HasOutstandingClientWork(clientId);
+
+            public bool HasReconnectableWorkForAnyClient()
+                => Volatile.Read(ref snapshot).HasReconnectableWorkForAnyClient();
+
+            public void EnqueueConnected()
+                => pendingEvents.Enqueue(SchedulerEvent.Connected());
+
+            public void EnqueueIncomingCommand(int clientId, BridgeMessage message)
+                => pendingEvents.Enqueue(SchedulerEvent.Command(clientId, message));
+
+            public void EnqueueClientDisconnected(int clientId)
+                => pendingEvents.Enqueue(SchedulerEvent.Disconnected(clientId));
+
+            public void Pump()
+            {
+                while (pendingEvents.TryDequeue(out var schedulerEvent))
+                    ProcessEvent(schedulerEvent);
+
+                PumpQueuedCommands();
+            }
+
+            public async Task CompleteCurrentAsync(BridgeCommandResult result)
+            {
+                var operation = activeOperation;
+                if (operation == null)
+                    return;
+
+                var commandKind = operation.kind;
+                activeOperation = null;
+                UpdateSnapshot();
+
+                result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
+                var logs = logCapture.Drain(commandKind, result.outcome, result.diagnostic, out var discardLogs);
+                result.logs = discardLogs ? string.Empty : logs;
+
+                StopOperationHooks();
+                OperationPersistence.ClearActiveOperation();
+
+                if (await ConduitConnection.TrySendResultAsync(operation.client_id, operation.request_id, result, operation.command_type))
                 {
-                    activeOperation.client_id = 0;
+                    ClearPendingResult();
+                    PumpQueuedCommands();
+                    return;
+                }
+
+                PersistPendingResult(operation.request_id, operation.command_type, result);
+                PumpQueuedCommands();
+            }
+
+            void ProcessEvent(SchedulerEvent schedulerEvent)
+            {
+                switch (schedulerEvent.Kind)
+                {
+                    case SchedulerEventKind.Connected:
+                        HandleConnected();
+                        break;
+                    case SchedulerEventKind.Command:
+                        if (schedulerEvent.Message != null)
+                            HandleCommand(schedulerEvent.ClientId, schedulerEvent.Message);
+
+                        break;
+                    case SchedulerEventKind.Disconnected:
+                        HandleClientDisconnected(schedulerEvent.ClientId);
+                        break;
+                }
+            }
+
+            void HandleConnected()
+            {
+                pendingResult ??= OperationPersistence.RestorePendingResult();
+                if (activeOperation != null)
+                {
+                    UpdateSnapshot();
+                    return;
+                }
+
+                if (OperationPersistence.RestoreActiveOperation() is not { } restoredOperation)
+                {
+                    UpdateSnapshot();
+                    return;
+                }
+
+                activeOperation = restoredOperation;
+                UpdateSnapshot();
+                ResumeRestoredOperation();
+            }
+
+            void HandleCommand(int clientId, BridgeMessage message)
+            {
+                if (message.command == null || message.request_id is not { Length: > 0 })
+                    return;
+
+                var commandType = message.command.command_type;
+                var incomingCommandKind = BridgeCommandKinds.Parse(commandType);
+                if (incomingCommandKind == BridgeCommandKind.Status)
+                {
+                    // status should answer immediately even when a long-running editor operation is active
+                    _ = AcknowledgeAndExecuteStatusAsync(clientId, message.request_id);
+                    return;
+                }
+
+                ClearStaleRestoredOperation();
+
+                if (TryReplayPendingResult(clientId, message.request_id, commandType))
+                    return;
+
+                var pendingOperation = FindOrCreateOperation(clientId, message, incomingCommandKind);
+                _ = AcknowledgeQueuedCommandAsync(pendingOperation);
+                UpdateSnapshot();
+            }
+
+            void ClearStaleRestoredOperation()
+            {
+                if (!OperationPersistence.IsStaleRestoredOperation(
+                        activeOperation,
+                        activeOperation?.kind ?? BridgeCommandKind.Unknown,
+                        pendingResult != null,
+                        testRunMonitor.IsAnyTestRunActive()
+                    ))
+                    return;
+
+                activeOperation = null;
+                StopOperationHooks();
+                OperationPersistence.ClearActiveOperation();
+                UpdateSnapshot();
+            }
+
+            bool TryReplayPendingResult(int clientId, string requestId, string commandType)
+            {
+                var replayablePendingResult = pendingResult;
+                if (replayablePendingResult == null)
+                    return false;
+
+                // completed side effects stay replayable until the client asks for a different request
+                if (replayablePendingResult.RequestID == requestId
+                    && replayablePendingResult.CommandType == commandType)
+                {
+                    _ = ReplayPendingResultAsync(clientId, replayablePendingResult);
+                    return true;
+                }
+
+                ClearPendingResult();
+                return false;
+            }
+
+            PendingOperationState FindOrCreateOperation(int clientId, BridgeMessage message, BridgeCommandKind commandKind)
+            {
+                var command = message.command!;
+                // reconnects reclaim queued or active work by sending the same request id
+                if (activeOperation is { } active
+                    && active.request_id == message.request_id
+                    && active.command_type == command.command_type)
+                {
+                    active.client_id = clientId;
+                    return active;
+                }
+
+                if (TryFindQueuedOperation(message.request_id!, command.command_type, out var queuedOperation))
+                {
+                    queuedOperation!.client_id = clientId;
+                    return queuedOperation;
+                }
+
+                var operation = new PendingOperationState
+                {
+                    request_id = message.request_id!,
+                    command_type = command.command_type,
+                    kind = commandKind,
+                    client_id = clientId,
+                    target = command.target,
+                    snippet = command.snippet,
+                    test_filter = command.test_filter,
+                    @async = command.@async,
+                    rebuild_cache = command.rebuild_cache,
+                    args = command.args ?? Array.Empty<string>(),
+                };
+                queuedOperations.Add(operation);
+                return operation;
+            }
+
+            async Task AcknowledgeAndExecuteStatusAsync(int clientId, string requestId)
+            {
+                if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
+                    return;
+
+                await ExecuteStatusAsync(clientId, requestId);
+            }
+
+            async Task AcknowledgeQueuedCommandAsync(PendingOperationState operation)
+            {
+                if (operation.is_acknowledged)
+                {
+                    if (operation.client_id > 0)
+                        await ConduitConnection.TrySendCommandStartedAsync(operation.client_id, operation.request_id, operation.command_type);
+
+                    return;
+                }
+
+                if (operation.client_id <= 0)
+                    return;
+
+                if (!await ConduitConnection.TrySendCommandStartedAsync(operation.client_id, operation.request_id, operation.command_type))
+                {
+                    RemoveQueuedOperation(operation);
+                    return;
+                }
+
+                // the send crosses async boundaries; the operation may have completed or been dropped
+                if (ReferenceEquals(activeOperation, operation) || queuedOperations.Contains(operation))
+                {
+                    operation.is_acknowledged = true;
+                    UpdateSnapshot();
+                }
+
+                PumpQueuedCommands();
+            }
+
+            void PumpQueuedCommands()
+            {
+                if (activeOperation != null || queuedOperations.Count == 0)
+                    return;
+
+                var operation = queuedOperations[0];
+                if (!operation.is_acknowledged)
+                    return;
+
+                queuedOperations.RemoveAt(0);
+                activeOperation = operation;
+                operation.kind = BridgeCommandKinds.Parse(operation.command_type);
+                // persist before side effects so domain reloads can resume editor-owned work
+                OperationPersistence.SaveActiveOperation(operation, operation.kind);
+                UpdateSnapshot();
+                _ = ExecuteAcceptedCommandAsync(operation, operation.kind);
+            }
+
+            async Task ExecuteAcceptedCommandAsync(PendingOperationState operation, BridgeCommandKind commandKind)
+            {
+                try
+                {
+                    logCapture.Start(commandKind);
+                    assetImportMonitor.ClearCompilerMessages();
+
+                    switch (commandKind)
+                    {
+                        case BridgeCommandKind.PlayMode:
+                        case BridgeCommandKind.EditMode:
+                            editorModeTransition.Start(commandKind, operation.is_restored);
+                            break;
+                        case BridgeCommandKind.Screenshot:
+                            await ExecuteScreenshotAsync(operation);
+                            break;
+                        case BridgeCommandKind.GetDependencies:
+                            await ExecuteGetDependenciesAsync(operation);
+                            break;
+                        case BridgeCommandKind.FindReferencesTo:
+                            await ExecuteFindReferencesToAsync(operation);
+                            break;
+                        case BridgeCommandKind.FindMissingScripts:
+                            await ExecuteFindMissingScriptsAsync(operation);
+                            break;
+                        case BridgeCommandKind.Show:
+                            await ExecuteShowAsync(operation);
+                            break;
+                        case BridgeCommandKind.Search:
+                            await ExecuteSearchAsync(operation);
+                            break;
+                        case BridgeCommandKind.ToJson:
+                            await ExecuteToJsonAsync(operation);
+                            break;
+                        case BridgeCommandKind.FromJsonOverwrite:
+                            await ExecuteFromJsonOverwriteAsync(operation);
+                            break;
+                        case BridgeCommandKind.SaveScenes:
+                            await ExecuteSaveScenesAsync(operation);
+                            break;
+                        case BridgeCommandKind.DiscardScenes:
+                            await ExecuteDiscardScenesAsync(operation);
+                            break;
+                        case BridgeCommandKind.RefreshAssetDatabase:
+                        case BridgeCommandKind.ReimportAssets:
+                            assetImportMonitor.Start(operation, commandKind);
+                            break;
+                        case BridgeCommandKind.ExecuteCode:
+                            await ExecuteCodeAsync(operation);
+                            break;
+                        case BridgeCommandKind.ViewBurstAsm:
+                            await ExecuteViewBurstAsmAsync(operation);
+                            break;
+                        case BridgeCommandKind.Reflect:
+                            await ExecuteReflectAsync(operation);
+                            break;
+                        case BridgeCommandKind.RunTestsEditMode:
+                            testRunMonitor.Start(operation, commandKind, TestMode.EditMode, playerRun: false);
+                            break;
+                        case BridgeCommandKind.RunTestsPlayMode:
+                            testRunMonitor.Start(operation, commandKind, TestMode.PlayMode, playerRun: false);
+                            break;
+                        case BridgeCommandKind.RunTestsPlayer:
+                            testRunMonitor.Start(operation, commandKind, TestMode.PlayMode, playerRun: true);
+                            break;
+                        case BridgeCommandKind.ProfilerRecord:
+                            await ExecuteProfilerRecordAsync(operation);
+                            break;
+                        case BridgeCommandKind.ProfilerOverview:
+                            await ExecuteProfilerOverviewAsync(operation);
+                            break;
+                        case BridgeCommandKind.ProfilerBrowse:
+                            await ExecuteProfilerBrowseAsync(operation);
+                            break;
+                        default:
+                            await CompleteCurrentAsync(
+                                new()
+                                {
+                                    outcome = ToolOutcome.Exception,
+                                    diagnostic = $"Unsupported command '{operation.command_type}'.",
+                                }
+                            );
+
+                            break;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    ConduitDiagnostics.Error($"Unhandled exception while executing '{operation.command_type}'.", exception);
+                    await CompleteUnhandledCommandExceptionAsync(operation, exception);
+                }
+            }
+
+            void ResumeRestoredOperation()
+            {
+                if (activeOperation is not { is_restored: true } operation)
+                    return;
+
+                // recovery observes editor-owned work already in progress instead of re-running side effects
+                switch (operation.kind)
+                {
+                    case BridgeCommandKind.PlayMode:
+                    case BridgeCommandKind.EditMode:
+                        logCapture.Start(operation.kind);
+                        editorModeTransition.Start(operation.kind, restoredOperation: true);
+                        break;
+                    case BridgeCommandKind.RefreshAssetDatabase:
+                    case BridgeCommandKind.ReimportAssets:
+                        logCapture.Start(operation.kind);
+                        assetImportMonitor.ResumeRestored(operation, operation.kind);
+                        break;
+                    case BridgeCommandKind.RunTestsEditMode:
+                    case BridgeCommandKind.RunTestsPlayMode:
+                    case BridgeCommandKind.RunTestsPlayer:
+                        logCapture.Start(operation.kind);
+                        testRunMonitor.ResumeRestored(operation.kind);
+                        break;
+                }
+            }
+
+            void RemoveQueuedOperation(PendingOperationState operation)
+            {
+                var queuedOperationIndex = queuedOperations.IndexOf(operation);
+                if (queuedOperationIndex >= 0)
+                    queuedOperations.RemoveAt(queuedOperationIndex);
+
+                UpdateSnapshot();
+                PumpQueuedCommands();
+            }
+
+            async Task CompleteUnhandledCommandExceptionAsync(PendingOperationState operation, Exception exception)
+            {
+                try
+                {
+                    await CompleteCurrentAsync(
+                        new()
+                        {
+                            outcome = ToolOutcome.Exception,
+                            exception = SafeToExceptionInfo(exception),
+                            diagnostic = exception.Message,
+                        }
+                    );
+                }
+                catch (Exception completionException)
+                {
+                    ConduitDiagnostics.Error($"Failed to report unhandled exception for '{operation.command_type}'.", completionException);
+                    AbandonActiveOperation(operation);
+                }
+            }
+
+            void HandleClientDisconnected(int clientId)
+            {
+                var disconnectedActiveOperation = false;
+                var operation = activeOperation;
+                // zero marks reconnectable work without retaining a stale connection id
+                if (operation?.client_id == clientId)
+                {
+                    operation.client_id = 0;
                     disconnectedActiveOperation = true;
                 }
 
                 foreach (var queuedOperation in queuedOperations)
                     if (queuedOperation.client_id == clientId)
                         queuedOperation.client_id = 0;
+
+                UpdateSnapshot();
+
+                if (disconnectedActiveOperation && operation != null)
+                    ConduitDiagnostics.Warn($"MCP client disconnected while '{operation.command_type}' was still active. Waiting for the same request id to reconnect.");
             }
 
-            if (disconnectedActiveOperation && activeOperation != null)
-                ConduitDiagnostics.Warn($"MCP client disconnected while '{activeOperation.command_type}' was still active. Waiting for the same request id to reconnect.");
-        }
-
-        static bool TryFindQueuedOperation(string requestId, string commandType, out PendingOperationState? operation)
-        {
-            foreach (var queuedOperation in queuedOperations)
+            bool TryFindQueuedOperation(string requestId, string commandType, out PendingOperationState? operation)
             {
-                if (queuedOperation.request_id != requestId || queuedOperation.command_type != commandType)
-                    continue;
+                foreach (var queuedOperation in queuedOperations)
+                {
+                    if (queuedOperation.request_id != requestId || queuedOperation.command_type != commandType)
+                        continue;
 
-                operation = queuedOperation;
-                return true;
+                    operation = queuedOperation;
+                    return true;
+                }
+
+                operation = null;
+                return false;
             }
 
-            operation = null;
-            return false;
-        }
-
-        static void AbandonActiveOperation(PendingOperationState pendingOperation)
-        {
-            lock (stateGate)
+            void AbandonActiveOperation(PendingOperationState operation)
             {
-                if (!ReferenceEquals(activeOperation, pendingOperation))
+                if (!ReferenceEquals(activeOperation, operation))
                     return;
 
                 activeOperation = null;
-                activeCommand = default;
+                StopOperationHooks();
+                OperationPersistence.ClearActiveOperation();
+                UpdateSnapshot();
+                PumpQueuedCommands();
             }
 
-            RemovePlayModeHooks();
-            RemoveTestRunCompletionHooks();
-            ResetTestRunCompletionState();
-            ClearPersistedActiveOperation();
-            PumpQueuedCommands();
+            void StopOperationHooks()
+            {
+                editorModeTransition.Stop();
+                assetImportMonitor.Stop();
+                testRunMonitor.Stop();
+            }
+
+            BridgeExceptionInfo SafeToExceptionInfo(Exception exception)
+            {
+                try
+                {
+                    return ToExceptionInfo(exception);
+                }
+                catch (Exception formattingException)
+                {
+                    ConduitDiagnostics.Error("Failed to convert command exception to bridge payload.", formattingException);
+                    return new()
+                    {
+                        type = exception.GetType().Name,
+                        message = exception.Message,
+                    };
+                }
+            }
+
+            void PersistPendingResult(string requestId, string commandType, BridgeCommandResult result)
+            {
+                pendingResult = new()
+                {
+                    RequestID = requestId,
+                    CommandType = commandType,
+                    Result = result,
+                };
+                OperationPersistence.SavePendingResult(pendingResult);
+                UpdateSnapshot();
+            }
+
+            void ClearPendingResult()
+            {
+                pendingResult = null;
+                OperationPersistence.ClearPendingResult();
+                UpdateSnapshot();
+            }
+
+            static async Task ReplayPendingResultAsync(int clientId, PersistedPendingResultState pendingResult)
+            {
+                // the protocol has no result-consumed ack; reconnects may need this payload again
+                await ConduitConnection.TrySendResultAsync(
+                    clientId,
+                    pendingResult.RequestID,
+                    pendingResult.Result,
+                    pendingResult.CommandType
+                );
+            }
+
+            void UpdateSnapshot()
+                => Volatile.Write(ref snapshot, ClientWorkSnapshot.Create(activeOperation, queuedOperations, pendingResult != null));
         }
 
-        internal static ParsedBridgeCommand ParseIncomingCommand(string commandType)
-            => commandType switch
-            {
-                BridgeCommandTypes.Status               => new() { Kind = ParsedBridgeCommandKind.Status },
-                BridgeCommandTypes.PlayMode             => new() { Kind = ParsedBridgeCommandKind.PlayMode },
-                BridgeCommandTypes.EditMode             => new() { Kind = ParsedBridgeCommandKind.EditMode },
-                BridgeCommandTypes.Screenshot           => new() { Kind = ParsedBridgeCommandKind.Screenshot },
-                BridgeCommandTypes.GetDependencies      => new() { Kind = ParsedBridgeCommandKind.GetDependencies },
-                BridgeCommandTypes.FindReferencesTo     => new() { Kind = ParsedBridgeCommandKind.FindReferencesTo },
-                BridgeCommandTypes.FindMissingScripts   => new() { Kind = ParsedBridgeCommandKind.FindMissingScripts },
-                BridgeCommandTypes.Show                 => new() { Kind = ParsedBridgeCommandKind.Show },
-                BridgeCommandTypes.Search               => new() { Kind = ParsedBridgeCommandKind.Search },
-                BridgeCommandTypes.ToJson               => new() { Kind = ParsedBridgeCommandKind.ToJson },
-                BridgeCommandTypes.FromJsonOverwrite    => new() { Kind = ParsedBridgeCommandKind.FromJsonOverwrite },
-                BridgeCommandTypes.SaveScenes           => new() { Kind = ParsedBridgeCommandKind.SaveScenes },
-                BridgeCommandTypes.DiscardScenes        => new() { Kind = ParsedBridgeCommandKind.DiscardScenes },
-                BridgeCommandTypes.RefreshAssetDatabase => new() { Kind = ParsedBridgeCommandKind.RefreshAssetDatabase },
-                BridgeCommandTypes.ReimportAssets       => new() { Kind = ParsedBridgeCommandKind.ReimportAssets },
-                BridgeCommandTypes.ExecuteCode          => new() { Kind = ParsedBridgeCommandKind.ExecuteCode },
-                BridgeCommandTypes.ViewBurstAsm         => new() { Kind = ParsedBridgeCommandKind.ViewBurstAsm },
-                BridgeCommandTypes.Reflect              => new() { Kind = ParsedBridgeCommandKind.Reflect },
-                BridgeCommandTypes.RunTestsEditMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsEditMode },
-                BridgeCommandTypes.RunTestsPlayMode     => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayMode },
-                BridgeCommandTypes.RunTestsPlayer       => new() { Kind = ParsedBridgeCommandKind.RunTestsPlayer },
-                BridgeCommandTypes.ProfilerRecord       => new() { Kind = ParsedBridgeCommandKind.ProfilerRecord },
-                BridgeCommandTypes.ProfilerOverview     => new() { Kind = ParsedBridgeCommandKind.ProfilerOverview },
-                BridgeCommandTypes.ProfilerBrowse       => new() { Kind = ParsedBridgeCommandKind.ProfilerBrowse },
-                _                                       => new() { Kind = ParsedBridgeCommandKind.Unknown },
-            };
+        readonly struct SchedulerEvent
+        {
+            public readonly SchedulerEventKind Kind;
+            public readonly int ClientId;
+            public readonly BridgeMessage? Message;
 
+            SchedulerEvent(SchedulerEventKind kind, int clientId, BridgeMessage? message)
+            {
+                Kind = kind;
+                ClientId = clientId;
+                Message = message;
+            }
+
+            public static SchedulerEvent Connected()
+                => new(SchedulerEventKind.Connected, 0, null);
+
+            public static SchedulerEvent Command(int clientId, BridgeMessage message)
+                => new(SchedulerEventKind.Command, clientId, message);
+
+            public static SchedulerEvent Disconnected(int clientId)
+                => new(SchedulerEventKind.Disconnected, clientId, null);
+        }
+
+        enum SchedulerEventKind : byte
+        {
+            Connected,
+            Command,
+            Disconnected,
+        }
+    }
+
+    sealed class ClientWorkSnapshot
+    {
+        public static readonly ClientWorkSnapshot Empty = new(null, -1, Array.Empty<int>(), hasPendingResult: false);
+        readonly int activeClientId;
+        readonly int[] queuedClientIds;
+        readonly bool hasPendingResult;
+
+        ClientWorkSnapshot(string? activeCommandType, int activeClientId, int[] queuedClientIds, bool hasPendingResult)
+        {
+            ActiveCommandType = activeCommandType;
+            this.activeClientId = activeClientId;
+            this.queuedClientIds = queuedClientIds;
+            this.hasPendingResult = hasPendingResult;
+        }
+
+        public string? ActiveCommandType { get; }
+
+        public static ClientWorkSnapshot Create(
+            PendingOperationState? activeOperation,
+            List<PendingOperationState> queuedOperations,
+            bool hasPendingResult)
+        {
+            var queuedClientIds = queuedOperations.Count == 0
+                ? Array.Empty<int>()
+                : new int[queuedOperations.Count];
+            for (var index = 0; index < queuedOperations.Count; index++)
+                queuedClientIds[index] = queuedOperations[index].client_id;
+
+            return new(
+                activeOperation?.command_type,
+                activeOperation?.client_id ?? -1,
+                queuedClientIds,
+                hasPendingResult
+            );
+        }
+
+        public bool HasOutstandingClientWork(int clientId)
+        {
+            if (clientId <= 0)
+                return false;
+
+            if (activeClientId == clientId)
+                return true;
+
+            foreach (var queuedClientId in queuedClientIds)
+                if (queuedClientId == clientId)
+                    return true;
+
+            return false;
+        }
+
+        public bool HasReconnectableWorkForAnyClient()
+        {
+            if (ActiveCommandType != null && activeClientId == 0)
+                return true;
+
+            foreach (var queuedClientId in queuedClientIds)
+                if (queuedClientId == 0)
+                    return true;
+
+            return hasPendingResult;
+        }
     }
 }

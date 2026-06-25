@@ -33,6 +33,79 @@ namespace Conduit
         public const string ProfilerBrowse = "profiler_browse";
     }
 
+    enum BridgeCommandKind : byte
+    {
+        Unknown,
+        Status,
+        PlayMode,
+        EditMode,
+        Screenshot,
+        GetDependencies,
+        FindReferencesTo,
+        FindMissingScripts,
+        Show,
+        Search,
+        ToJson,
+        FromJsonOverwrite,
+        SaveScenes,
+        DiscardScenes,
+        RefreshAssetDatabase,
+        ReimportAssets,
+        ExecuteCode,
+        ViewBurstAsm,
+        Reflect,
+        RunTestsEditMode,
+        RunTestsPlayMode,
+        RunTestsPlayer,
+        ProfilerRecord,
+        ProfilerOverview,
+        ProfilerBrowse,
+    }
+
+    static class BridgeCommandKinds
+    {
+        public static BridgeCommandKind Parse(string? commandType)
+            => commandType switch
+            {
+                BridgeCommandTypes.Status               => BridgeCommandKind.Status,
+                BridgeCommandTypes.PlayMode             => BridgeCommandKind.PlayMode,
+                BridgeCommandTypes.EditMode             => BridgeCommandKind.EditMode,
+                BridgeCommandTypes.Screenshot           => BridgeCommandKind.Screenshot,
+                BridgeCommandTypes.GetDependencies      => BridgeCommandKind.GetDependencies,
+                BridgeCommandTypes.FindReferencesTo     => BridgeCommandKind.FindReferencesTo,
+                BridgeCommandTypes.FindMissingScripts   => BridgeCommandKind.FindMissingScripts,
+                BridgeCommandTypes.Show                 => BridgeCommandKind.Show,
+                BridgeCommandTypes.Search               => BridgeCommandKind.Search,
+                BridgeCommandTypes.ToJson               => BridgeCommandKind.ToJson,
+                BridgeCommandTypes.FromJsonOverwrite    => BridgeCommandKind.FromJsonOverwrite,
+                BridgeCommandTypes.SaveScenes           => BridgeCommandKind.SaveScenes,
+                BridgeCommandTypes.DiscardScenes        => BridgeCommandKind.DiscardScenes,
+                BridgeCommandTypes.RefreshAssetDatabase => BridgeCommandKind.RefreshAssetDatabase,
+                BridgeCommandTypes.ReimportAssets       => BridgeCommandKind.ReimportAssets,
+                BridgeCommandTypes.ExecuteCode          => BridgeCommandKind.ExecuteCode,
+                BridgeCommandTypes.ViewBurstAsm         => BridgeCommandKind.ViewBurstAsm,
+                BridgeCommandTypes.Reflect              => BridgeCommandKind.Reflect,
+                BridgeCommandTypes.RunTestsEditMode     => BridgeCommandKind.RunTestsEditMode,
+                BridgeCommandTypes.RunTestsPlayMode     => BridgeCommandKind.RunTestsPlayMode,
+                BridgeCommandTypes.RunTestsPlayer       => BridgeCommandKind.RunTestsPlayer,
+                BridgeCommandTypes.ProfilerRecord       => BridgeCommandKind.ProfilerRecord,
+                BridgeCommandTypes.ProfilerOverview     => BridgeCommandKind.ProfilerOverview,
+                BridgeCommandTypes.ProfilerBrowse       => BridgeCommandKind.ProfilerBrowse,
+                _                                       => BridgeCommandKind.Unknown,
+            };
+
+        public static bool IsTest(BridgeCommandKind commandKind)
+            => commandKind is BridgeCommandKind.RunTestsEditMode
+                or BridgeCommandKind.RunTestsPlayMode
+                or BridgeCommandKind.RunTestsPlayer;
+
+        public static bool IsAssetImport(BridgeCommandKind commandKind)
+            => commandKind is BridgeCommandKind.RefreshAssetDatabase or BridgeCommandKind.ReimportAssets;
+
+        public static bool IsEditorMode(BridgeCommandKind commandKind)
+            => commandKind is BridgeCommandKind.PlayMode or BridgeCommandKind.EditMode;
+    }
+
     static class BridgeMessageTypes
     {
         public const string Hello = "hello";
@@ -134,6 +207,7 @@ namespace Conduit
     {
         public string request_id = string.Empty;
         public string command_type = string.Empty;
+        public BridgeCommandKind kind;
         public string? target;
         public string? snippet;
         public string? test_filter;
@@ -143,6 +217,7 @@ namespace Conduit
         public int client_id;
         public bool is_acknowledged;
         public string[] args = Array.Empty<string>();
+        public string[] reimport_asset_paths = Array.Empty<string>();
     }
 
     [Serializable]
