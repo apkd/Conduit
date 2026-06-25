@@ -2501,11 +2501,53 @@ public sealed class ConduitMcpToolsTests
             output,
             Does.Contain(
                 "IJobParallelForExtensions+ParallelForJobStruct<PhysicsCharacterUpdateJobExtensions+DirectWrapper<CapsuleCollisionSolver+FinalizeSlide>>" +
-                "::Execute(PhysicsCharacterUpdateJobExtensions+DirectWrapper<CapsuleCollisionSolver+FinalizeSlide>&|int)"));
+                "::Execute(ref PhysicsCharacterUpdateJobExtensions+DirectWrapper<CapsuleCollisionSolver+FinalizeSlide>, int)"));
         Assert.That(output, Does.Not.Contain("Version="));
         Assert.That(output, Does.Not.Contain("PublicKeyToken"));
         Assert.That(output, Does.Not.Contain("Unity.Mathematics."));
+        Assert.That(output, Does.Not.Contain("&|"));
         Assert.That(output, Does.Not.Contain(hash));
+    }
+
+    [Test]
+    public void LogCapture_FormatsBurstRawParameterSignatures()
+    {
+        const string gameAssembly = "Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string coreAssembly = "UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string mscorlib = "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089";
+
+        Assert.That(
+            ConduitToolRunner.NormalizeCapturedLogMessage(
+                "Burst error BC1000: While compiling job:\n" +
+                $"Example.Job::Execute(System.Int32&, {mscorlib}|System.Single&, {mscorlib}|System.Boolean, {mscorlib})"),
+            Does.Contain("Job::Execute(ref int, ref float, bool)"));
+
+        Assert.That(
+            ConduitToolRunner.NormalizeCapturedLogMessage(
+                "Burst error BC1001: While compiling job:\n" +
+                "Unity.Jobs.IJobExtensions+JobStruct`1" +
+                $"[[Foo.Namespace.MyJob, {gameAssembly}]], {coreAssembly}" +
+                "::Execute(" +
+                "Foo.Namespace.NativeBox`1" +
+                $"[[Foo.Namespace.MyValue, {gameAssembly}]], {gameAssembly}&, {gameAssembly}" +
+                $"|System.Int32, {mscorlib})"),
+            Does.Contain("IJobExtensions+JobStruct<MyJob>::Execute(ref NativeBox<MyValue>, int)"));
+
+        Assert.That(
+            ConduitToolRunner.NormalizeCapturedLogMessage(
+                "Burst error BC1002: While compiling job:\n" +
+                "Example.Runner::Execute(Outer<Inner<int,float>>&|Unity.Mathematics.float3|System.IntPtr)"),
+            Does.Contain("Runner::Execute(ref Outer<Inner<int,float>>, float3, nint)"));
+
+        Assert.That(
+            ConduitToolRunner.NormalizeCapturedLogMessage(
+                "Burst error BC1003: While compiling job:\n" +
+                "First.Call(System.Int32&|System.Boolean) then Second.Call(Unity.Mathematics.bool3&|System.UInt64)"),
+            Does.Contain("Call(ref int, bool) then Call(ref bool3, ulong)"));
+
+        Assert.That(
+            ConduitToolRunner.NormalizeCapturedLogMessage("Burst error BC1004: message contains (left|right) as text"),
+            Does.Contain("message contains (left|right) as text"));
     }
 
     [Test]
