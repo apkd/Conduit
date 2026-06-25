@@ -76,10 +76,26 @@ EDITOR_URL="$( \
   | grep -oE "https?://(download\.unity3d\.com/download_unity|beta\.unity3d\.com/download)/[^\"']+/LinuxEditorInstaller/Unity-${UNITY_VERSION}\.tar\.xz" \
   | head -n1 \
 )"
+REV=""
+if [ -z "$EDITOR_URL" ]; then
+  ARCHIVE_HTML="/tmp/unity_archive.html"
+  axel -q -o "$ARCHIVE_HTML" "https://unity.com/releases/editor/archive"
+  REV="$( \
+    tr '\n' ' ' < "$ARCHIVE_HTML" \
+    | grep -oE "unityhub://${UNITY_VERSION}/[0-9a-f]+" \
+    | head -n1 \
+    | sed -nE 's#^unityhub://[^/]+/([0-9a-f]+)$#\1#p' \
+  )"
+  test -n "$REV"
+  EDITOR_URL="https://download.unity3d.com/download_unity/${REV}/LinuxEditorInstaller/Unity-${UNITY_VERSION}.tar.xz"
+  rm -f "$ARCHIVE_HTML"
+fi
 test -n "$EDITOR_URL"
 
 # extract revision
-REV="$(printf '%s' "$EDITOR_URL" | sed -nE 's#.*/(download_unity|download)/([^/]+)/.*#\2#p')"
+if [ -z "$REV" ]; then
+  REV="$(printf '%s' "$EDITOR_URL" | sed -nE 's#.*/(download_unity|download)/([^/]+)/.*#\2#p')"
+fi
 test -n "$REV"
 echo "Downloading: $EDITOR_URL (revision: $REV)"
 
