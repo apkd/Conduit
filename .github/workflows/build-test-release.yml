@@ -363,6 +363,7 @@ jobs:
           echo "Docker image size: ${size_mib} MiB"
 
           docker run --rm \
+            --shm-size=8g \
             -e CONDUIT_SERVER_EXECUTABLE=/ConduitServer/conduit-linux-x64 \
             -v "$GITHUB_WORKSPACE/Conduit.Unity:$PROJECT/Packages/dev.tryfinally.conduit" \
             -v "$GITHUB_WORKSPACE:${{ env.REPO_ROOT }}" \
