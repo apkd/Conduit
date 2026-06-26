@@ -146,6 +146,123 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ConduitSearch_SearchReturnsSingleObjectAndThrowsForNoMatches()
+    {
+        var material = AssetDatabase.LoadAssetAtPath<Material>(MaterialAsset);
+        Assert.That(material, Is.Not.Null);
+
+        var resolved = ConduitSearch.Search(MaterialAsset);
+        var exception = Assert.Throws<InvalidOperationException>(() => ConduitSearch.Search("ConduitMissingSearchTarget"));
+
+        Assert.That(resolved, Is.EqualTo(material));
+        Assert.That(exception!.Message, Does.Contain("No matches for 'ConduitMissingSearchTarget'."));
+    }
+
+    [Test]
+    public void ConduitSearch_SearchThrowsAmbiguityWithCandidates()
+    {
+        var objectName = "ConduitSearchAmbiguous_" + Guid.NewGuid().ToString("N");
+        var first = new GameObject(objectName);
+        var second = new GameObject(objectName);
+        try
+        {
+            var exception = Assert.Throws<InvalidOperationException>(() => ConduitSearch.Search("/" + objectName));
+
+            Assert.That(exception!.Message, Does.Contain("Multiple objects match your query."));
+            Assert.That(exception.Message, Does.Contain(objectName));
+            Assert.That(exception.Message, Does.Contain(ConduitUtility.FormatObjectId(first)));
+            Assert.That(exception.Message, Does.Contain(ConduitUtility.FormatObjectId(second)));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(first);
+            UnityEngine.Object.DestroyImmediate(second);
+        }
+    }
+
+    [Test]
+    public void ConduitSearch_SearchManyReturnsEmptyArrayForNoMatches()
+    {
+        var matches = ConduitSearch.SearchMany<Material>("ConduitMissingMaterialSearchTarget");
+
+        Assert.That(matches, Is.Empty);
+        Assert.That(matches, Is.SameAs(Array.Empty<Material>()));
+    }
+
+    [Test]
+    public void ConduitSearch_SearchManyUsesAllResultsQuery()
+    {
+        var objectName = "ConduitSearchMany_" + Guid.NewGuid().ToString("N");
+        var objects = new List<GameObject>();
+        try
+        {
+            for (var index = 0; index < 30; index++)
+                objects.Add(new GameObject(objectName));
+
+            var matches = ConduitSearch.SearchMany("/" + objectName);
+
+            Assert.That(matches.Length, Is.GreaterThanOrEqualTo(objects.Count));
+            foreach (var gameObject in objects)
+                Assert.That(matches, Does.Contain(gameObject));
+        }
+        finally
+        {
+            foreach (var gameObject in objects)
+                if (gameObject != null)
+                    UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void ConduitSearch_GenericSearchAddsTypeFilter()
+    {
+        var camera = ConduitSearch.Search<Camera>("Main Camera");
+        var incompatibleMatches = ConduitSearch.SearchMany<Camera>("Main Camera t:Light");
+
+        Assert.That(camera, Is.EqualTo(Camera.main));
+        Assert.That(incompatibleMatches, Is.Empty);
+    }
+
+    [Test]
+    public void ConduitSearch_GenericExactAssetPathSearchReturnsTypedAsset()
+    {
+        var material = ConduitSearch.Search<Material>(MaterialAsset);
+
+        Assert.That(material, Is.EqualTo(AssetDatabase.LoadAssetAtPath<Material>(MaterialAsset)));
+    }
+
+    [Test]
+    public void ConduitSearch_GenericExactHierarchySearchReturnsComponent()
+    {
+        var camera = ConduitSearch.Search<Camera>("/Main Camera");
+
+        Assert.That(camera, Is.EqualTo(Camera.main));
+    }
+
+    [Test]
+    public void ConduitSearch_GenericSearchExpandsMultipleComponents()
+    {
+        var objectName = "ConduitSearchComponents_" + Guid.NewGuid().ToString("N");
+        var gameObject = new GameObject(objectName);
+        var first = gameObject.AddComponent<BoxCollider>();
+        var second = gameObject.AddComponent<BoxCollider>();
+        try
+        {
+            var matches = ConduitSearch.SearchMany<BoxCollider>("/" + objectName);
+            var exception = Assert.Throws<InvalidOperationException>(() => ConduitSearch.Search<BoxCollider>("/" + objectName));
+
+            Assert.That(matches, Is.EqualTo(new[] { first, second }));
+            Assert.That(exception!.Message, Does.Contain("Multiple objects match your query."));
+            Assert.That(exception.Message, Does.Contain(ConduitUtility.FormatObjectId(first)));
+            Assert.That(exception.Message, Does.Contain(ConduitUtility.FormatObjectId(second)));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
     public void ReimportAssetFilenames_FormatOmitsAssetPaths()
     {
         var output = ConduitToolRunner.FormatReimportedAssetFilenames(
@@ -1776,6 +1893,30 @@ public sealed class ConduitMcpToolsTests
         )!;
 
         Assert.That(CountOccurrences(generatedSource, "using System.Reflection;"), Is.EqualTo(1), generatedSource);
+    }
+
+    [Test]
+    public void ExecuteCode_BuildSnippetSource_ImportsConduitSearchMembers()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse("return Search<Material>(\"JsonOverwriteMaterial\").name;");
+        var buildSnippetSource = typeof(execute_code).GetMethod(
+            "BuildSnippetSource",
+            BindingFlags.Static | BindingFlags.NonPublic
+        );
+        Assert.That(buildSnippetSource, Is.Not.Null);
+
+        var generatedSource = (string)buildSnippetSource!.Invoke(
+            null,
+            new object?[]
+            {
+                "SnippetHost_Test",
+                "1.cs",
+                parsedSnippet,
+                Array.Empty<string>(),
+            }
+        )!;
+
+        Assert.That(CountOccurrences(generatedSource, "using static Conduit.ConduitSearch;"), Is.EqualTo(1), generatedSource);
     }
 
     [Test]

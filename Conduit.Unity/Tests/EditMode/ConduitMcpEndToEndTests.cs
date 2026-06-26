@@ -508,6 +508,23 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_ImportsConduitSearchHelpers()
+    {
+        const string snippet = "return Search<Camera>(\"Main Camera\").name;";
+
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        AssertSuccessful(result, "Main Camera");
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_CoversSuccessCacheRuntimeFailureAndCompileFailure()
     {
         var runtimeTogglePath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCode_{Guid.NewGuid():N}.flag");

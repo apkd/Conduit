@@ -36,6 +36,7 @@ namespace Conduit
             "using System.Threading.Tasks;",
             "using UnityEditor;",
             "using UnityEngine;",
+            "using static Conduit.ConduitSearch;",
         };
 
         public static async Task<BridgeCommandResult> ExecuteAsync(PendingOperationState operation)
@@ -373,6 +374,8 @@ namespace Conduit
             emittedUsingDirectives.Add("using UnityEditor;");
             builder.AppendLine("using UnityEngine;");
             emittedUsingDirectives.Add("using UnityEngine;");
+            builder.AppendLine("using static Conduit.ConduitSearch;");
+            emittedUsingDirectives.Add("using static Conduit.ConduitSearch;");
             if (inferredNamespaces is { Count: > 0 })
             {
                 foreach (var inferredNamespace in inferredNamespaces)

@@ -17,6 +17,10 @@ static class HelpTool
                 - exact hierarchy path: `/Root GameObject/Child (1)` for a scene object
                 - list project NUnit tests: `t:test`, `t:test editmode`, ``t:test SomeModule`
 
+                Inside `execute_code`, use `Search<T>("query")` and `SearchMany<T>("query")` for typed object lookup.
+                These helpers use the same query rules, filter for `T`, and return typed objects or components.
+                `Search<T>` resolves one specific object; `SearchMany<T>` returns an array.
+
                 If none of the above match, the Unity Search query engine is used, supporting the following formats:
 
                 **Hierarchy (`h:`) filters:**

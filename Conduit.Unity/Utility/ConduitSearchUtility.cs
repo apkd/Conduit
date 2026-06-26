@@ -40,28 +40,61 @@ namespace Conduit
         };
 
         public static List<ResolvedObjectMatch> Resolve(string query, int maxResults = MaxResults)
+            => Resolve(query, maxResults, includeAllSearchResults: false);
+
+        internal static List<ResolvedObjectMatch> ResolveAll(string query)
+            => Resolve(query, int.MaxValue, includeAllSearchResults: true);
+
+        static List<ResolvedObjectMatch> Resolve(string query, int maxResults, bool includeAllSearchResults)
         {
             var normalizedQuery = query?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(normalizedQuery))
                 return new();
 
+            if (TryResolveDirect(normalizedQuery, maxResults, out var directMatches))
+                return directMatches;
+
+            return SearchByQuery(normalizedQuery, maxResults, includeAllSearchResults);
+        }
+
+        internal static bool TryResolveDirect(string query, int maxResults, out List<ResolvedObjectMatch> matches)
+        {
+            var normalizedQuery = query?.Trim() ?? string.Empty;
+            matches = new();
+            if (string.IsNullOrWhiteSpace(normalizedQuery))
+                return false;
+
+            // direct selectors bypass Unity Search query parsing, so exact paths and IDs keep stable meaning.
+            // ConduitSearch uses this path before adding generic type filters.
             if (IsEditorWindowQuery(normalizedQuery))
-                return ResolveEditorWindowQuery(normalizedQuery, maxResults);
+            {
+                matches = ResolveEditorWindowQuery(normalizedQuery, maxResults);
+                return true;
+            }
 
             if (TryResolveObjectId(normalizedQuery, out var objectIdMatch, out var isObjectIdQuery))
-                return new() { objectIdMatch };
+            {
+                matches = new() { objectIdMatch };
+                return true;
+            }
 
             if (isObjectIdQuery)
-                return new();
+                return true;
 
             if (TryResolveAssetPath(normalizedQuery, out var assetMatch))
-                return new() { assetMatch };
+            {
+                matches = new() { assetMatch };
+                return true;
+            }
 
-            var hierarchyMatches = ResolveHierarchyPath(normalizedQuery);
+            var hierarchyMatches = ResolveHierarchyPath(normalizedQuery, maxResults);
             if (hierarchyMatches.Count > 0)
-                return hierarchyMatches;
+            {
+                matches = hierarchyMatches;
+                return true;
+            }
 
-            return SearchByQuery(normalizedQuery, maxResults);
+            return false;
         }
 
         public static string Search(string query)
@@ -126,6 +159,17 @@ namespace Conduit
             }
 
             return builder.TrimEnd().ToString();
+        }
+
+        internal static string FormatObjects(IReadOnlyList<Object> targets, bool includeHint)
+        {
+            using var pooledMatches = ConduitUtility.GetPooledList<ResolvedObjectMatch>(out var matches);
+            // expanded component matches need the same candidate format as resolver matches.
+            foreach (var target in targets)
+                if (target != null)
+                    matches.Add(CreateMatch(target, ResolvedObjectMatchSource.SearchQuery));
+
+            return FormatMatches(matches, includeHint);
         }
 
         static bool TryResolveObjectId(string query, out ResolvedObjectMatch match, out bool isObjectIdQuery)
@@ -258,7 +302,7 @@ namespace Conduit
             return typeMatches;
         }
 
-        static List<ResolvedObjectMatch> ResolveHierarchyPath(string query)
+        static List<ResolvedObjectMatch> ResolveHierarchyPath(string query, int maxResults)
         {
             if (!LooksLikeHierarchyPath(query))
                 return new();
@@ -283,14 +327,16 @@ namespace Conduit
                 }
             }
 
-            return Deduplicate(matches, MaxResults);
+            return Deduplicate(matches, maxResults);
         }
 
-        static List<ResolvedObjectMatch> SearchByQuery(string query, int maxResults)
+        static List<ResolvedObjectMatch> SearchByQuery(string query, int maxResults, bool includeAllSearchResults)
         {
+            // Unity Search applies provider limits by default; array-returning APIs need the complete set.
+            var searchQuery = includeAllSearchResults ? AddNoResultsLimit(query) : query;
             using var context = SearchService.CreateContext(
                 SearchProviderIds,
-                query,
+                searchQuery,
                 SearchFlags.Synchronous
             );
 
@@ -311,6 +357,17 @@ namespace Conduit
             }
 
             return Deduplicate(matches, maxResults);
+        }
+
+        static string AddNoResultsLimit(string query)
+        {
+            if (query.IndexOf("+noResultsLimit", StringComparison.OrdinalIgnoreCase) >= 0)
+                return query;
+
+            // keep user-authored query text intact and append the provider directive as a separate token.
+            return string.IsNullOrWhiteSpace(query)
+                ? "+noResultsLimit"
+                : query + " +noResultsLimit";
         }
 
         internal static bool TryParseTestSearch(string query, out TestSearchCriteria criteria)
