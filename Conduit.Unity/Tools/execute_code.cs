@@ -36,6 +36,7 @@ namespace Conduit
             "using System.Threading.Tasks;",
             "using UnityEditor;",
             "using UnityEngine;",
+            "using Reflect = Conduit.ConduitReflect;",
             "using static Conduit.ConduitSearch;",
         };
 
@@ -374,6 +375,8 @@ namespace Conduit
             emittedUsingDirectives.Add("using UnityEditor;");
             builder.AppendLine("using UnityEngine;");
             emittedUsingDirectives.Add("using UnityEngine;");
+            builder.AppendLine("using Reflect = Conduit.ConduitReflect;");
+            emittedUsingDirectives.Add("using Reflect = Conduit.ConduitReflect;");
             builder.AppendLine("using static Conduit.ConduitSearch;");
             emittedUsingDirectives.Add("using static Conduit.ConduitSearch;");
             if (inferredNamespaces is { Count: > 0 })

@@ -508,9 +508,9 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
-    public async Task ExecuteCode_ImportsConduitSearchHelpers()
+    public async Task ExecuteCode_ImportsConduitHelpers()
     {
-        const string snippet = "return Search<Camera>(\"Main Camera\").name;";
+        const string snippet = "return Search<Camera>(\"Main Camera\").name + \":\" + Reflect.Type(\"UnityEngine.Camera\").Name;";
 
         var result = await client.CallToolAsync(
             BridgeCommandTypes.ExecuteCode,
@@ -520,7 +520,7 @@ public sealed class ConduitMcpEndToEndTests
             )
         );
 
-        AssertSuccessful(result, "Main Camera");
+        AssertSuccessful(result, "Main Camera:Camera");
     }
 
     [Test]

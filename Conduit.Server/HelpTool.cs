@@ -9,6 +9,8 @@ static class HelpTool
         string entity = usesEntityIds ? "entity" : "instance";
 
         return $"""
+                # Common tool search format
+
                 The same search query format is used for `search`, `show`, `to_json`, `from_json_overwrite`, and `reimport_assets`.
 
                 If you have an exact search target, you can simply specify one of these:
@@ -17,32 +19,40 @@ static class HelpTool
                 - exact hierarchy path: `/Root GameObject/Child (1)` for a scene object
                 - list project NUnit tests: `t:test`, `t:test editmode`, ``t:test SomeModule`
 
-                Inside `execute_code`, use `Search<T>("query")` and `SearchMany<T>("query")` for typed object lookup.
-                These helpers use the same query rules, filter for `T`, and return typed objects or components.
-                `Search<T>` resolves one specific object; `SearchMany<T>` returns an array.
+                # Unity Search fallback
 
-                If none of the above match, the Unity Search query engine is used, supporting the following formats:
+                If none of the above match, the Unity Search query engine is used, supporting the following formats.
 
-                **Hierarchy (`h:`) filters:**
+                ## Hierarchy (`h:`) filters
 
                 - component search: `t:Camera`, `t=MeshRenderer`
                 - property search: `Camera.Orthographic=false`, `fieldofview=60`, `p(Camera.Orthographic)=false`, `p(fieldofview)=60`
                 - numeric layer filter: `layer=0`
                 - tag filter: `tag=MainCamera`
-                - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`, `ref:Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
+                - references: `ref=Assets/HelpValidation/HelpMaterial.mat`, `ref:Assets/HelpValidation/HelpMaterial.mat`
                 - prefab state: `prefab:any`, `prefab:variant`, `prefab:root`
-                - scene-state filters: `active=true`, `components>3`, `is:child`, `is:leaf`, `is:prefab`, `is:root`, `is:static`, `path=/ConduitHelpRoot/ConduitHelpChild`, `size>1`
-                - fuzzy matching: `+fuzzy ConduitHelpCam`
+                - scene-state filters: `active=true`, `components>3`, `is:child`, `is:leaf`, `is:prefab`, `is:root`, `is:static`, `path=/HelpRoot/HelpChild`, `size>1`
+                - fuzzy matching: `+fuzzy HelpCam`
 
-                **Project (`p:`) filters:**
+                ## Project (`p:`) filters
 
                 - type: `t:material`, `t=Material`
                 - labels: `l:Weapons`
                 - search area: `a:assets`
                 - prefab state: `prefab:any`, `prefab:variant`
-                - references: `ref=Assets/ConduitHelpValidation/ConduitHelpMaterial.mat`
-                - file filters: `dir=Assets/ConduitHelpValidation`, `ext=mat`, `name=ConduitHelpMaterial`, `is:subasset`, `size>0`
+                - references: `ref=Assets/HelpValidation/HelpMaterial.mat`
+                - file filters: `dir=Assets/HelpValidation`, `ext=mat`, `name=HelpMaterial`, `is:subasset`, `size>0`
                 - `+noResultsLimit`
+
+                # `execute_code` search and reflection utilities
+
+                Inside `execute_code`, use `Search<T>("query")` and `SearchMany<T>("query")` for typed object lookup.
+                These helpers use the same query rules, filter for `T`, and return typed objects or components.
+                `Search<T>` resolves one specific object; `SearchMany<T>` returns an array.
+
+                You can also use `Reflect.Type("NativeArrayUnsafeUtility")`, `Reflect.Methods(type: "Camera")`, `Reflect.Interfaces(member: "Dispose")`,
+                `Reflect.Classes("Handler")`, `Reflect.Enum("AggressiveInlining")` etc. for easy reflection lookup with the same API as the `reflect` tool.
+                (Singular `Reflect.Method` returns exactly one MethodInfo; plural `Reflect.Methods` returns an array, and so on.)
                 """;
     }
 

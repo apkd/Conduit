@@ -567,6 +567,53 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ConduitReflect_TypeHelpersReturnTypedResults()
+    {
+        var type = ConduitReflect.Type("ConduitReflectDerivedFixture");
+        var interfaces = ConduitReflect.Interfaces("ConduitReflectInterfaceFixture");
+
+        Assert.That(type, Is.EqualTo(typeof(ConduitReflectDerivedFixture)));
+        Assert.That(interfaces, Is.EqualTo(new[] { typeof(ConduitReflectInterfaceFixture) }));
+    }
+
+    [Test]
+    public void ConduitReflect_TypeSearchCanUseMemberQuery()
+    {
+        var types = ConduitReflect.Types(member: "ReflectBaseOnlyMethod");
+
+        Assert.That(types, Has.Member(typeof(ConduitReflectBaseFixture)));
+        Assert.That(types, Has.No.Member(typeof(ConduitReflectDerivedFixture)));
+    }
+
+    [Test]
+    public void ConduitReflect_MemberHelpersReturnTypedResults()
+    {
+        var baseMethod = ConduitReflect.Method(type: "ConduitReflectDerivedFixture", member: "ReflectBaseOnlyMethod");
+        var constructors = ConduitReflect.Constructors("ConduitReflectDerivedFixture");
+
+        Assert.That(baseMethod.DeclaringType, Is.EqualTo(typeof(ConduitReflectBaseFixture)));
+        Assert.That(constructors, Has.Length.GreaterThanOrEqualTo(1));
+        Assert.That(constructors, Has.Some.Property(nameof(ConstructorInfo.DeclaringType)).EqualTo(typeof(ConduitReflectDerivedFixture)));
+    }
+
+    [Test]
+    public void ConduitReflect_FindHandlesCardinalityAndCompatibility()
+    {
+        var manyMethods = ConduitReflect.FindMany<MethodInfo>("members", type: "ConduitReflectDerivedFixture", member: "Reflect");
+        var ambiguous = Assert.Throws<InvalidOperationException>(() => ConduitReflect.Type("ConduitReflectAmbiguous"));
+        var missing = Assert.Throws<InvalidOperationException>(() => ConduitReflect.Type("DefinitelyNotAConduitReflectType"));
+        var invalidType = Assert.Throws<InvalidOperationException>(() => ConduitReflect.Find<MethodInfo>("fields", type: "ConduitReflectDerivedFixture"));
+        var empty = Assert.Throws<InvalidOperationException>(() => ConduitReflect.Types());
+
+        Assert.That(manyMethods, Is.Not.Empty);
+        Assert.That(ambiguous!.Message, Does.Contain("Multiple reflected results match"));
+        Assert.That(ambiguous.Message, Does.Contain("ConduitReflectAmbiguousAlpha"));
+        Assert.That(missing!.Message, Does.Contain("No reflected result matched"));
+        Assert.That(invalidType!.Message, Does.Contain("cannot return MethodInfo"));
+        Assert.That(empty!.Message, Does.Contain("reflect type modes require"));
+    }
+
+    [Test]
     public void ViewBurstAsmMatch_SelectsExactAndUniqueSubstringTargets()
     {
         var targets = CreateBurstAsmTargets();
@@ -1896,9 +1943,9 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void ExecuteCode_BuildSnippetSource_ImportsConduitSearchMembers()
+    public void ExecuteCode_BuildSnippetSource_ImportsConduitHelpers()
     {
-        var parsedSnippet = ConduitCodeParser.Parse("return Search<Material>(\"JsonOverwriteMaterial\").name;");
+        var parsedSnippet = ConduitCodeParser.Parse("return Reflect.Type(\"UnityEngine.Camera\").Name + Search<Material>(\"JsonOverwriteMaterial\").name;");
         var buildSnippetSource = typeof(execute_code).GetMethod(
             "BuildSnippetSource",
             BindingFlags.Static | BindingFlags.NonPublic
@@ -1917,6 +1964,7 @@ public sealed class ConduitMcpToolsTests
         )!;
 
         Assert.That(CountOccurrences(generatedSource, "using static Conduit.ConduitSearch;"), Is.EqualTo(1), generatedSource);
+        Assert.That(CountOccurrences(generatedSource, "using Reflect = Conduit.ConduitReflect;"), Is.EqualTo(1), generatedSource);
     }
 
     [Test]
