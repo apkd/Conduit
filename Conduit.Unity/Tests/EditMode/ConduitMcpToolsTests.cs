@@ -1965,6 +1965,7 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(CountOccurrences(generatedSource, "using static Conduit.ConduitSearch;"), Is.EqualTo(1), generatedSource);
         Assert.That(CountOccurrences(generatedSource, "using Reflect = Conduit.ConduitReflect;"), Is.EqualTo(1), generatedSource);
+        Assert.That(CountOccurrences(generatedSource, "using Object = UnityEngine.Object;"), Is.EqualTo(1), generatedSource);
     }
 
     [Test]

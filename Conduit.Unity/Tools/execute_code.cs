@@ -36,6 +36,7 @@ namespace Conduit
             "using System.Threading.Tasks;",
             "using UnityEditor;",
             "using UnityEngine;",
+            "using Object = UnityEngine.Object;",
             "using Reflect = Conduit.ConduitReflect;",
             "using static Conduit.ConduitSearch;",
         };
@@ -375,6 +376,8 @@ namespace Conduit
             emittedUsingDirectives.Add("using UnityEditor;");
             builder.AppendLine("using UnityEngine;");
             emittedUsingDirectives.Add("using UnityEngine;");
+            builder.AppendLine("using Object = UnityEngine.Object;");
+            emittedUsingDirectives.Add("using Object = UnityEngine.Object;");
             builder.AppendLine("using Reflect = Conduit.ConduitReflect;");
             emittedUsingDirectives.Add("using Reflect = Conduit.ConduitReflect;");
             builder.AppendLine("using static Conduit.ConduitSearch;");
