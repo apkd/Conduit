@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor.TestTools.TestRunner.Api;
+using UnityEngine;
 
 namespace Conduit
 {
@@ -137,6 +138,12 @@ namespace Conduit
 
         internal static string? TrimCommonLogTail(string? simplifiedStackTrace)
             => ToolLogCapture.TrimCommonTail(simplifiedStackTrace);
+
+        internal static string? CleanCapturedLogStack(BridgeCommandKind commandKind, string? stackTrace, LogType logType)
+            => ToolLogCapture.CleanCapturedStackTrace(commandKind, stackTrace, logType);
+
+        internal static string FormatCapturedLogEntryForTest(string message, string? stackTrace)
+            => ToolLogCapture.FormatCapturedLogEntryForTest(message, stackTrace);
 
         internal static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
             => ToolLogCapture.ShouldOmitDiagnosticLogEntry(message, diagnostic);

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -576,6 +577,27 @@ namespace Conduit
             return trimmed.Length == 0 ? null : trimmed;
         }
 
+        public static string? CleanCapturedStackTrace(BridgeCommandKind commandKind, string? stackTrace, LogType logType)
+        {
+            bool isTestCommand = BridgeCommandKinds.IsTest(commandKind);
+            string? cleanedStackTrace = isTestCommand
+                ? TrimCommonTail(ConduitUtility.SimplifyStackTrace(stackTrace))
+                : CleanCommandStackTrace(commandKind, stackTrace);
+
+            return logType == LogType.Log
+                   && !isTestCommand
+                   && FirstFrameEquals(cleanedStackTrace, "UnityEngine.Debug:Log")
+                ? null
+                : cleanedStackTrace;
+        }
+
+        public static string FormatCapturedLogEntryForTest(string message, string? stackTrace)
+        {
+            var builder = new StringBuilder();
+            AppendCapturedLogEntry(builder, new(message, stackTrace ?? string.Empty, LogType.Log));
+            return builder.ToString();
+        }
+
         public static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
         {
             if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(diagnostic))
@@ -613,10 +635,10 @@ namespace Conduit
 
             // burst diagnostics can embed assembly-qualified signatures longer than the useful error text
             condition = NormalizeCapturedLogMessage(condition);
-            var simplifiedStackTrace = TrimCommonTail(ConduitUtility.SimplifyStackTrace(stackTrace));
             lock (gate)
             {
                 var target = ResolveLogTargetUnderLock();
+                var simplifiedStackTrace = CleanCapturedStackTrace(activeCommandKind, stackTrace, logType);
                 CaptureLogEntry(target, condition, simplifiedStackTrace, logType);
             }
         }
@@ -800,6 +822,86 @@ namespace Conduit
             builder.AppendLine().AppendLine();
         }
 
+        static string? CleanCommandStackTrace(BridgeCommandKind commandKind, string? stackTrace)
+        {
+            if (commandKind == BridgeCommandKind.ExecuteCode
+                && TryTrimExecuteCodeInvocationStack(stackTrace, out string executeCodeStackTrace))
+                return ConduitUtility.SimplifyStackTrace(executeCodeStackTrace);
+
+            return TrimCommonTail(ConduitUtility.SimplifyStackTrace(stackTrace));
+        }
+
+        static bool TryTrimExecuteCodeInvocationStack(string? stackTrace, out string trimmedStackTrace)
+        {
+            trimmedStackTrace = string.Empty;
+            if (string.IsNullOrWhiteSpace(stackTrace))
+                return false;
+
+            // execute_code runner frames are hidden from simplified stacks, so the boundary must be found
+            // from raw unity frames before conduit/generated frames are removed.
+            using var pooledFrames = ConduitUtility.GetPooledList<string>(out var frames);
+            using var reader = new StringReader(stackTrace);
+            while (reader.ReadLine() is { } line)
+                if (line.Trim() is { Length: > 0 } frame)
+                    frames.Add(frame);
+
+            for (int index = frames.Count - 1; index >= 0; index--)
+            {
+                if (!IsMethodBaseInvokeFrame(frames[index])
+                    || (!HasCompilerMessageCompletionEvidence(frames, index)
+                        && !HasExecuteCodeRunnerEvidence(frames, index)))
+                    continue;
+
+                trimmedStackTrace = JoinStackFrames(frames, index);
+                return true;
+            }
+
+            return false;
+        }
+
+        static bool HasCompilerMessageCompletionEvidence(List<string> frames, int methodBaseInvokeIndex)
+        {
+            // unity compiler callbacks can append unrelated update frames after task completion frames.
+            // limiting the search window keeps ordinary reflection stacks from being classified as execute_code.
+            int end = Math.Min(frames.Count, methodBaseInvokeIndex + 5);
+            for (int index = methodBaseInvokeIndex + 1; index < end; index++)
+                if (IsCompilerMessageCompletionFrame(frames[index]))
+                    return true;
+
+            return false;
+        }
+
+        static bool HasExecuteCodeRunnerEvidence(List<string> frames, int methodBaseInvokeIndex)
+        {
+            for (int index = methodBaseInvokeIndex + 1; index < frames.Count; index++)
+            {
+                if (IsMethodBaseInvokeFrame(frames[index]))
+                    return false;
+
+                if (IsExecuteCodeRunnerFrame(frames[index]))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static string JoinStackFrames(List<string> frames, int count)
+        {
+            if (count <= 0)
+                return string.Empty;
+
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            for (int index = 0; index < count; index++)
+            {
+                if (builder.Length > 0)
+                    builder.AppendLine();
+
+                builder.Append(frames[index]);
+            }
+
+            return builder.ToString();
+        }
+
         void ResetStateUnderLock()
         {
             activeCommandKind = BridgeCommandKind.Unknown;
@@ -863,6 +965,47 @@ namespace Conduit
                || frame.StartsWith(
                    "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling",
                    StringComparison.Ordinal);
+
+        static bool IsMethodBaseInvokeFrame(string frame)
+            => FrameNameEquals(frame, "System.Reflection.MethodBase:Invoke")
+               || FrameNameEquals(frame, "System.Reflection.MethodBase.Invoke");
+
+        static bool IsCompilerMessageCompletionFrame(string frame)
+            => frame.Contains("UnityEditor.Compilation.CompilerMessage[]", StringComparison.Ordinal)
+               && (frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
+                   && (frame.Contains(":SetResult", StringComparison.Ordinal)
+                       || frame.Contains(".SetResult", StringComparison.Ordinal))
+                   || frame.StartsWith("System.Threading.Tasks.TaskCompletionSource", StringComparison.Ordinal)
+                   && (frame.Contains(":TrySetResult", StringComparison.Ordinal)
+                       || frame.Contains(".TrySetResult", StringComparison.Ordinal)));
+
+        static bool IsExecuteCodeRunnerFrame(string frame)
+            => frame.Contains("Conduit.execute_code", StringComparison.Ordinal)
+               && (frame.Contains("InvokeAsync", StringComparison.Ordinal)
+                   || frame.Contains("ExecuteCachedCompilationAsync", StringComparison.Ordinal)
+                   || frame.Contains("ExecuteAsync", StringComparison.Ordinal));
+
+        static bool FirstFrameEquals(string? stackTrace, string frameName)
+        {
+            if (string.IsNullOrWhiteSpace(stackTrace))
+                return false;
+
+            string value = stackTrace!;
+            int lineEnd = value.IndexOf('\n');
+            string firstFrame = lineEnd < 0 ? value : value[..lineEnd];
+            return firstFrame.TrimEnd() == frameName;
+        }
+
+        static bool FrameNameEquals(string frame, string frameName)
+        {
+            int start = frame.StartsWith("at ", StringComparison.Ordinal) ? 3 : 0;
+            if (frame.Length - start < frameName.Length
+                || string.CompareOrdinal(frame, start, frameName, 0, frameName.Length) != 0)
+                return false;
+
+            int next = start + frameName.Length;
+            return next == frame.Length || char.IsWhiteSpace(frame[next]) || frame[next] is '(' or '[';
+        }
 
         static bool IsCompilerDiagnosticLogMessage(string message)
             => message.Contains("): error ", StringComparison.Ordinal)

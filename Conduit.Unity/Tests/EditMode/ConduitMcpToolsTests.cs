@@ -2603,30 +2603,122 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void ExecuteCode_LogStackTail_TrimsCompilerCallbackFramesAboveMethodInvoke()
+    public void ExecuteCode_LogStackCleanup_RemovesDebugLogCompilerCallbackStack()
     {
-        var fullCompilerCallbackTail = string.Join("\n",
+        string stackTrace = string.Join("\n",
             "UnityEngine.Debug:Log",
             "System.Reflection.MethodBase:Invoke",
             "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult",
             "System.Threading.Tasks.TaskCompletionSource`1<UnityEditor.Compilation.CompilerMessage[]>:TrySetResult",
-            "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling");
+            "UnityEditor.EditorApplication:get_isCompiling",
+            "HK.Constants:get_AnyAssetReloadInProgress",
+            "HK.BlitzRenderer.Animation.BlitzAnimationManager:OnUpdate",
+            "HK.UpdateManager:RuntimeLateUpdate");
 
-        var parameterizedCompilerCallbackTail = string.Join("\n",
-            "UnityEngine.Debug:Log",
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.ExecuteCode, stackTrace, LogType.Log),
+            Is.Null);
+    }
+
+    [Test]
+    public void ExecuteCode_LogStackCleanup_TrimsWarningCompilerCallbackStack()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:LogWarning",
             "System.Reflection.MethodBase:Invoke",
             "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult",
             "System.Threading.Tasks.TaskCompletionSource`1<UnityEditor.Compilation.CompilerMessage[]>:TrySetResult",
-            "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling (bool&)");
+            "UnityEditor.EditorApplication:get_isCompiling",
+            "HK.Constants:get_AnyAssetReloadInProgress",
+            "HK.BlitzRenderer.Animation.BlitzAnimationManager:OnUpdate",
+            "HK.UpdateManager:RuntimeLateUpdate");
 
-        var truncatedCompilerCallbackTail = string.Join("\n",
-            "UnityEngine.Debug:Log",
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.ExecuteCode, stackTrace, LogType.Warning),
+            Is.EqualTo("UnityEngine.Debug:LogWarning"));
+    }
+
+    [Test]
+    public void ExecuteCode_LogStackCleanup_TrimsAtExecuteCodeInvokeAndPreservesUserReflection()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:LogWarning",
+            "Game.ReflectedTarget:Run",
             "System.Reflection.MethodBase:Invoke",
-            "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult");
+            "Game.ReflectionCaller:Call",
+            "ConduitGenerated.ExecuteCode.SnippetHost_1:Execute",
+            "System.Reflection.MethodBase:Invoke",
+            "Conduit.execute_code:InvokeAsync",
+            "Conduit.execute_code:ExecuteCachedCompilationAsync");
 
-        Assert.That(ConduitToolRunner.TrimCommonLogTail(fullCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
-        Assert.That(ConduitToolRunner.TrimCommonLogTail(parameterizedCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
-        Assert.That(ConduitToolRunner.TrimCommonLogTail(truncatedCompilerCallbackTail), Is.EqualTo("UnityEngine.Debug:Log"));
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.ExecuteCode, stackTrace, LogType.Warning),
+            Is.EqualTo(string.Join("\n",
+                "UnityEngine.Debug:LogWarning",
+                "Game.ReflectedTarget:Run",
+                "System.Reflection.MethodBase:Invoke",
+                "Game.ReflectionCaller:Call")));
+    }
+
+    [Test]
+    public void CommandLogStackCleanup_DoesNotUseExecuteCodeBoundaryForOtherCommands()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:LogWarning",
+            "System.Reflection.MethodBase:Invoke",
+            "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<UnityEditor.Compilation.CompilerMessage[]>:SetResult",
+            "HK.UpdateManager:RuntimeLateUpdate");
+
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.Show, stackTrace, LogType.Warning),
+            Is.EqualTo(stackTrace));
+    }
+
+    [Test]
+    public void ExecuteCode_LogStackCleanup_RejectsGeneratedSnippetFrameAsBoundaryEvidence()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:LogWarning",
+            "ConduitGenerated.ExecuteCode.SnippetHost_1:Execute",
+            "System.Reflection.MethodBase:Invoke",
+            "HK.UpdateManager:RuntimeLateUpdate");
+
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.ExecuteCode, stackTrace, LogType.Warning),
+            Is.EqualTo(string.Join("\n",
+                "UnityEngine.Debug:LogWarning",
+                "System.Reflection.MethodBase:Invoke",
+                "HK.UpdateManager:RuntimeLateUpdate")));
+    }
+
+    [Test]
+    public void CommandLogStackCleanup_RemovesPlainDebugLogStacks()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:Log ",
+            "Game.Action:Run");
+
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.Show, stackTrace, LogType.Log),
+            Is.Null);
+    }
+
+    [Test]
+    public void LogCapture_FormatsMessagePrefixWithoutStackPrefix()
+    {
+        string formatted = ConduitToolRunner.FormatCapturedLogEntryForTest(
+            "line 1\nline 2",
+            string.Join("\n",
+                "UnityEngine.Debug:LogWarning",
+                "Game.Action:Run"));
+
+        Assert.That(
+            formatted,
+            Is.EqualTo(string.Join("\n",
+                "> line 1",
+                "> line 2",
+                "UnityEngine.Debug:LogWarning",
+                "Game.Action:Run")));
     }
 
     [Test]
