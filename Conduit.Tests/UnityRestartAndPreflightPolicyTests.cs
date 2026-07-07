@@ -47,6 +47,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.Arguments).IsEmpty();
         await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
         await Assert.That(startInfo.ArgumentList[1]).IsEqualTo("-c");
+        await Assert.That(startInfo.ArgumentList[2]).StartsWith("exec </dev/null >/dev/null 2>&1;");
         await Assert.That(startInfo.ArgumentList[3]).IsEqualTo("conduit-unity-launch");
         await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(unityHubFhsEnvPath);
         await Assert.That(startInfo.ArgumentList[5]).IsEqualTo(editorPath);
@@ -96,6 +97,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.FileName).IsEqualTo(setsidPath);
         await Assert.That(startInfo.Arguments).IsEmpty();
         await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
+        await Assert.That(startInfo.ArgumentList[2]).StartsWith("exec </dev/null >/dev/null 2>&1;");
         await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(steamRunPath);
         await Assert.That(startInfo.ArgumentList[5]).IsEqualTo(editorPath);
         await Assert.That(startInfo.ArgumentList[6]).IsEqualTo("-projectPath");
@@ -133,6 +135,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.Arguments).IsEmpty();
         await Assert.That(startInfo.ArgumentList[0]).IsEqualTo(bashPath);
         await Assert.That(startInfo.ArgumentList[1]).IsEqualTo("-c");
+        await Assert.That(startInfo.ArgumentList[2]).StartsWith("exec </dev/null >/dev/null 2>&1;");
         await Assert.That(startInfo.ArgumentList[3]).IsEqualTo("conduit-unity-launch");
         await Assert.That(startInfo.ArgumentList[4]).IsEqualTo(editorPath);
         await Assert.That(startInfo.ArgumentList[5]).IsEqualTo("-projectPath");

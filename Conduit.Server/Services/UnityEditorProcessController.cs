@@ -293,7 +293,7 @@ public sealed class UnityEditorProcessController(
             startInfo.ArgumentList.Add(shellPath);
 
         startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add("\"$@\" & child=$!; wait \"$child\"");
+        startInfo.ArgumentList.Add("exec </dev/null >/dev/null 2>&1; \"$@\" & child=$!; wait \"$child\""); // keep Unity wrappers off the MCP stdio transport
         startInfo.ArgumentList.Add("conduit-unity-launch");
         startInfo.ArgumentList.Add(launchExecutablePath);
         if (!string.Equals(launchExecutablePath, editorPath, StringComparison.Ordinal))
