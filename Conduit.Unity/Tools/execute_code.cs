@@ -168,7 +168,11 @@ namespace Conduit
             string assemblyPath
         )
         {
-            var completion = new TaskCompletionSource<CompilerMessage[]>();
+            // Unity raises buildFinished while checking AssemblyBuilder status inside isCompiling.
+            // queued continuations avoid errors caused by execution during collection enumeration
+            var completion = new TaskCompletionSource<CompilerMessage[]>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            );
 #pragma warning disable CS0618 // Type or member is obsolete
             var builder = new AssemblyBuilder(
 #pragma warning restore CS0618

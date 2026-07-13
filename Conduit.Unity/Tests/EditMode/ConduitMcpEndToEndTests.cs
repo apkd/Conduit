@@ -525,6 +525,25 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_DefersSnippetUntilAssemblyBuilderEnumerationCompletes()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var snippet
+            = $"return \"{marker}:\" + Environment.StackTrace.Contains(\"IsAnyAssemblyBuilderCompiling\").ToString();";
+
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        AssertSuccessful(result, marker + ":False");
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_CoversSuccessCacheRuntimeFailureAndCompileFailure()
     {
         var runtimeTogglePath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCode_{Guid.NewGuid():N}.flag");
