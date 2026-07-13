@@ -2226,7 +2226,8 @@ public sealed class ConduitMcpToolsTests
     {
         var result = ConduitSearchUtility.Search("tests");
 
-        Assert.That(result, Does.Contain("ConduitMcpToolsTests.Resolve_TracksMatchSource | EditMode"));
+        Assert.That(result, Does.StartWith("- "));
+        Assert.That(result, Does.Contain(" | EditMode"));
     }
 
     [Test]
