@@ -591,10 +591,14 @@ namespace Conduit
                 : cleanedStackTrace;
         }
 
-        public static string FormatCapturedLogEntryForTest(string message, string? stackTrace)
+        public static string FormatCapturedLogEntryForTest(string message, string? stackTrace, int repeatCount = 1)
         {
             var builder = new StringBuilder();
-            AppendCapturedLogEntry(builder, new(message, stackTrace ?? string.Empty, LogType.Log));
+            var entry = new CapturedLogEntry(message, stackTrace ?? string.Empty, LogType.Log)
+            {
+                RepeatCount = repeatCount,
+            };
+            AppendCapturedLogEntry(builder, entry);
             return builder.ToString();
         }
 
@@ -779,20 +783,16 @@ namespace Conduit
             AppendQuotedLines(builder, entry.Message);
             if (entry.StackTrace is { Length: > 0 })
             {
-                if (builder.Length > 0 && builder[^1] != '\n')
-                    builder.AppendLine();
-
+                AppendSectionSeparator(builder);
                 builder.Append(entry.StackTrace);
             }
 
             if (entry.RepeatCount > 1)
             {
-                if (builder.Length > 0 && builder[^1] != '\n')
-                    builder.AppendLine();
-
-                builder.Append("(log repeated ");
+                AppendSectionSeparator(builder);
+                builder.Append("*log repeated ");
                 builder.Append(entry.RepeatCount);
-                builder.Append(" times)");
+                builder.Append(" times*");
             }
         }
 

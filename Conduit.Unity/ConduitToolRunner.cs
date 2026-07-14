@@ -142,8 +142,8 @@ namespace Conduit
         internal static string? CleanCapturedLogStack(BridgeCommandKind commandKind, string? stackTrace, LogType logType)
             => ToolLogCapture.CleanCapturedStackTrace(commandKind, stackTrace, logType);
 
-        internal static string FormatCapturedLogEntryForTest(string message, string? stackTrace)
-            => ToolLogCapture.FormatCapturedLogEntryForTest(message, stackTrace);
+        internal static string FormatCapturedLogEntryForTest(string message, string? stackTrace, int repeatCount = 1)
+            => ToolLogCapture.FormatCapturedLogEntryForTest(message, stackTrace, repeatCount);
 
         internal static bool ShouldOmitDiagnosticLogEntry(string message, string? diagnostic)
             => ToolLogCapture.ShouldOmitDiagnosticLogEntry(message, diagnostic);

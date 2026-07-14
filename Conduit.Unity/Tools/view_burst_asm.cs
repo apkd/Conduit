@@ -340,7 +340,7 @@ namespace Conduit
         {
             var displayName = CleanDisplayName(target.DisplayName);
             var stats = AnalyzeAssembly(target, disassembly);
-            return $"{displayName}\n{FormatStats(stats)}\n\n{disassembly}";
+            return $"**Assembly:** `{displayName}`\n\n{FormatStats(stats)}\n\n```asm\n{disassembly}\n```";
         }
 
         internal static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly)
@@ -351,7 +351,7 @@ namespace Conduit
 
             var path = SaveLargeOutput(target, output);
             var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
-            return Success($"{CleanDisplayName(target.DisplayName)}\n{FormatStats(AnalyzeAssembly(target, disassembly))}\n\nAssembly output very large ({kilobytes} KB); saved to {path}");
+            return Success($"**Assembly:** `{CleanDisplayName(target.DisplayName)}`\n\n{FormatStats(AnalyzeAssembly(target, disassembly))}\n\n*Assembly output very large ({kilobytes} KB); saved to `{path}`.*");
         }
 
         static BurstAsmStats AnalyzeAssembly(BurstTarget target, string disassembly)

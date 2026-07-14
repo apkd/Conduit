@@ -808,14 +808,14 @@ public sealed class ConduitMcpToolsTests
         var output = view_burst_asm.BuildOutput(target, "ret");
 
         Assert.That(output, Is.EqualTo(
-            "GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)\n" +
+            "**Assembly:** `GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)`\n\n" +
             "- Instructions: 1\n" +
             "- Vector instructions: 0 (0%)\n" +
             "- Control flow: branches=0, conditional=0, unconditional=0, calls=0, returns=1\n" +
             "- Memory operands: 0 (0%); stack/frame operands: 0\n" +
             "- Vector width hints: xmm=0, ymm=0, zmm=0, neon/simd=0, sve=0\n" +
             "- Top instructions: ret=1\n\n" +
-            "ret"));
+            "```asm\nret\n```"));
     }
 
     [Test]
@@ -852,7 +852,9 @@ public sealed class ConduitMcpToolsTests
 
         var output = view_burst_asm.BuildOutput(target, disassembly);
 
-        Assert.That(output, Does.Contain("MoveJob - (IJob)\n- Instructions: 8\n"));
+        Assert.That(output, Does.Contain("**Assembly:** `MoveJob - (IJob)`\n\n- Instructions: 8\n"));
+        Assert.That(output, Does.Contain("\n\n```asm\n.text"));
+        Assert.That(output, Does.EndWith("```"));
         Assert.That(output, Does.Contain("- Vector instructions: 2 (25%)"));
         Assert.That(output, Does.Contain("- Control flow: branches=1, conditional=1, unconditional=0, calls=1, returns=1"));
         Assert.That(output, Does.Contain("- Memory operands: 3 (37.5%); stack/frame operands: 1"));
@@ -903,12 +905,12 @@ public sealed class ConduitMcpToolsTests
             var result = view_burst_asm.CompleteOutput(target, builder.ToString());
 
             Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
-            Assert.That(result.return_value, Does.StartWith("GenerateInteriorMesh()\n- Instructions: 1000"));
+            Assert.That(result.return_value, Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n- Instructions: 1000"));
             Assert.That(result.return_value, Does.Contain("Assembly output very large ("));
-            Assert.That(result.return_value, Does.EndWith(" KB); saved to Temp/GenerateInteriorMesh.txt"));
+            Assert.That(result.return_value, Does.EndWith(" KB); saved to `Temp/GenerateInteriorMesh.txt`.*"));
             Assert.That(File.Exists(path), Is.True);
-            Assert.That(File.ReadAllText(path), Does.StartWith("GenerateInteriorMesh()\n- Instructions: 1000"));
-            Assert.That(File.ReadAllText(path), Does.Contain("\n\nnop\nnop"));
+            Assert.That(File.ReadAllText(path), Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n- Instructions: 1000"));
+            Assert.That(File.ReadAllText(path), Does.Contain("\n\n```asm\nnop\nnop"));
         }
         finally
         {
@@ -2705,21 +2707,25 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void LogCapture_FormatsMessagePrefixWithoutStackPrefix()
+    public void LogCapture_SeparatesQuotedMessageFromStackAndRepeatCount()
     {
         string formatted = ConduitToolRunner.FormatCapturedLogEntryForTest(
             "line 1\nline 2",
             string.Join("\n",
                 "UnityEngine.Debug:LogWarning",
-                "Game.Action:Run"));
+                "Game.Action:Run"),
+            repeatCount: 3);
 
         Assert.That(
             formatted,
             Is.EqualTo(string.Join("\n",
                 "> line 1",
                 "> line 2",
+                "",
                 "UnityEngine.Debug:LogWarning",
-                "Game.Action:Run")));
+                "Game.Action:Run",
+                "",
+                "*log repeated 3 times*")));
     }
 
     [Test]
@@ -2747,7 +2753,7 @@ public sealed class ConduitMcpToolsTests
         Assert.That(run_tests.ShouldIncludeAllTestLogs(1), Is.True);
         Assert.That(run_tests.ShouldIncludeAllTestLogs(3), Is.True);
         Assert.That(run_tests.ShouldIncludeAllTestLogs(4), Is.False);
-        Assert.That(run_tests.LargeTestRunLogNote, Is.EqualTo("NOTE: When running more than 3 tests at a time, non-error logs are omitted."));
+        Assert.That(run_tests.LargeTestRunLogNote, Is.EqualTo("*Non-error logs are omitted when more than 3 tests run.*"));
 
         Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Log, includeAllLogs: true), Is.True);
         Assert.That(ToolLogCapture.ShouldIncludeTestLogEntry(LogType.Warning, includeAllLogs: true), Is.True);

@@ -12,7 +12,7 @@ namespace Conduit
         const string UserStoppedPlayModeTestRunSignal = "Playmode tests were aborted because the player was stopped.";
         internal const int FullLogTestLimit = 3;
         internal static readonly string LargeTestRunLogNote =
-            $"NOTE: When running more than {FullLogTestLimit} tests at a time, non-error logs are omitted.";
+            $"*Non-error logs are omitted when more than {FullLogTestLimit} tests run.*";
         static readonly HashSet<string> startedTestSet = new(StringComparer.Ordinal);
         static readonly List<string> filteredStartedTests = new();
         static readonly HashSet<string> filteredStartedTestSet = new(StringComparer.Ordinal);
