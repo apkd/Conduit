@@ -20,6 +20,7 @@ namespace Conduit
         const int DefaultRenderWidth = 1280;
         const int DefaultRenderHeight = 720;
         const float BoundsSizeEpsilon = 0.01f;
+        const string HdrpAssetTypeName = "UnityEngine.Rendering.HighDefinition.HDRenderPipelineAsset";
 
         static readonly Type? gameViewType
             = Type.GetType("UnityEditor.GameView,UnityEditor");
@@ -140,7 +141,7 @@ namespace Conduit
                 TryGetGameViewRenderTexture
             );
 
-            return SaveTexture(renderTexture, "game_view");
+            return SaveTexture(renderTexture, "game_view", ShouldFlipGameViewTexture());
         }
 
         static async Task<string> CaptureSceneViewAsync()
@@ -657,11 +658,24 @@ namespace Conduit
             texture.Apply(updateMipmaps: false, makeNoLongerReadable: false);
         }
 
-        static string SaveTexture(Texture texture, string prefix)
+        static bool ShouldFlipGameViewTexture()
+        {
+            // hdrp's final game view blit stores an inverted target for the editor presentation path
+            for (var type = GraphicsSettings.currentRenderPipeline?.GetType(); type != null; type = type.BaseType)
+                if (string.Equals(type.FullName, HdrpAssetTypeName, StringComparison.Ordinal))
+                    return true;
+
+            return false;
+        }
+
+        static string SaveTexture(Texture texture, string prefix, bool flipVertically = false)
         {
             var readableTexture = ToReadableTexture(texture);
             try
             {
+                if (flipVertically)
+                    FlipTextureVertically(readableTexture);
+
                 var outputPath = AllocateOutputPath(ConduitAssetPathUtility.GetProjectRootPath(), prefix);
                 File.WriteAllBytes(outputPath.absolute_path, readableTexture.EncodeToJPG(95));
                 return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
