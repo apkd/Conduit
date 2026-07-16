@@ -14,7 +14,7 @@
 [![Latest version number](https://img.shields.io/github/package-json/v/apkd/Conduit?filename=Conduit.Unity%2Fpackage.json&labelColor=2C3439&label=Version&logo=unity)](https://github.com/apkd/Conduit/releases/tag/latest)
 [![MIT License](https://img.shields.io/github/license/apkd/Conduit?style=flat&label=License&logo=listmonk&labelColor=2C3439&color=fff)](https://github.com/apkd/Conduit/blob/master/LICENSE)
 [![Test status badge](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml/badge.svg?branch=master&event=push)](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml)
-[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/apkd/Conduit?authorFilter=apkd&label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/apkd/Conduit?label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
 [![GitHub last commit](https://img.shields.io/github/last-commit/apkd/Conduit?labelColor=2C3439&color=f97&logoColor=f96&logo=tinder&label=Last%20commit)](https://github.com/apkd/Conduit/commit/HEAD~1)
 
 A Unity MCP server that stays out of the way of your coding agent.
@@ -22,15 +22,12 @@ A Unity MCP server that stays out of the way of your coding agent.
 - Robust: survives crashes, restarts, assembly reloads, and handles multiple agents and Unity instances.
 - Context-efficient: conserves the agent's context window and saves tokens. Small number of versatile tools.
 - Simple setup: one Unity package, one server exe, editor config wizard. No dependencies, no pollution.
-
-> [!CAUTION]
-> This package is WIP:
-> - No linux support
-> - Docs are incomplete
+- Supports Linux and Windows.
 
 > [!WARNING]
 > **Granting an AI agent access to Unity indirectly gives them escalated access to your machine.**
-> Have a resilient backup strategy, and make sure your work machine is resilient to data loss.
+> Agents may be able to perform actions outside the regular sandbox through Unity.
+> Have a backup strategy, and make sure your work machine is resilient to data loss.
 
 # Installation
 
@@ -53,36 +50,37 @@ You can also declare it directly in `Packages/manifest.json`:
 > The Unity package includes a wizard for setting up the MCP server.
 > This downloads the server executable and configures your installed code editors.
 
-***Tools → Conduit → Setup MCP Server***
-
-> [!CAUTION]
-> *(automatic setup and tutorial/docs coming soon)*
+***Preferences → Conduit***
 
 ## Manual setup
 
 <details>
-  <summary><h4>Build and editor configuration instructions</h4></summary>
+  <summary><h4>Build instructions and editor configuration</h4></summary>
 
-You can either:
+Install the MCP server first. You can either:
 
-- Download the server executable from the [releases page](https://github.com/apkd/Conduit/releases/latest), or...
-- Build it by running `dotnet publish`,
+- Download the Windows or Linux executable from the [releases page](https://github.com/apkd/Conduit/releases/latest), or
+- Build it with `dotnet publish Conduit.Server/Conduit.Server.csproj -c Release`.
 
-Now configure your editor:
+Move the executable to a stable path, then configure your editor:
 
 <details>
   <summary>Codex</summary>
 
-For a basic `stdio` setup, add this to `config.toml`:
+Configure the MCP server in either location:
+
+- **Unity project:** `.codex/config.toml`. Codex loads this file after the project is trusted.
+- **User account:** `%USERPROFILE%\.codex\config.toml` on Windows, or `~/.codex/config.toml` on Linux.
 
 ##### stdio | Windows (Native)
 
 ```toml
 [mcp_servers.unity]
 command = "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe"
+args = []
 cwd = "C:\\src\\Conduit"
 disabled_tools = []
-tool_timeout_sec = 1800
+tool_timeout_sec = 300
 enabled = true
 ```
 
@@ -91,9 +89,10 @@ enabled = true
 ```toml
 [mcp_servers.unity]
 command = "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe"
+args = []
 cwd = "/mnt/c/src/Conduit"
 disabled_tools = []
-tool_timeout_sec = 1800
+tool_timeout_sec = 300
 enabled = true
 ```
 
@@ -102,9 +101,10 @@ enabled = true
 ```toml
 [mcp_servers.unity]
 command = "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit"
+args = []
 cwd = "/home/you/src/Conduit"
 disabled_tools = []
-tool_timeout_sec = 1800
+tool_timeout_sec = 300
 enabled = true
 ```
 
@@ -118,7 +118,7 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 codex mcp add unity --url http://127.0.0.1:5080
 ```
 
-##### Approve tool calls
+##### approve tool calls
 
 To avoid going insane from having to approve every tool call separately:
 
@@ -157,24 +157,29 @@ tools.view_burst_asm.approval_mode = "approve"
 <details>
   <summary>Claude Code</summary>
 
-Claude Code adds MCP servers with `claude mcp add`.
+Configure the MCP server in either location:
+
+- **Unity project:** `.mcp.json`.
+- **User account:** `%USERPROFILE%\.claude.json` on Windows, or `~/.claude.json` on Linux.
+
+The commands below create the **Unity project** configuration. Replace `--scope project` with `--scope user` to configure the **User account** instead.
 
 ##### stdio | Windows (Native)
 
 ```bash
-claude mcp add --transport stdio unity -- C:\src\Conduit\Conduit.Server\publish\win-x64\conduit.exe
+claude mcp add --scope project --transport stdio unity -- C:\src\Conduit\Conduit.Server\publish\win-x64\conduit.exe
 ```
 
 ##### stdio | Windows (WSL)
 
 ```bash
-claude mcp add --transport stdio unity -- /mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe
+claude mcp add --scope project --transport stdio unity -- /mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe
 ```
 
 ##### stdio | Linux
 
 ```bash
-claude mcp add --transport stdio unity -- /home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit
+claude mcp add --scope project --transport stdio unity -- /home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit
 ```
 
 ##### http
@@ -184,15 +189,18 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 ```
 
 ```bash
-claude mcp add --transport http unity http://127.0.0.1:5080
+claude mcp add --scope project --transport http unity http://127.0.0.1:5080
 ```
 
 </details>
 
 <details>
-  <summary>Cursor</summary>
+  <summary>Claude Desktop</summary>
 
-Cursor uses `mcp.json` with a top-level `mcpServers` object. You can put it in `~/.cursor/mcp.json` for a global setup or `.cursor/mcp.json` for a project-local setup.
+Claude Desktop keeps one MCP configuration for the **User account**:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`, or the equivalent path under `XDG_CONFIG_HOME`
 
 ##### stdio | Windows (Native)
 
@@ -200,19 +208,9 @@ Cursor uses `mcp.json` with a top-level `mcpServers` object. You can put it in `
 {
   "mcpServers": {
     "unity": {
-      "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe"
-    }
-  }
-}
-```
-
-##### stdio | Windows (WSL)
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe"
+      "type": "stdio",
+      "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
+      "args": []
     }
   }
 }
@@ -224,7 +222,68 @@ Cursor uses `mcp.json` with a top-level `mcpServers` object. You can put it in `
 {
   "mcpServers": {
     "unity": {
-      "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit"
+      "type": "stdio",
+      "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
+      "args": []
+    }
+  }
+}
+```
+
+##### http
+
+Claude Desktop's Custom Connectors are reached through Anthropic's cloud and cannot connect directly to a server on `localhost`.
+Use the local `stdio` configuration above for Conduit.
+A publicly reachable HTTPS deployment may be added through **Settings → Connectors** where Custom Connectors are available.
+
+</details>
+
+<details>
+  <summary>Cursor</summary>
+
+Cursor uses `mcp.json` with a top-level `mcpServers` object.
+Save it in either location:
+
+- **Unity project:** `.cursor/mcp.json`.
+- **User account:** `%USERPROFILE%\.cursor\mcp.json` on Windows, or `~/.cursor/mcp.json` on Linux.
+
+##### stdio | Windows (Native)
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "type": "stdio",
+      "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
+      "args": []
+    }
+  }
+}
+```
+
+##### stdio | Windows (WSL)
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "type": "stdio",
+      "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe",
+      "args": []
+    }
+  }
+}
+```
+
+##### stdio | Linux
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "type": "stdio",
+      "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
+      "args": []
     }
   }
 }
@@ -251,7 +310,13 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 <details>
   <summary>Windsurf</summary>
 
-Windsurf stores MCP servers in `~/.codeium/windsurf/mcp_config.json`.
+Windsurf keeps one MCP configuration for the **User account**:
+
+- **Windows:** `%USERPROFILE%\.codeium\mcp_config.json`
+- **Linux:** `~/.codeium/mcp_config.json`
+
+Some older Cascade builds use `%USERPROFILE%\.codeium\windsurf\mcp_config.json` on Windows or `~/.codeium/windsurf/mcp_config.json` on Linux.
+Use **Windsurf Settings → Cascade → MCP Servers → View Raw Config** when both files exist.
 
 ##### stdio | Windows (Native)
 
@@ -313,7 +378,20 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 <details>
   <summary>Cline</summary>
 
-Cline stores MCP settings in `cline_mcp_settings.json`.
+Cline keeps one MCP configuration for the **User account**. The location depends on which version of Cline you use.
+
+For the VS Code extension:
+
+- **Windows:** `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json`
+- **Linux:** `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`, or the equivalent path under `XDG_CONFIG_HOME`
+
+For JetBrains and CLI builds:
+
+- **Windows:** `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`
+- **Linux:** `~/.cline/data/settings/cline_mcp_settings.json`
+
+`CLINE_MCP_SETTINGS_PATH`, `CLINE_DATA_DIR`, and `CLINE_DIR` can relocate the JetBrains and CLI file.
+Current Cline uses flat transport fields in each server entry.
 
 ##### stdio | Windows (Native)
 
@@ -321,6 +399,7 @@ Cline stores MCP settings in `cline_mcp_settings.json`.
 {
   "mcpServers": {
     "unity": {
+      "type": "stdio",
       "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
       "args": [],
       "disabled": false
@@ -335,6 +414,7 @@ Cline stores MCP settings in `cline_mcp_settings.json`.
 {
   "mcpServers": {
     "unity": {
+      "type": "stdio",
       "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe",
       "args": [],
       "disabled": false
@@ -349,6 +429,7 @@ Cline stores MCP settings in `cline_mcp_settings.json`.
 {
   "mcpServers": {
     "unity": {
+      "type": "stdio",
       "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
       "args": [],
       "disabled": false
@@ -367,9 +448,82 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 {
   "mcpServers": {
     "unity": {
-      "url": "http://127.0.0.1:5080",
       "type": "streamableHttp",
+      "url": "http://127.0.0.1:5080",
       "disabled": false
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+  <summary>Kilo Code</summary>
+
+Kilo Code's extension and CLI share the unified `kilo.json`/`kilo.jsonc` format.
+Configure the MCP server in either location:
+
+- **Unity project:** `kilo.json`, `kilo.jsonc`, `.kilo/kilo.json`, or `.kilo/kilo.jsonc`.
+- **User account:** `%USERPROFILE%\.config\kilo\kilo.json` on Windows, or `~/.config/kilo/kilo.json` on Linux. The `.jsonc` filename also works.
+
+On Linux, `XDG_CONFIG_HOME` can move the **User account** file.
+
+##### stdio | Windows (Native)
+
+```json
+{
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### stdio | Windows (WSL)
+
+```json
+{
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### stdio | Linux
+
+```json
+{
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### http
+
+```bash
+conduit --http [--port 5080] [--url http://127.0.0.1:5080]
+```
+
+```json
+{
+  "mcp": {
+    "unity": {
+      "type": "remote",
+      "url": "http://127.0.0.1:5080",
+      "enabled": true
     }
   }
 }
@@ -380,9 +534,15 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 <details>
   <summary>Continue</summary>
 
-Continue uses YAML, typically as standalone files under `.continue/mcpServers/`
+Continue's IDE extensions load MCP files from either location:
 
-Create `.continue/mcpServers/unity.yaml`:
+- **Unity project:** `.continue/mcpServers/`.
+- **User account:** `%USERPROFILE%\.continue\mcpServers\` on Windows, or `~/.continue/mcpServers/` on Linux.
+
+Continue accepts native schema-v1 YAML and Claude-compatible JSON files in either folder.
+The `cn` CLI does not currently auto-discover files from either directory.
+
+Create `unity.yaml` in either directory:
 
 ##### stdio | Windows (Native)
 
@@ -442,9 +602,91 @@ mcpServers:
 </details>
 
 <details>
+  <summary>OpenCode</summary>
+
+Configure the MCP server in either location:
+
+- **Unity project:** `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, or `.opencode/opencode.jsonc`.
+- **User account:** `%USERPROFILE%\.config\opencode\opencode.json` on Windows, or `~/.config/opencode/opencode.json` on Linux. The `.jsonc` filename also works.
+
+On Linux, `XDG_CONFIG_HOME` can move the **User account** file.
+Local MCP commands are arrays whose first element is the executable path.
+
+##### stdio | Windows (Native)
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### stdio | Windows (WSL)
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### stdio | Linux
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unity": {
+      "type": "local",
+      "command": ["/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### http
+
+```bash
+conduit --http [--port 5080] [--url http://127.0.0.1:5080]
+```
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unity": {
+      "type": "remote",
+      "url": "http://127.0.0.1:5080",
+      "enabled": true
+    }
+  }
+}
+```
+
+</details>
+
+<details>
   <summary>Gemini CLI</summary>
 
-Gemini CLI stores MCP configuration in `~/.gemini/settings.json` for user scope or `.gemini/settings.json` for project scope.
+Configure the MCP server in either location:
+
+- **Unity project:** `.gemini/settings.json`.
+- **User account:** `%USERPROFILE%\.gemini\settings.json` on Windows, or `~/.gemini/settings.json` on Linux.
+
+Setting `GEMINI_CLI_HOME` moves the **User account** file to a `.gemini` folder inside that directory.
 
 ##### stdio | Windows (Native)
 
@@ -495,24 +737,11 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 {
   "mcpServers": {
     "unity": {
-      "httpUrl": "http://127.0.0.1:5080"
+      "type": "http",
+      "url": "http://127.0.0.1:5080"
     }
   }
 }
-```
-
-Equivalent CLI commands:
-
-##### Local stdio
-
-```bash
-gemini mcp add unity /home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit
-```
-
-##### HTTP
-
-```bash
-gemini mcp add --transport http unity http://127.0.0.1:5080
 ```
 
 </details>
@@ -520,7 +749,12 @@ gemini mcp add --transport http unity http://127.0.0.1:5080
 <details>
   <summary>GitHub Copilot CLI</summary>
 
-GitHub Copilot CLI stores MCP servers in `~/.copilot/mcp-config.json`.
+Configure the MCP server in either location:
+
+- **Unity project:** `.github/mcp.json` or `.mcp.json`.
+- **User account:** `%USERPROFILE%\.copilot\mcp-config.json` on Windows, or `~/.copilot/mcp-config.json` on Linux.
+
+Setting `COPILOT_HOME` moves the **User account** file to that directory.
 
 ##### stdio | Windows (Native)
 
@@ -528,7 +762,7 @@ GitHub Copilot CLI stores MCP servers in `~/.copilot/mcp-config.json`.
 {
   "mcpServers": {
     "unity": {
-      "type": "local",
+      "type": "stdio",
       "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
       "args": [],
       "env": {},
@@ -544,7 +778,7 @@ GitHub Copilot CLI stores MCP servers in `~/.copilot/mcp-config.json`.
 {
   "mcpServers": {
     "unity": {
-      "type": "local",
+      "type": "stdio",
       "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe",
       "args": [],
       "env": {},
@@ -560,7 +794,7 @@ GitHub Copilot CLI stores MCP servers in `~/.copilot/mcp-config.json`.
 {
   "mcpServers": {
     "unity": {
-      "type": "local",
+      "type": "stdio",
       "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
       "args": [],
       "env": {},
@@ -598,9 +832,60 @@ Interactive alternative:
 </details>
 
 <details>
+  <summary>Visual Studio / GitHub Copilot</summary>
+
+Visual Studio uses `mcp.json` with a top-level `servers` object.
+Configure the MCP server in either location:
+
+- **Unity project:** `.mcp.json`.
+- **User account:** `%USERPROFILE%\.mcp.json`.
+
+Visual Studio also recognizes `.vs/mcp.json`, `.vscode/mcp.json`, and `.cursor/mcp.json` inside the **Unity project** folder.
+
+##### stdio | Windows (Native)
+
+```json
+{
+  "servers": {
+    "unity": {
+      "type": "stdio",
+      "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
+      "args": []
+    }
+  }
+}
+```
+
+##### http
+
+```bash
+conduit --http [--port 5080] [--url http://127.0.0.1:5080]
+```
+
+```json
+{
+  "servers": {
+    "unity": {
+      "type": "http",
+      "url": "http://127.0.0.1:5080"
+    }
+  }
+}
+```
+
+</details>
+
+<details>
   <summary>VS Code / GitHub Copilot Chat</summary>
 
-VS Code uses `mcp.json` with a top-level `servers` object. For workspace scope, put it in `.vscode/mcp.json`; for user scope, open the user MCP configuration from the Command Palette.
+VS Code uses `mcp.json` with a top-level `servers` object.
+Configure the MCP server in either location:
+
+- **Unity project:** `.vscode/mcp.json`.
+- **User account on Windows:** `%APPDATA%\Code\User\mcp.json`.
+- **User account on Linux:** `~/.config/Code/User/mcp.json`, or the equivalent path under `XDG_CONFIG_HOME`.
+
+Named profiles use an opaque profile directory, so use **MCP: Open User Configuration** from the Command Palette when a named profile is active.
 
 ##### stdio | Windows (Native)
 
@@ -668,7 +953,16 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 <details>
   <summary>Antigravity</summary>
 
-You can get to the config file from **Manage MCP Servers → View raw config**.
+In the Antigravity IDE, open the Agent side panel and choose **… → MCP Servers → Manage MCP Servers → View raw config**. This opens the user-account configuration. Click **Refresh** in the MCP manager after saving changes.
+
+In Antigravity CLI, use `/mcp` to manage and reload MCP servers.
+
+Antigravity lets you configure the MCP server in either location:
+
+- **Unity project:** `.agents/mcp_config.json` in the folder opened as the workspace.
+- **User account:** `%USERPROFILE%\.gemini\config\mcp_config.json` on Windows, or `~/.gemini/config/mcp_config.json` on Linux.
+
+Paths under `%USERPROFILE%\.gemini\antigravity\` or `%USERPROFILE%\.gemini\antigravity-cli\` on Windows, and `~/.gemini/antigravity/` or `~/.gemini/antigravity-cli/` on Linux, are legacy.
 
 ##### stdio | Windows (Native)
 
@@ -678,7 +972,8 @@ You can get to the config file from **Manage MCP Servers → View raw config**.
     "unity": {
       "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
       "args": [],
-      "cwd": "C:\\src\\Conduit"
+      "cwd": "C:\\src\\Conduit",
+      "disabled": false
     }
   }
 }
@@ -692,7 +987,8 @@ You can get to the config file from **Manage MCP Servers → View raw config**.
     "unity": {
       "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe",
       "args": [],
-      "cwd": "/mnt/c/src/Conduit"
+      "cwd": "/mnt/c/src/Conduit",
+      "disabled": false
     }
   }
 }
@@ -706,7 +1002,25 @@ You can get to the config file from **Manage MCP Servers → View raw config**.
     "unity": {
       "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
       "args": [],
-      "cwd": "/home/you/src/Conduit"
+      "cwd": "/home/you/src/Conduit",
+      "disabled": false
+    }
+  }
+}
+```
+
+##### http
+
+```bash
+conduit --http --port 5080 --url http://127.0.0.1:5080
+```
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "serverUrl": "http://127.0.0.1:5080",
+      "disabled": false
     }
   }
 }
@@ -717,7 +1031,12 @@ You can get to the config file from **Manage MCP Servers → View raw config**.
 <details>
   <summary>Zed</summary>
 
-Zed uses `context_servers` in its settings. For project scope, put this in `.zed/settings.json`; for user scope, add it to your user settings.
+Zed uses `context_servers` in its settings.
+Configure the MCP server in either location:
+
+- **Unity project:** `.zed/settings.json`.
+- **User account on Windows:** `%APPDATA%\Zed\settings.json`.
+- **User account on Linux:** `~/.config/zed/settings.json`, or the equivalent path under `XDG_CONFIG_HOME`.
 
 ##### stdio | Windows (Native)
 
@@ -778,80 +1097,13 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 
 
 <details>
-  <summary>Roo Code</summary>
-
-Roo Code stores global MCP configuration in `mcp_settings.json`. For project-local setup, create `.roo/mcp.json`.
-
-##### stdio | Windows (Native)
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "command": "C:\\src\\Conduit\\Conduit.Server\\publish\\win-x64\\conduit.exe",
-      "args": [],
-      "cwd": "C:\\src\\Conduit",
-      "disabled": false
-    }
-  }
-}
-```
-
-##### stdio | Windows (WSL)
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "command": "/mnt/c/src/Conduit/Conduit.Server/publish/win-x64/conduit.exe",
-      "args": [],
-      "cwd": "/mnt/c/src/Conduit",
-      "disabled": false
-    }
-  }
-}
-```
-
-##### stdio | Linux
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
-      "args": [],
-      "cwd": "/home/you/src/Conduit",
-      "disabled": false
-    }
-  }
-}
-```
-
-##### http
-
-```bash
-conduit --http [--port 5080] [--url http://127.0.0.1:5080]
-```
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:5080",
-      "disabled": false
-    }
-  }
-}
-```
-
-</details>
-
-
-<details>
   <summary>JetBrains IDEs / Junie</summary>
 
-Junie in JetBrains IDEs and Junie CLI use the same MCP config file format. Use `~/.junie/mcp/mcp.json` for user scope or `.junie/mcp/mcp.json` in the project root for project scope.
+Junie in JetBrains IDEs and Junie CLI use the same MCP config file format.
+Configure the MCP server in either location:
+
+- **Unity project:** `.junie/mcp/mcp.json`.
+- **User account:** `%USERPROFILE%\.junie\mcp\mcp.json` on Windows, or `~/.junie/mcp/mcp.json` on Linux.
 
 ##### stdio | Windows (Native)
 

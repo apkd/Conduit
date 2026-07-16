@@ -7,18 +7,20 @@ using System.Text;
 
 namespace Conduit
 {
+    // built-in Unity JSON APIs cannot round-trip arbitrary editor settings
+    // this DOM retains unknown values and ordering
     static class ConduitSimpleJson
     {
         internal abstract class JsonValue { }
 
         internal sealed class JsonObjectValue : JsonValue
         {
-            public readonly Dictionary<string, JsonValue?> Properties = new(StringComparer.Ordinal);
+            public Dictionary<string, JsonValue?> Properties { get; } = new(StringComparer.Ordinal);
         }
 
         sealed class JsonArrayValue : JsonValue
         {
-            public readonly List<JsonValue?> Items = new();
+            public List<JsonValue?> Items { get; } = new();
         }
 
         sealed class JsonStringValue : JsonValue
@@ -33,6 +35,7 @@ namespace Conduit
 
         sealed class JsonNumberValue : JsonValue
         {
+            // preserve source spelling and precision for unrelated numeric settings
             public string Value = string.Empty;
         }
 
@@ -44,8 +47,8 @@ namespace Conduit
         public static JsonDocument ParseObject(string json)
         {
             var parser = new Parser(json);
-            var value = parser.ParseValue() as JsonObjectValue
-                        ?? throw new InvalidOperationException("JSON root must be an object.");
+            if (parser.ParseValue() is not JsonObjectValue value)
+                throw new InvalidOperationException("JSON root must be an object.");
 
             parser.ExpectEnd();
             return new() { Root = value };
@@ -59,12 +62,52 @@ namespace Conduit
             return builder.ToString();
         }
 
+        public static bool ContainsComments(string json)
+        {
+            // reads accept JSONC, but writers use this probe to avoid silently deleting comment trivia
+            bool inString = false;
+            bool escaped = false;
+            for (int index = 0, length = json.Length - 1; index < length; ++index)
+            {
+                if (inString)
+                {
+                    if (escaped)
+                    {
+                        escaped = false;
+                        continue;
+                    }
+
+                    if (json[index] == '\\')
+                        escaped = true;
+                    else if (json[index] == '"')
+                        inString = false;
+                    continue;
+                }
+
+                if (json[index] == '"')
+                {
+                    inString = true;
+                    continue;
+                }
+
+                if (json[index] == '/' && json[index + 1] is '/' or '*')
+                    return true;
+            }
+
+            return false;
+        }
+
         public static JsonObject EnsureObject(JsonObject parent, string propertyName)
         {
-            if (parent.Object.Properties.TryGetValue(propertyName, out var value) && value is JsonObjectValue objectValue)
-                return new() { Object = objectValue };
+            if (parent.Object.Properties.TryGetValue(propertyName, out var value))
+            {
+                if (value is JsonObjectValue existingObject)
+                    return new() { Object = existingObject };
 
-            objectValue = new();
+                throw new InvalidOperationException($"JSON property '{propertyName}' must be an object.");
+            }
+
+            var objectValue = new JsonObjectValue();
             parent.Object.Properties[propertyName] = objectValue;
             return new() { Object = objectValue };
         }
@@ -73,10 +116,11 @@ namespace Conduit
 
         public static JsonObject? GetObject(JsonObject? parent, string propertyName)
         {
-            if (parent == null)
+            if (parent is null)
                 return null;
 
-            return parent.Object.Properties.TryGetValue(propertyName, out var value) && value is JsonObjectValue objectValue
+            return parent.Object.Properties.TryGetValue(propertyName, out var value)
+                   && value is JsonObjectValue objectValue
                 ? new JsonObject { Object = objectValue }
                 : null;
         }
@@ -90,8 +134,8 @@ namespace Conduit
         public static void SetStringArray(JsonObject target, string propertyName, params string[] values)
         {
             var array = new JsonArrayValue();
-            for (var index = 0; index < values.Length; index++)
-                array.Items.Add(new JsonStringValue { Value = values[index] });
+            foreach (string value in values)
+                array.Items.Add(new JsonStringValue { Value = value });
 
             target.Object.Properties[propertyName] = array;
         }
@@ -100,18 +144,21 @@ namespace Conduit
             => target.Object.Properties.Remove(propertyName);
 
         public static string? GetString(JsonObject? target, string propertyName)
-            => target?.Object.Properties.TryGetValue(propertyName, out var value) == true && value is JsonStringValue stringValue
+            => target?.Object.Properties.TryGetValue(propertyName, out var value) == true
+               && value is JsonStringValue stringValue
                 ? stringValue.Value
                 : null;
 
         public static bool? GetBool(JsonObject? target, string propertyName)
-            => target?.Object.Properties.TryGetValue(propertyName, out var value) == true && value is JsonBoolValue boolValue
+            => target?.Object.Properties.TryGetValue(propertyName, out var value) == true
+               && value is JsonBoolValue boolValue
                 ? boolValue.Value
                 : null;
 
         public static string? GetFirstString(JsonObject? target, string propertyName)
         {
-            if (target?.Object.Properties.TryGetValue(propertyName, out var value) != true || value is not JsonArrayValue array || array.Items.Count == 0)
+            if (target?.Object.Properties.TryGetValue(propertyName, out var value) != true
+                || value is not JsonArrayValue { Items: { Count: > 0 } } array)
                 return null;
 
             return array.Items[0] is JsonStringValue stringValue ? stringValue.Value : null;
@@ -165,7 +212,7 @@ namespace Conduit
             }
 
             builder.Append('\n');
-            var first = true;
+            bool first = true;
             foreach (var pair in value.Properties)
             {
                 if (!first)
@@ -193,7 +240,7 @@ namespace Conduit
             }
 
             builder.Append('\n');
-            for (var index = 0; index < value.Items.Count; index++)
+            for (int index = 0, count = value.Items.Count; index < count; ++index)
             {
                 if (index > 0)
                     builder.Append(",\n");
@@ -210,9 +257,9 @@ namespace Conduit
         static void WriteString(StringBuilder builder, string value)
         {
             builder.Append('"');
-            for (var index = 0; index < value.Length; index++)
+            foreach (char character in value)
             {
-                switch (value[index])
+                switch (character)
                 {
                     case '\\':
                         builder.Append("\\\\");
@@ -237,10 +284,11 @@ namespace Conduit
                         break;
                     default:
                     {
-                        if (char.IsControl(value[index]))
-                            builder.Append("\\u").Append(((int)value[index]).ToString("x4", CultureInfo.InvariantCulture));
+                        if (char.IsControl(character))
+                            builder.Append("\\u")
+                                .Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
                         else
-                            builder.Append(value[index]);
+                            builder.Append(character);
 
                         break;
                     }
@@ -272,7 +320,9 @@ namespace Conduit
                     'f'                      => ParseLiteral("false", new JsonBoolValue { Value = false }),
                     'n'                      => ParseLiteral("null", JsonNullValue.Instance),
                     '-' or >= '0' and <= '9' => new JsonNumberValue { Value = ParseNumber() },
-                    _                        => throw new InvalidOperationException($"Unexpected JSON token '{json[index]}'."),
+                    _ => throw new InvalidOperationException(
+                        $"Unexpected JSON token '{json[index]}'."
+                    ),
                 };
             }
 
@@ -294,7 +344,7 @@ namespace Conduit
                 while (true)
                 {
                     SkipWhitespace();
-                    var key = ParseString();
+                    string key = ParseString();
                     SkipWhitespace();
                     Expect(':');
                     value.Properties[key] = ParseValue();
@@ -303,6 +353,10 @@ namespace Conduit
                         return value;
 
                     Expect(',');
+                    SkipWhitespace();
+                    // editor JSONC commonly permits a trailing comma
+                    if (TryConsume('}'))
+                        return value;
                 }
             }
 
@@ -322,6 +376,10 @@ namespace Conduit
                         return value;
 
                     Expect(',');
+                    SkipWhitespace();
+                    // editor JSONC commonly permits a trailing comma
+                    if (TryConsume(']'))
+                        return value;
                 }
             }
 
@@ -331,7 +389,7 @@ namespace Conduit
                 var builder = new StringBuilder();
                 while (index < json.Length)
                 {
-                    var character = json[index++];
+                    char character = json[index++];
                     if (character == '"')
                         return builder.ToString();
 
@@ -374,7 +432,11 @@ namespace Conduit
                             if (index + 4 > json.Length)
                                 throw new InvalidOperationException("Unexpected end of JSON unicode escape.");
 
-                            builder.Append((char)int.Parse(json.Substring(index, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+                            builder.Append((char)int.Parse(
+                                json[index..(index + 4)],
+                                NumberStyles.HexNumber,
+                                CultureInfo.InvariantCulture
+                            ));
                             index += 4;
                             break;
                         default:
@@ -387,7 +449,7 @@ namespace Conduit
 
             string ParseNumber()
             {
-                var start = index;
+                int start = index;
                 if (json[index] == '-')
                     index++;
 
@@ -416,7 +478,12 @@ namespace Conduit
 
             JsonValue ParseLiteral(string literal, JsonValue value)
             {
-                if (index + literal.Length > json.Length || !string.Equals(json.Substring(index, literal.Length), literal, StringComparison.Ordinal))
+                if (index + literal.Length > json.Length
+                    || !string.Equals(
+                        json[index..(index + literal.Length)],
+                        literal,
+                        StringComparison.Ordinal
+                    ))
                     throw new InvalidOperationException($"Expected '{literal}'.");
 
                 index += literal.Length;
@@ -425,8 +492,35 @@ namespace Conduit
 
             void SkipWhitespace()
             {
-                while (index < json.Length && char.IsWhiteSpace(json[index]))
-                    index++;
+                while (index < json.Length)
+                {
+                    if (char.IsWhiteSpace(json[index]))
+                    {
+                        index++;
+                        continue;
+                    }
+
+                    if (index + 1 >= json.Length || json[index] != '/')
+                        return;
+
+                    // editor settings commonly use JSONC even when the file extension is .json
+                    if (json[index + 1] == '/')
+                    {
+                        index += 2;
+                        while (index < json.Length && json[index] != '\n')
+                            index++;
+                        continue;
+                    }
+
+                    if (json[index + 1] != '*')
+                        return;
+
+                    int commentEnd = json.IndexOf("*/", index + 2, StringComparison.Ordinal);
+                    if (commentEnd < 0)
+                        throw new InvalidOperationException("Unterminated JSON comment.");
+
+                    index = commentEnd + 2;
+                }
             }
 
             void Expect(char character)

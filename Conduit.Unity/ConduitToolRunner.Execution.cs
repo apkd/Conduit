@@ -201,6 +201,7 @@ namespace Conduit
                 return;
             }
 
+            ConduitGameViewFocus.Prepare();
             enterPlayModeRequested = true;
             EditorApplication.isPlaying = true;
         }

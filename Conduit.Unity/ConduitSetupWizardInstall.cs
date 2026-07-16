@@ -15,50 +15,194 @@ namespace Conduit
 {
     static partial class ConduitSetupWizardUtility
     {
+        const string LatestDownloadUrl = "https://github.com/apkd/Conduit/releases/latest/download";
+
         internal static Func<string>? GetCurrentPackageVersionOverride;
         internal static Func<string, string?>? ProbeExecutableVersionOverride;
         internal static Action<string>? StopRunningExecutableOverride;
+        internal static Func<string?>? DiscoverExecutableOverride;
+        internal static Func<string>? GetUserInstalledExecutablePathOverride;
 
-        static readonly Dictionary<string, CachedExecutableVersion> executableVersionCache = new(StringComparer.OrdinalIgnoreCase);
+        // frequent Preferences repaints would otherwise spawn a process for every frame
+        static readonly Dictionary<string, CachedExecutableVersion> executableVersionCache = new(
+            StringComparer.OrdinalIgnoreCase
+        );
+        static readonly Dictionary<string, bool> executableWriteabilityCache = new(StringComparer.OrdinalIgnoreCase);
         static CachedPackageVersion cachedPackageVersion;
         static bool hasCachedPackageVersion;
 
-        public static ButtonModel EvaluateDownloadButton(string serverExecutablePath, string configuredExecutablePath, bool isRunning, bool hasError)
+        public static ButtonModel EvaluateDownloadButton(
+            string serverExecutablePath,
+            string configuredExecutablePath,
+            bool isRunning,
+            bool hasError
+        )
+            => EvaluateDownloadButtonCore(
+                ConfigurationLocation.Project,
+                GetEffectiveExecutablePath(serverExecutablePath, configuredExecutablePath),
+                isRunning,
+                hasError
+            );
+
+        public static ButtonModel EvaluateDownloadButton(
+            ConfigurationLocation location,
+            string serverExecutablePath,
+            string configuredExecutablePath,
+            bool isRunning,
+            bool hasError
+        )
+            => EvaluateDownloadButtonCore(
+                location,
+                GetEffectiveExecutablePath(
+                    location,
+                    serverExecutablePath,
+                    configuredExecutablePath
+                ),
+                isRunning,
+                hasError
+            );
+
+        internal static ButtonModel EvaluateDownloadButtonCore(
+            ConfigurationLocation location,
+            string executablePath,
+            bool isRunning,
+            bool hasError
+        )
         {
+            bool isOutdated = ShouldOfferServerUpdate(
+                executablePath,
+                out var installedVersion,
+                out var packageVersion
+            );
+            if (isOutdated && IsNixOsSystemProfilePath(executablePath))
+                return new()
+                {
+                    State = ActionState.Disabled,
+                    Label = "MCP server managed by NixOS",
+                    Hint =
+                        $"Conduit is installed through the NixOS system profile at `{executablePath}`. " +
+                        "Update it through your NixOS configuration instead of this wizard.",
+                    IsOutdated = false,
+                };
+
             if (isRunning)
-                return new() { State = ActionState.Running, Label = "Downloading MCP Server...", Hint = "Downloading the Windows and Linux server binaries." };
+                return new()
+                {
+                    State = ActionState.Running,
+                    Label = executablePath.Length > 0 ? "Updating the MCP server..." : "Downloading the MCP server...",
+                    Hint = executablePath.Length > 0
+                        ? $"Downloading the latest server release and replacing `{executablePath}`."
+                        : location == ConfigurationLocation.User
+                            ? $"Downloading the MCP server for this operating system to " +
+                              $"`{GetUserInstalledExecutablePath()}`."
+                            : "Downloading the Windows and Linux server binaries.",
+                    IsOutdated = isOutdated,
+                };
 
             if (hasError)
-                return new() { State = ActionState.Error, Label = "Download MCP Server", Hint = "The previous download failed. Check the Console for details." };
+                return new()
+                {
+                    State = ActionState.Error,
+                    Label = executablePath.Length > 0 ? "Update the MCP server" : "Download the MCP server",
+                    Hint =
+                        "The previous server download failed. " +
+                        "The Console contains the full error and the destination path.",
+                    IsOutdated = isOutdated,
+                };
+
+            if (executablePath.Length > 0 && !TryGetExecutableVersion(executablePath, out _))
+            {
+                if (!CanDownloadServer(out var unsupportedReason))
+                    return new()
+                    {
+                        State = ActionState.Error,
+                        Label = "MCP server reinstall is unavailable on this platform",
+                        Hint = unsupportedReason,
+                        IsOutdated = isOutdated,
+                    };
+
+                if (!CanAutomaticallyUpdateServer(executablePath, out var updateReason))
+                    return new()
+                    {
+                        State = ActionState.Error,
+                        Label = "MCP server binary cannot be reinstalled automatically",
+                        Hint = updateReason,
+                        IsOutdated = isOutdated,
+                    };
+
+                return new()
+                {
+                    State = ActionState.Enabled,
+                    Label = "Reinstall the MCP server",
+                    Hint =
+                        $"The server at `{executablePath}` could not report its version. " +
+                        "Download a fresh copy and replace it in place.",
+                    IsOutdated = isOutdated,
+                };
+            }
+
+            if (isOutdated)
+            {
+                if (!CanAutomaticallyUpdateServer(executablePath, out var updateReason))
+                    return new()
+                    {
+                        State = ActionState.Error,
+                        Label = "MCP server binary is outdated but not writeable",
+                        Hint = updateReason,
+                        IsOutdated = true,
+                    };
+
+                if (!CanDownloadServer(out var unsupportedReason))
+                    return new()
+                    {
+                        State = ActionState.Error,
+                        Label = "MCP server update is unavailable on this platform",
+                        Hint = unsupportedReason,
+                        IsOutdated = true,
+                    };
+
+                return new()
+                {
+                    State = ActionState.Enabled,
+                    Label = "Update the MCP server",
+                    Hint =
+                        $"The installed server version {installedVersion} is older than " +
+                        $"the Unity package version {packageVersion}. Replace `{executablePath}` in place.",
+                    IsOutdated = true,
+                };
+            }
+
+            if (executablePath.Length > 0)
+            {
+                string hint = $"The MCP server is installed in: `{executablePath}`.";
+
+                return new()
+                {
+                    State = ActionState.Success,
+                    Label = "MCP server installed",
+                    Hint = hint,
+                    IsOutdated = isOutdated,
+                };
+            }
 
             if (!CanDownloadServer(out var reason))
-                return new() { State = ActionState.Disabled, Label = "Download MCP Server", Hint = reason };
-
-            var executablePath = GetEffectiveExecutablePath(serverExecutablePath, configuredExecutablePath);
-            if (ShouldOfferServerReinstall(executablePath))
                 return new()
                 {
-                    State = ActionState.Enabled,
-                    Label = "Reinstall MCP Server",
-                    Hint = $"The installed server at {executablePath} could not report its version. Download a fresh copy."
+                    State = ActionState.Disabled,
+                    Label = "Download the MCP server",
+                    Hint = reason,
+                    IsOutdated = isOutdated,
                 };
 
-            if (ShouldOfferServerUpdate(executablePath, out var installedVersion, out var packageVersion))
-                return new()
-                {
-                    State = ActionState.Enabled,
-                    Label = "Update MCP Server",
-                    Hint = $"Installed server {installedVersion} is older than package version {packageVersion}. Overwrite {executablePath}."
-                };
-
-            return executablePath.Length > 0
-                ? new() { State = ActionState.Success, Label = "MCP Server Downloaded", Hint = executablePath }
-                : new()
-                {
-                    State = ActionState.Enabled,
-                    Label = "Download MCP Server",
-                    Hint = $"Download the Windows and Linux server binaries into {GetInstallDisplayPath()}."
-                };
+            return new()
+            {
+                State = ActionState.Enabled,
+                Label = "Download the MCP server",
+                Hint = location == ConfigurationLocation.User
+                    ? $"Download only the MCP server binary for this operating system to `{GetUserInstalledExecutablePath()}`."
+                    : $"Download the Windows and Linux binaries to the project directory: `{GetInstallDirectoryPath()}`. ",
+                IsOutdated = isOutdated,
+            };
         }
 
         public static string GetEffectiveExecutablePath(string serverExecutablePath, string configuredExecutablePath)
@@ -69,19 +213,89 @@ namespace Conduit
             if (configuredExecutablePath.Length > 0 && File.Exists(configuredExecutablePath))
                 return configuredExecutablePath;
 
+            if (DiscoverExecutableOverride is { } discoverExecutable)
+            {
+                string? discoveredPath = discoverExecutable();
+                if (discoveredPath is { Length: > 0 } && File.Exists(discoveredPath))
+                    return discoveredPath;
+            }
+            else
+            {
+                if (TryGetAnyConfiguredExecutablePath(out var discoveredConfiguredPath, out _))
+                    return discoveredConfiguredPath;
+
+                if (TryFindServerExecutableOnPath(out var pathExecutable))
+                    return pathExecutable;
+            }
+
             return TryGetInstalledExecutablePath(out var installedPath) ? installedPath : string.Empty;
         }
 
-        static bool ShouldOfferServerReinstall(string executablePath)
-            => executablePath.Length > 0 && !TryGetExecutableVersion(executablePath, out _);
+        public static string GetEffectiveExecutablePath(
+            ConfigurationLocation location,
+            string serverExecutablePath,
+            string configuredExecutablePath
+        )
+        {
+            if (configuredExecutablePath.Length > 0 && File.Exists(configuredExecutablePath))
+                return configuredExecutablePath;
 
-        public static async Task<string> DownloadServerAsync()
+            string projectRoot = ConduitAssetPathUtility.GetProjectRootPath();
+            if (serverExecutablePath.Length > 0 && File.Exists(serverExecutablePath))
+            {
+                bool serverIsInProject = IsPathWithin(serverExecutablePath, projectRoot);
+                bool belongsToLocation = location == ConfigurationLocation.Project
+                    ? serverIsInProject
+                    : !serverIsInProject;
+                if (belongsToLocation)
+                    return serverExecutablePath;
+            }
+
+            if (location == ConfigurationLocation.Project)
+                return TryGetInstalledExecutablePath(out var projectExecutablePath)
+                    ? projectExecutablePath
+                    : string.Empty;
+
+            if (TryGetUserInstalledExecutablePath(out var userExecutablePath)
+                && File.Exists(userExecutablePath))
+                return userExecutablePath;
+
+            if (DiscoverExecutableOverride is { } discoverExecutable)
+            {
+                string? discoveredPath = discoverExecutable();
+                if (discoveredPath is { Length: > 0 }
+                    && File.Exists(discoveredPath)
+                    && !IsPathWithin(discoveredPath, projectRoot))
+                    return discoveredPath;
+            }
+            else if (TryFindServerExecutableOnPath(out var pathExecutable)
+                     && !IsPathWithin(pathExecutable, projectRoot))
+                return pathExecutable;
+
+            return string.Empty;
+        }
+
+        public static async Task<string> DownloadServerAsync(string existingExecutablePath = "")
+            => await DownloadServerAsync(ConfigurationLocation.Project, existingExecutablePath);
+
+        public static async Task<string> DownloadServerAsync(
+            ConfigurationLocation location,
+            string existingExecutablePath = ""
+        )
         {
             if (!CanDownloadServer(out var reason))
                 throw new InvalidOperationException(reason);
 
-            var progressId = Progress.Start("Conduit Setup", "Downloading MCP server", Progress.Options.Managed);
-            var wasCancelled = false;
+            if (existingExecutablePath.Length > 0
+                && !CanAutomaticallyUpdateServer(existingExecutablePath, out var updateReason))
+                throw new InvalidOperationException(updateReason);
+
+            int progressId = Progress.Start(
+                "Conduit Setup",
+                "Downloading MCP server",
+                Progress.Options.Managed
+            );
+            bool wasCancelled = false;
             Progress.RegisterCancelCallback(progressId, () =>
             {
                 wasCancelled = true;
@@ -90,27 +304,27 @@ namespace Conduit
 
             try
             {
-                Directory.CreateDirectory(GetInstallDirectoryPath());
-                var downloads = new[]
-                {
-                    new DownloadTarget
-                    {
-                        Url = $"https://github.com/apkd/Conduit/releases/latest/download/{GetLinuxDownloadAssetName()}",
-                        DestinationPath = GetInstalledLinuxExecutablePath(),
-                        NeedsExecutableBit = true,
-                    },
-                    new DownloadTarget
-                    {
-                        Url = "https://github.com/apkd/Conduit/releases/latest/download/conduit-win-x64.exe",
-                        DestinationPath = GetInstalledWindowsExecutablePath(),
-                    },
-                };
+                var downloads = CreateDownloadTargets(location, existingExecutablePath);
 
-                for (var index = 0; index < downloads.Length; index++)
-                    await DownloadTargetAsync(downloads[index], progressId, () => wasCancelled, index, downloads.Length);
+                for (int index = 0, count = downloads.Length; index < count; ++index)
+                    await DownloadTargetAsync(
+                        downloads[index],
+                        progressId,
+                        () => wasCancelled,
+                        index,
+                        count
+                    );
+
+                if (existingExecutablePath.Length > 0)
+                    return Path.GetFullPath(existingExecutablePath);
+
+                if (location == ConfigurationLocation.User)
+                    return GetUserInstalledExecutablePath();
 
                 if (!TryGetInstalledExecutablePath(out var executablePath))
-                    throw new InvalidOperationException("The server binaries were downloaded, but no executable matches the current OS.");
+                    throw new InvalidOperationException(
+                        "The server binaries were downloaded, but no executable matches the current OS."
+                    );
 
                 return executablePath;
             }
@@ -118,6 +332,53 @@ namespace Conduit
             {
                 Progress.Remove(progressId);
             }
+        }
+
+        internal static DownloadTarget[] CreateDownloadTargets(
+            ConfigurationLocation location,
+            string existingExecutablePath
+        )
+        {
+            // project installs remain portable; user installs need only the current host's executable
+            if (existingExecutablePath.Length > 0)
+                return new[] { CreateCurrentPlatformTarget(existingExecutablePath) };
+
+            if (location == ConfigurationLocation.User)
+                return new[] { CreateCurrentPlatformTarget(GetUserInstalledExecutablePath()) };
+
+            return new[]
+            {
+                new DownloadTarget
+                {
+                    Url = $"{LatestDownloadUrl}/{GetLinuxDownloadAssetName()}",
+                    DestinationPath = GetInstalledLinuxExecutablePath(),
+                    NeedsExecutableBit = true,
+                },
+                new DownloadTarget
+                {
+                    Url = LatestDownloadUrl + "/conduit-win-x64.exe",
+                    DestinationPath = GetInstalledWindowsExecutablePath(),
+                },
+            };
+
+            DownloadTarget CreateCurrentPlatformTarget(string destinationPath)
+                => Application.platform switch
+                {
+                    RuntimePlatform.LinuxEditor => new()
+                    {
+                        Url = $"{LatestDownloadUrl}/{GetLinuxDownloadAssetName()}",
+                        DestinationPath = destinationPath,
+                        NeedsExecutableBit = true,
+                    },
+                    RuntimePlatform.WindowsEditor => new()
+                    {
+                        Url = LatestDownloadUrl + "/conduit-win-x64.exe",
+                        DestinationPath = destinationPath,
+                    },
+                    _ => throw new InvalidOperationException(
+                        "Conduit does not publish an MCP server binary for this editor platform."
+                    ),
+                };
         }
 
         static bool CanDownloadServer(out string reason)
@@ -134,14 +395,139 @@ namespace Conduit
             }
         }
 
-        static string GetInstallDirectoryPath() => Combine(ConduitAssetPathUtility.GetProjectRootPath(), "Conduit");
+        static bool CanAutomaticallyUpdateServer(string executablePath, out string reason)
+        {
+            string fullPath = Path.GetFullPath(executablePath);
+            string homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string projectPath = ConduitAssetPathUtility.GetProjectRootPath();
+            // a PATH lookup can find system-managed binaries whose lifecycle Conduit must not take over
+            if (!IsAutomaticUpdateLocation(fullPath, homePath, projectPath))
+            {
+                reason = $"Conduit cannot automatically update MCP server executables in this path: `{fullPath}`.";
+                return false;
+            }
 
-        static string GetInstallDisplayPath() => $"{Path.GetFileName(ConduitAssetPathUtility.GetProjectRootPath())}/Conduit";
+            if (!CanWriteExecutable(fullPath))
+            {
+                reason =
+                    $"Your user account cannot replace the MCP server at `{fullPath}`. Grant it write permission, " +
+                    "move it into a writable directory, or update it manually from " +
+                    $"{ConduitPackageUpdater.ReleasesUrl}.";
+                return false;
+            }
+
+            reason = string.Empty;
+            return true;
+        }
+
+        internal static bool IsAutomaticUpdateLocation(string path, string homePath, string projectPath)
+            => IsPathWithin(path, homePath) || IsPathWithin(path, projectPath);
+
+        internal static bool IsPathWithin(string path, string rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(rootPath))
+                return false;
+
+            string relativePath = Path.GetRelativePath(
+                Path.GetFullPath(rootPath),
+                Path.GetFullPath(path)
+            );
+            return relativePath != ".."
+                   && !relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                   && !Path.IsPathRooted(relativePath);
+        }
+
+        static bool CanWriteExecutable(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            lock (executableWriteabilityCache)
+                if (executableWriteabilityCache.TryGetValue(fullPath, out var cached))
+                    return cached;
+
+            bool canWrite = ProbeWriteability(fullPath);
+            lock (executableWriteabilityCache)
+                executableWriteabilityCache[fullPath] = canWrite;
+            return canWrite;
+
+            static bool ProbeWriteability(string fullPath)
+            {
+                try
+                {
+                    // replacing a binary requires write access to both the file and its containing directory
+                    if (!File.Exists(fullPath)
+                        || (File.GetAttributes(fullPath) & FileAttributes.ReadOnly) != 0)
+                        return false;
+
+                    if (Application.platform is RuntimePlatform.LinuxEditor or RuntimePlatform.OSXEditor
+                        && access(fullPath, 2) != 0)
+                        return false;
+
+                    if (Path.GetDirectoryName(fullPath) is not { Length: > 0 } directoryPath)
+                        return false;
+
+                    string probePath = Path.Combine(
+                        directoryPath,
+                        $".conduit-write-{Guid.NewGuid():N}"
+                    );
+                    try
+                    {
+                        using (File.Create(probePath)) { }
+                    }
+                    finally
+                    {
+                        TryDeleteFile(probePath);
+                    }
+
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        static string GetInstallDirectoryPath() => Combine(ConduitAssetPathUtility.GetProjectRootPath(), "Conduit");
 
         static string GetInstalledWindowsExecutablePath() => Combine(GetInstallDirectoryPath(), "conduit.exe");
 
         static string GetInstalledLinuxExecutablePath() => Combine(GetInstallDirectoryPath(), "conduit");
 
+        static string GetUserInstalledExecutablePath()
+            => GetUserInstalledExecutablePathOverride?.Invoke()
+               ?? GetUserInstalledExecutablePath(
+                   Application.platform,
+                   Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                   Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+               );
+
+        internal static string GetUserInstalledExecutablePath(
+            RuntimePlatform platform,
+            string userHome,
+            string localAppData
+        )
+            => platform switch
+            {
+                RuntimePlatform.WindowsEditor => Combine(localAppData, "Conduit", "conduit.exe"),
+                RuntimePlatform.LinuxEditor => Combine(userHome, ".local", "bin", "conduit"),
+                _ => throw new InvalidOperationException(
+                    "Conduit does not publish an MCP server binary for this editor platform."
+                ),
+            };
+
+        static bool TryGetUserInstalledExecutablePath(out string executablePath)
+        {
+            if (Application.platform is not (RuntimePlatform.WindowsEditor or RuntimePlatform.LinuxEditor))
+            {
+                executablePath = string.Empty;
+                return false;
+            }
+
+            executablePath = GetUserInstalledExecutablePath();
+            return true;
+        }
+
+        // the generic glibc build cannot run on NixOS without an FHS compatibility environment
         internal static string GetLinuxDownloadAssetName() =>
             IsNixOsLinux(
                 Application.platform == RuntimePlatform.LinuxEditor,
@@ -169,26 +555,29 @@ namespace Conduit
 
                 try
                 {
-                    foreach (var line in readLines(path))
+                    foreach (string line in readLines(path))
                     {
-                        var trimmed = line.Trim();
+                        string trimmed = line.Trim();
                         if (trimmed.Length == 0 || trimmed.StartsWith("#", StringComparison.Ordinal))
                             continue;
 
-                        var separatorIndex = trimmed.IndexOf('=');
+                        int separatorIndex = trimmed.IndexOf('=');
                         if (separatorIndex <= 0)
                             continue;
 
-                        var key = trimmed[..separatorIndex].Trim();
+                        string key = trimmed[..separatorIndex].Trim();
                         if (key is not ("ID" or "ID_LIKE"))
                             continue;
 
-                        var value = trimmed[(separatorIndex + 1)..].Trim().Trim('"', '\'');
+                        string value = trimmed[(separatorIndex + 1)..].Trim().Trim('"', '\'');
                         if (key == "ID" && string.Equals(value, "nixos", StringComparison.OrdinalIgnoreCase))
                             return true;
 
                         if (key == "ID_LIKE")
-                            foreach (var token in value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                            foreach (string token in value.Split(
+                                         new[] { ' ', '\t' },
+                                         StringSplitOptions.RemoveEmptyEntries
+                                     ))
                                 if (string.Equals(token, "nixos", StringComparison.OrdinalIgnoreCase))
                                     return true;
                     }
@@ -202,6 +591,20 @@ namespace Conduit
                     return false;
                 }
 
+                return false;
+            }
+        }
+
+        internal static bool IsNixOsSystemProfilePath(string path)
+        {
+            try
+            {
+                // /run/current-system is the immutable system profile selected by a NixOS rebuild
+                string fullPath = Path.GetFullPath(path).Replace('\\', '/');
+                return fullPath.StartsWith("/run/current-system/", StringComparison.Ordinal);
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -222,11 +625,6 @@ namespace Conduit
             }
         }
 
-        /*
-         * Keep the download out of the project until it is complete.
-         * A temp file avoids half-written executables at the final path and
-         * lets us replace the destination in one short filesystem step.
-         */
         static void SetExecutableBit(string path)
         {
             if (Application.platform is not (RuntimePlatform.LinuxEditor or RuntimePlatform.OSXEditor))
@@ -247,11 +645,30 @@ namespace Conduit
             catch { }
         }
 
-        static async Task DownloadTargetAsync(DownloadTarget target, int progressId, Func<bool> wasCancelled, int index, int total)
+        static async Task DownloadTargetAsync(
+            DownloadTarget target,
+            int progressId,
+            Func<bool> wasCancelled,
+            int index,
+            int total
+        )
         {
-            var tempPath = Path.Combine(Path.GetTempPath(), $"conduit-{Guid.NewGuid():N}.download");
+            string tempPath = Path.Combine(
+                Path.GetTempPath(),
+                $"conduit-{Guid.NewGuid():N}.download"
+            );
+            string destinationDirectory = Path.GetDirectoryName(target.DestinationPath)
+                                          ?? throw new InvalidOperationException(
+                                              $"Invalid destination path '{target.DestinationPath}'."
+                                          );
+            string stagedPath = Path.Combine(
+                destinationDirectory,
+                $".{Path.GetFileName(target.DestinationPath)}-{Guid.NewGuid():N}.update"
+            );
             try
             {
+                // stage beside the destination so the final replacement stays on one filesystem
+                Directory.CreateDirectory(destinationDirectory);
                 using var request = UnityWebRequest.Get(target.Url);
                 request.downloadHandler = new DownloadHandlerFile(tempPath) { removeFileOnAbort = true };
                 request.SetRequestHeader("User-Agent", "Conduit-Unity-Setup");
@@ -265,7 +682,7 @@ namespace Conduit
                         throw new OperationCanceledException("Server download was cancelled.");
                     }
 
-                    var progress = request.downloadProgress >= 0 ? request.downloadProgress : 0f;
+                    float progress = request.downloadProgress >= 0 ? request.downloadProgress : 0f;
                     Progress.Report(
                         progressId,
                         (index + progress) / total,
@@ -276,18 +693,33 @@ namespace Conduit
                 if (request.result != UnityWebRequest.Result.Success)
                     throw new InvalidOperationException(request.error ?? $"Download failed for '{target.Url}'.");
 
-                PrepareDestinationForOverwrite(target.DestinationPath);
-                File.Copy(tempPath, target.DestinationPath, true);
+                File.Copy(tempPath, stagedPath, true);
                 if (target.NeedsExecutableBit)
-                    SetExecutableBit(target.DestinationPath);
+                    SetExecutableBit(stagedPath);
+
+                PrepareDestinationForOverwrite(target.DestinationPath);
+                ReplaceDownloadedFile(stagedPath, target.DestinationPath);
             }
             finally
             {
                 TryDeleteFile(tempPath);
+                TryDeleteFile(stagedPath);
             }
         }
 
-        static bool ShouldOfferServerUpdate(string executablePath, out string installedVersion, out string packageVersion)
+        internal static void ReplaceDownloadedFile(string stagedPath, string destinationPath)
+        {
+            if (File.Exists(destinationPath))
+                File.Replace(stagedPath, destinationPath, null);
+            else
+                File.Move(stagedPath, destinationPath);
+        }
+
+        static bool ShouldOfferServerUpdate(
+            string executablePath,
+            out string installedVersion,
+            out string packageVersion
+        )
         {
             installedVersion = string.Empty;
             packageVersion = GetCurrentPackageVersion();
@@ -302,14 +734,18 @@ namespace Conduit
 
         static string GetCurrentPackageVersion()
         {
-            if (GetCurrentPackageVersionOverride != null)
-                return GetCurrentPackageVersionOverride();
+            if (GetCurrentPackageVersionOverride is { } getCurrentPackageVersion)
+                return getCurrentPackageVersion();
 
             var packageInfo = PackageInfo.FindForAssembly(typeof(ConduitProjectIdentity).Assembly);
-            if (packageInfo == null || string.IsNullOrWhiteSpace(packageInfo.resolvedPath))
+            if (packageInfo?.resolvedPath is not { } resolvedPath
+                || string.IsNullOrWhiteSpace(resolvedPath))
                 return packageInfo?.version ?? string.Empty;
 
-            var packageJsonPath = Path.Combine(Path.GetFullPath(packageInfo.resolvedPath), "package.json");
+            string packageJsonPath = Path.Combine(
+                Path.GetFullPath(resolvedPath),
+                "package.json"
+            );
             if (!File.Exists(packageJsonPath))
                 return packageInfo.version ?? string.Empty;
 
@@ -321,7 +757,7 @@ namespace Conduit
                     && cachedPackageVersion.LastWriteUtc == fileInfo.LastWriteTimeUtc)
                     return cachedPackageVersion.Version;
 
-            var version = packageInfo.version ?? string.Empty;
+            string version = packageInfo.version ?? string.Empty;
             lock (executableVersionCache)
             {
                 cachedPackageVersion = new()
@@ -343,7 +779,7 @@ namespace Conduit
             if (!File.Exists(executablePath))
                 return false;
 
-            var fullPath = Path.GetFullPath(executablePath);
+            string fullPath = Path.GetFullPath(executablePath);
             var fileInfo = new FileInfo(fullPath);
             lock (executableVersionCache)
                 if (executableVersionCache.TryGetValue(fullPath, out var cached)
@@ -354,7 +790,9 @@ namespace Conduit
                     return version.Length > 0;
                 }
 
-            version = ProbeExecutableVersionOverride?.Invoke(fullPath) ?? ProbeExecutableVersion(fullPath) ?? string.Empty;
+            version = ProbeExecutableVersionOverride?.Invoke(fullPath)
+                      ?? ProbeExecutableVersion(fullPath)
+                      ?? string.Empty;
             lock (executableVersionCache)
                 executableVersionCache[fullPath] = new()
                 {
@@ -380,11 +818,12 @@ namespace Conduit
                     }
                 );
 
-                if (process == null)
+                if (process is null)
                     return null;
 
                 if (!process.WaitForExit(3000))
                 {
+                    // configured commands are external input and must not hang the Preferences UI indefinitely
                     try
                     {
                         process.Kill();
@@ -395,7 +834,7 @@ namespace Conduit
                     return null;
                 }
 
-                var output = process.StandardOutput.ReadToEnd().Trim();
+                string output = process.StandardOutput.ReadToEnd().Trim();
                 return process.ExitCode == 0 && output.Length > 0 ? output : null;
             }
             catch
@@ -410,11 +849,11 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(value))
                 return false;
 
-            var length = 0;
-            var sawDigit = false;
+            int length = 0;
+            bool sawDigit = false;
             for (; length < value.Length; length++)
             {
-                var character = value[length];
+                char character = value[length];
                 if (character is >= '0' and <= '9')
                 {
                     sawDigit = true;
@@ -432,14 +871,14 @@ namespace Conduit
 
         static void PrepareDestinationForOverwrite(string destinationPath)
         {
-            if (!IsCurrentPlatformInstalledExecutable(destinationPath))
+            string fullPath = Path.GetFullPath(destinationPath);
+            if (StopRunningExecutableOverride is { } stopRunningExecutable)
+            {
+                stopRunningExecutable(fullPath);
                 return;
+            }
 
-            var fullPath = Path.GetFullPath(destinationPath);
-            StopRunningExecutableOverride?.Invoke(fullPath);
-            if (StopRunningExecutableOverride != null)
-                return;
-
+            // running executables are locked on Windows, and every OS should start the new version afterward
             foreach (var process in Process.GetProcesses())
                 try
                 {
@@ -459,14 +898,6 @@ namespace Conduit
                 }
         }
 
-        static bool IsCurrentPlatformInstalledExecutable(string path)
-            => Application.platform switch
-            {
-                RuntimePlatform.WindowsEditor => PathsEqual(path, GetInstalledWindowsExecutablePath()),
-                RuntimePlatform.LinuxEditor => PathsEqual(path, GetInstalledLinuxExecutablePath()),
-                _ => false,
-            };
-
         static string? TryGetProcessPath(Process process)
         {
             try
@@ -484,37 +915,44 @@ namespace Conduit
             GetCurrentPackageVersionOverride = null;
             ProbeExecutableVersionOverride = null;
             StopRunningExecutableOverride = null;
+            DiscoverExecutableOverride = null;
+            GetUserInstalledExecutablePathOverride = null;
             lock (executableVersionCache)
             {
                 executableVersionCache.Clear();
                 cachedPackageVersion = default;
                 hasCachedPackageVersion = false;
             }
+            lock (executableWriteabilityCache)
+                executableWriteabilityCache.Clear();
         }
 
-        struct DownloadTarget
+        internal struct DownloadTarget
         {
-            public string Url;
-            public string DestinationPath;
-            public bool NeedsExecutableBit;
+            public string Url { get; set; }
+            public string DestinationPath { get; set; }
+            public bool NeedsExecutableBit { get; set; }
         }
 
         struct CachedExecutableVersion
         {
-            public long Length;
-            public DateTime LastWriteUtc;
-            public string Version;
+            public long Length { get; set; }
+            public DateTime LastWriteUtc { get; set; }
+            public string Version { get; set; }
         }
 
         struct CachedPackageVersion
         {
-            public string Path;
-            public long Length;
-            public DateTime LastWriteUtc;
-            public string Version;
+            public string Path { get; set; }
+            public long Length { get; set; }
+            public DateTime LastWriteUtc { get; set; }
+            public string Version { get; set; }
         }
 
         [DllImport("libc", SetLastError = true)]
         static extern int chmod(string path, int mode);
+
+        [DllImport("libc", SetLastError = true)]
+        static extern int access(string path, int mode);
     }
 }

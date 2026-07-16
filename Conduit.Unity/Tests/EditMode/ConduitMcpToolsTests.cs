@@ -2566,6 +2566,89 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void UnfocusedGameView_CoverTabSelectionPrefersTestRunnerThenExistingTabs()
+    {
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 1, 2, 0, 3), Is.EqualTo(2));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 1, -1, 2, 3), Is.EqualTo(0));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(1, 1, -1, 2, 3), Is.EqualTo(2));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(-1, 1, -1, -1, 3), Is.EqualTo(0));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 0, -1, 0, 1), Is.EqualTo(-1));
+    }
+
+    [Test]
+    public void UnfocusedGameView_PrepareAndRestorePreservesPlayBehavior()
+    {
+        RequireInteractiveEditorWindows();
+
+        var editorAssembly = typeof(EditorWindow).Assembly;
+        var gameViewType = editorAssembly.GetType("UnityEditor.GameView")
+                           ?? throw new TypeLoadException("UnityEditor.GameView");
+        var playModeViewType = editorAssembly.GetType("UnityEditor.PlayModeView")
+                               ?? throw new TypeLoadException("UnityEditor.PlayModeView");
+        var testRunnerWindowType = typeof(UnityEditor.TestTools.TestRunner.Api.TestRunnerApi).Assembly.GetType(
+            "UnityEditor.TestTools.TestRunner.TestRunnerWindow"
+        ) ?? throw new TypeLoadException("UnityEditor.TestTools.TestRunner.TestRunnerWindow");
+        var behaviorProperty = playModeViewType.GetProperty("enterPlayModeBehavior")
+                               ?? throw new MissingMemberException("UnityEditor.PlayModeView.enterPlayModeBehavior");
+        var existingGameViews = GetWindowIds(gameViewType);
+        var existingTestRunners = GetWindowIds(testRunnerWindowType);
+        var previouslyFocusedWindow = EditorWindow.focusedWindow;
+        var gameView = FindOrOpenGameView();
+        var originalBehavior = behaviorProperty.GetValue(gameView);
+        var playFocused = Enum.Parse(behaviorProperty.PropertyType, "PlayFocused");
+
+        try
+        {
+            ConduitGameViewFocus.Restore();
+            behaviorProperty.SetValue(gameView, playFocused);
+
+            ConduitGameViewFocus.Prepare(true);
+
+            Assert.That(ConduitGameViewFocus.IsPrepared, Is.True);
+            Assert.That(behaviorProperty.GetValue(gameView)?.ToString(), Is.EqualTo("PlayUnfocused"));
+
+            ConduitGameViewFocus.Restore();
+
+            Assert.That(ConduitGameViewFocus.IsPrepared, Is.False);
+            Assert.That(behaviorProperty.GetValue(gameView)?.ToString(), Is.EqualTo("PlayFocused"));
+        }
+        finally
+        {
+            ConduitGameViewFocus.Restore();
+            behaviorProperty.SetValue(gameView, originalBehavior);
+            CloseNewWindows(testRunnerWindowType, existingTestRunners);
+            CloseNewWindows(gameViewType, existingGameViews);
+            previouslyFocusedWindow?.Focus();
+        }
+
+        HashSet<int> GetWindowIds(Type windowType)
+        {
+            var ids = new HashSet<int>();
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
+                if (candidate is EditorWindow window)
+                    ids.Add(window.GetInstanceID());
+
+            return ids;
+        }
+
+        EditorWindow FindOrOpenGameView()
+        {
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(gameViewType))
+                if (candidate is EditorWindow window)
+                    return window;
+
+            return EditorWindow.GetWindow(gameViewType, false, "Game", false);
+        }
+
+        void CloseNewWindows(Type windowType, HashSet<int> existingWindowIds)
+        {
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
+                if (candidate is EditorWindow window && !existingWindowIds.Contains(window.GetInstanceID()))
+                    window.Close();
+        }
+    }
+
+    [Test]
     public void RefreshAssetDatabasePlayModeGuard_BlocksPlayMode()
     {
         Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(true), Is.True);

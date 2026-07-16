@@ -10,65 +10,95 @@ namespace Conduit
     {
         public static string DetectInstalledEditorId()
         {
-            var homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            var programFilesPath = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86Path = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-            var vscodeExtensionsPath = Combine(homePath, ".vscode", "extensions");
+            string homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string programFilesPath = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86Path = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            var vscodeExtensionsPaths = new[]
+            {
+                Combine(homePath, ".vscode", "extensions"),
+                Combine(homePath, ".vscode-insiders", "extensions"),
+                Combine(homePath, ".cursor", "extensions"),
+                Combine(homePath, ".windsurf", "extensions"),
+            };
+            var jetBrainsPluginRoots = new[]
+            {
+                Combine(appDataPath, "JetBrains"),
+                Combine(homePath, ".local", "share", "JetBrains"),
+            };
 
-            if (FindOnPath("codex", "codex.cmd", "codex.exe") != null
-                || HasExtension(vscodeExtensionsPath, "openai.chatgpt*")
-                || HasExtension(vscodeExtensionsPath, "openai.codex*"))
+            // first match wins; dedicated agents precede generic host editors commonly installed beside them
+            if (FindOnPath("codex", "codex.cmd", "codex.exe") is not null
+                || HasExtension(vscodeExtensionsPaths, "openai.chatgpt*")
+                || HasExtension(vscodeExtensionsPaths, "openai.codex*"))
                 return "codex";
 
-            if (FindOnPath("cursor", "cursor.cmd", "cursor.exe") != null
+            if (FindOnPath("cursor", "cursor.cmd", "cursor.exe") is not null
                 || File.Exists(Combine(localAppDataPath, "Programs", "Cursor", "Cursor.exe"))
                 || File.Exists(@"C:\Program Files\Cursor\Cursor.exe"))
                 return "cursor";
 
-            if (FindOnPath("opencode", "opencode.cmd", "opencode.exe") != null
+            if (FindOnPath("opencode", "opencode.cmd", "opencode.exe") is not null
                 || File.Exists(Combine(appDataPath, "npm", "opencode.cmd"))
-                || HasExtension(vscodeExtensionsPath, "sst-dev.opencode*")
-                || HasExtension(vscodeExtensionsPath, "sst-dev.opencode-v2*"))
+                || HasExtension(vscodeExtensionsPaths, "sst-dev.opencode*"))
                 return "open-code";
 
-            if (FindOnPath("claude", "claude.cmd", "claude.exe") != null
-                || HasExtension(vscodeExtensionsPath, "anthropic.claude-code*"))
+            if (FindOnPath("claude", "claude.cmd", "claude.exe") is not null
+                || HasExtension(vscodeExtensionsPaths, "anthropic.claude-code*"))
                 return "claude-code";
 
-            if (FindOnPath("gemini", "gemini.cmd", "gemini.exe") != null
+            if (FindOnPath("gemini", "gemini.cmd", "gemini.exe") is not null
                 || File.Exists(Combine(appDataPath, "npm", "gemini.cmd")))
                 return "gemini";
 
-            if (FindOnPath("agy", "agy.cmd", "agy.exe") != null
+            if (FindOnPath("agy", "agy.cmd", "agy.exe") is not null
                 || HasStartMenuShortcut("Antigravity")
                 || File.Exists(Combine(localAppDataPath, "Programs", "Antigravity", "Antigravity.exe")))
                 return "antigravity";
 
-            if (FindOnPath("rider64", "rider64.exe", "rider") != null
-                || File.Exists(@"C:\Program Files\JetBrains\JetBrains Rider\bin\Rider64.exe")
-                || File.Exists(Combine(localAppDataPath, "Programs", "JetBrains Rider", "bin", "Rider64.exe")))
+            if (FindOnPath("junie", "junie.cmd", "junie.exe") is not null
+                || Directory.Exists(Combine(homePath, ".junie"))
+                || HasJetBrainsPlugin(jetBrainsPluginRoots, "junie"))
                 return "rider-junie";
 
-            if (FindOnPath("cline", "cline.cmd", "cline.exe") != null
+            if (FindOnPath("cline", "cline.cmd", "cline.exe") is not null
                 || File.Exists(Combine(appDataPath, "npm", "cline.cmd"))
-                || HasExtension(vscodeExtensionsPath, "saoudrizwan.claude-dev*"))
+                || HasExtension(vscodeExtensionsPaths, "saoudrizwan.claude-dev*"))
                 return "cline";
 
             if (HasStartMenuShortcut("Claude")
                 || File.Exists(Combine(localAppDataPath, "Programs", "Claude", "Claude.exe"))
-                || File.Exists(@"C:\Program Files\Claude\Claude.exe"))
+                || File.Exists(@"C:\Program Files\Claude\Claude.exe")
+                || Directory.Exists("/Applications/Claude.app")
+                || Directory.Exists(Combine(homePath, "Applications", "Claude.app"))
+                || FindOnPath("claude-desktop", "claude-desktop.exe") is not null
+                || (ResolveClaudeDesktopConfigPath(CreatePathContext()) is { } claudeConfigPath
+                    && File.Exists(claudeConfigPath)))
                 return "claude-desktop";
 
-            if (FindOnPath("copilot", "copilot.cmd", "copilot.exe") != null
+            if (FindOnPath("copilot", "copilot.cmd", "copilot.exe") is not null
                 || File.Exists(Combine(appDataPath, "npm", "copilot.cmd")))
                 return "github-copilot-cli";
 
-            if (HasExtension(vscodeExtensionsPath, "kilocode.Kilo-Code*"))
+            if (FindOnPath("kilo", "kilo.cmd", "kilo.exe") is not null
+                || HasExtension(vscodeExtensionsPaths, "kilocode.kilo-code*"))
                 return "kilo-code";
 
-            if (FindOnPath("code", "code.cmd", "code.exe") != null
+            if (HasExtension(vscodeExtensionsPaths, "continue.continue*")
+                || HasJetBrainsPlugin(jetBrainsPluginRoots, "continue"))
+                return "continue";
+
+            if (FindOnPath("windsurf", "windsurf.cmd", "windsurf.exe") is not null
+                || File.Exists(Combine(localAppDataPath, "Programs", "Windsurf", "Windsurf.exe"))
+                || Directory.Exists("/Applications/Windsurf.app"))
+                return "windsurf";
+
+            if (FindOnPath("zed", "zed.cmd", "zed.exe") is not null
+                || Directory.Exists("/Applications/Zed.app"))
+                return "zed";
+
+            if (FindOnPath("code", "code.cmd", "code.exe") is not null
                 || File.Exists(Combine(localAppDataPath, "Programs", "Microsoft VS Code", "Code.exe"))
                 || File.Exists(Combine(programFilesPath, "Microsoft VS Code", "Code.exe")))
                 return "vscode-copilot";
@@ -82,21 +112,39 @@ namespace Conduit
             return string.Empty;
         }
 
-        static string? FindOnPath(params string[] names)
+        internal static bool TryFindServerExecutableOnPath(out string executablePath)
         {
-            var path = Environment.GetEnvironmentVariable("PATH");
+            executablePath = FindOnPath("conduit", "conduit.exe") ?? string.Empty;
+            return executablePath.Length > 0;
+        }
+
+        internal static string? FindOnPath(params string[] names)
+        {
+            string? path = Environment.GetEnvironmentVariable("PATH");
+            return FindOnPathValue(path, names);
+        }
+
+        internal static string? FindOnPathValue(string? path, params string[] names)
+        {
             if (string.IsNullOrWhiteSpace(path))
                 return null;
 
-            var directories = path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-            for (var directoryIndex = 0; directoryIndex < directories.Length; directoryIndex++)
+            // scan PATH directly instead of depending on platform-specific where/which commands or shell setup
+            var directories = path!.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string pathEntry in directories)
             {
-                var directory = directories[directoryIndex].Trim();
-                for (var nameIndex = 0; nameIndex < names.Length; nameIndex++)
+                string directory = Environment.ExpandEnvironmentVariables(
+                    pathEntry.Trim().Trim('"')
+                );
+                foreach (string name in names)
                 {
-                    var fullPath = Path.Combine(directory, names[nameIndex]);
-                    if (File.Exists(fullPath))
-                        return fullPath;
+                    try
+                    {
+                        string fullPath = Path.Combine(directory, name);
+                        if (File.Exists(fullPath))
+                            return Path.GetFullPath(fullPath);
+                    }
+                    catch { }
                 }
             }
 
@@ -105,22 +153,37 @@ namespace Conduit
 
         static bool HasStartMenuShortcut(string containsName)
         {
+            if (UnityEngine.Application.platform != UnityEngine.RuntimePlatform.WindowsEditor)
+                return false;
+
             var roots = new[]
             {
-                Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Windows", "Start Menu", "Programs"),
-                Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Microsoft", "Windows", "Start Menu", "Programs"),
+                Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Microsoft",
+                    "Windows",
+                    "Start Menu",
+                    "Programs"
+                ),
+                Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "Microsoft",
+                    "Windows",
+                    "Start Menu",
+                    "Programs"
+                ),
             };
 
-            for (var index = 0; index < roots.Length; index++)
+            foreach (string root in roots)
             {
-                var root = roots[index];
                 if (!Directory.Exists(root))
                     continue;
 
                 try
                 {
                     if (Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories)
-                        .Any(file => Path.GetFileNameWithoutExtension(file).Contains(containsName, StringComparison.OrdinalIgnoreCase)))
+                        .Any(file => Path.GetFileNameWithoutExtension(file)
+                            .Contains(containsName, StringComparison.OrdinalIgnoreCase)))
                         return true;
                 }
                 catch { }
@@ -129,19 +192,51 @@ namespace Conduit
             return false;
         }
 
-        static bool HasExtension(string extensionsPath, string searchPattern)
+        static bool HasExtension(string[] extensionPaths, string searchPattern)
         {
-            if (!Directory.Exists(extensionsPath))
-                return false;
+            string prefix = searchPattern.TrimEnd('*');
+            foreach (string extensionsPath in extensionPaths)
+            {
+                if (!Directory.Exists(extensionsPath))
+                    continue;
 
-            try
-            {
-                return Directory.EnumerateDirectories(extensionsPath, searchPattern).Any();
+                try
+                {
+                    if (Directory.EnumerateDirectories(extensionsPath)
+                        .Any(path => Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+                }
+                catch { }
             }
-            catch
+
+            return false;
+        }
+
+        static bool HasJetBrainsPlugin(string[] pluginRoots, string pluginPrefix)
+        {
+            foreach (string root in pluginRoots)
             {
-                return false;
+                if (!Directory.Exists(root))
+                    continue;
+
+                try
+                {
+                    foreach (string productDirectory in Directory.EnumerateDirectories(root))
+                    {
+                        string pluginsDirectory = Path.Combine(productDirectory, "plugins");
+                        if (!Directory.Exists(pluginsDirectory))
+                            continue;
+
+                        if (Directory.EnumerateDirectories(pluginsDirectory)
+                            .Any(path => Path.GetFileName(path)
+                                .StartsWith(pluginPrefix, StringComparison.OrdinalIgnoreCase)))
+                            return true;
+                    }
+                }
+                catch { }
             }
+
+            return false;
         }
     }
 }

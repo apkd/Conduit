@@ -627,6 +627,7 @@ namespace Conduit
                 editorModeTransition.Stop();
                 assetImportMonitor.Stop();
                 testRunMonitor.Stop();
+                ConduitGameViewFocus.Restore();
             }
 
             BridgeExceptionInfo SafeToExceptionInfo(Exception exception)

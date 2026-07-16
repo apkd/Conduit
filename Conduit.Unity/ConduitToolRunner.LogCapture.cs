@@ -84,6 +84,9 @@ namespace Conduit
             if (playerRun)
                 filter.targetPlatform = EditorUserBuildSettings.activeBuildTarget;
 
+            if (mode == TestMode.PlayMode && !playerRun)
+                ConduitGameViewFocus.Prepare();
+
             activeRunGuid = GetOrCreateTestRunnerApi().Execute(
                 new ExecutionSettings(filter)
                 {
