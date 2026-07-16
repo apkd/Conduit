@@ -544,6 +544,63 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_SupportsBareReturnsWithoutMaskingNestedErrors()
+    {
+        const string mixedSnippet
+            = "var g = GameObject.Find(\"Main Camera\");\n"
+              + "if (!g)\n"
+              + "    return;\n"
+              + "return BindingFlags.Public + \":\" + g.name;";
+        const string noResultSnippet
+            = "if (GameObject.Find(\"Main Camera\"))\n"
+              + "    return;\n"
+              + "throw new InvalidOperationException();";
+
+        var mixed = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", mixedSnippet)
+            )
+        );
+        var cachedMixed = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", mixedSnippet)
+            )
+        );
+        var noResult = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", noResultSnippet)
+            )
+        );
+        var nestedFailure = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", "object Broken() { return; }\nreturn Broken();")
+            )
+        );
+        var lambdaFailure = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", "Func<object> broken = () => { return; };\nreturn broken();")
+            )
+        );
+
+        AssertSuccessful(mixed, "Public:Main Camera");
+        AssertSuccessful(cachedMixed, "Public:Main Camera");
+        AssertSuccessful(noResult);
+        Assert.That(nestedFailure.Text, Does.Contain("CS0126"));
+        Assert.That(lambdaFailure.Text, Does.Contain("CS0126"));
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_CoversSuccessCacheRuntimeFailureAndCompileFailure()
     {
         var runtimeTogglePath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCode_{Guid.NewGuid():N}.flag");

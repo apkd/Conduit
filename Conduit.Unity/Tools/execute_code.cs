@@ -60,31 +60,31 @@ namespace Conduit
                 var displaySourcePath = sourceFileName;
                 var sourceFilePath = Path.Combine(snippetRootPath, sourceFileName);
                 var assemblyPath = Path.Combine(snippetRootPath, snippetArtifactId + ".dll");
+                var hasCompiled = false;
 
-                WriteSnippetSource(
-                    snippetRootPath,
-                    sourceFilePath,
-                    BuildSnippetSource(typeName, displaySourcePath, parsedSnippet)
-                );
-
-                var compilerMessages = await CompileAssemblyAsync(
-                    projectPath,
-                    snippetRootPath,
-                    sourceFilePath,
-                    assemblyPath
-                );
-                string[]? inferredNamespaces = null;
-                if (TryInferMissingNamespaces(projectPath, snippetRootPath, parsedSnippet, compilerMessages, out var retryNamespaces))
+                async Task<CompilerMessage[]> CompileSnippetAsync(
+                    SnippetReturnMode returnMode = SnippetReturnMode.ObjectResult,
+                    IReadOnlyList<string>? namespaces = null,
+                    SnippetChunk? bodyOverride = null
+                )
                 {
-                    inferredNamespaces = retryNamespaces;
                     WriteSnippetSource(
                         snippetRootPath,
                         sourceFilePath,
-                        BuildSnippetSource(typeName, displaySourcePath, parsedSnippet, retryNamespaces)
+                        BuildSnippetSourceCore(
+                            typeName,
+                            displaySourcePath,
+                            parsedSnippet,
+                            namespaces,
+                            returnMode,
+                            bodyOverride
+                        )
                     );
+                    if (hasCompiled)
+                        await AwaitEditorUpdateAsync();
 
-                    await AwaitEditorUpdateAsync();
-                    compilerMessages = await CompileAssemblyAsync(
+                    hasCompiled = true;
+                    return await CompileAssemblyAsync(
                         projectPath,
                         snippetRootPath,
                         sourceFilePath,
@@ -92,14 +92,75 @@ namespace Conduit
                     );
                 }
 
-                var compilation = CacheCompilation(
-                    snippetText,
-                    fullTypeName,
-                    assemblyPath,
-                    compilerMessages,
-                    inferredNamespaces
+                Task<BridgeCommandResult> CompleteAsync(
+                    CompilerMessage[] messages,
+                    string[]? inferredNamespaces = null
+                ) => ExecuteCachedCompilationAsync(
+                    CacheCompilation(
+                        snippetText,
+                        fullTypeName,
+                        assemblyPath,
+                        messages,
+                        inferredNamespaces
+                    )
                 );
-                return await ExecuteCachedCompilationAsync(compilation);
+
+                var compilerMessages = await CompileSnippetAsync();
+                string[]? inferredNamespaces = null;
+                if (HasCompilerErrorCode(compilerMessages, "CS0126"))
+                {
+                    // changing only the generated entry point's return type identifies which bare returns
+                    // belong to the snippet body without rewriting local functions, lambdas, or leading types.
+                    var noResultMessages = await CompileSnippetAsync(SnippetReturnMode.NoResult);
+                    if (TryNormalizeBareReturns(
+                        parsedSnippet.Body,
+                        compilerMessages,
+                        noResultMessages,
+                        out var normalizedBody,
+                        out var recoveredLocations
+                    ))
+                    {
+                        if (!HasCompilerErrors(noResultMessages))
+                            return await CompleteAsync(noResultMessages);
+
+                        var inferenceMessages = ExcludeRecoveredBareReturnErrors(
+                            compilerMessages,
+                            recoveredLocations
+                        );
+                        if (TryInferMissingNamespaces(
+                            projectPath,
+                            snippetRootPath,
+                            parsedSnippet,
+                            inferenceMessages,
+                            out var recoveryNamespaces
+                        ))
+                            inferredNamespaces = recoveryNamespaces;
+
+                        compilerMessages = await CompileSnippetAsync(
+                            SnippetReturnMode.ObjectResult,
+                            inferredNamespaces,
+                            normalizedBody
+                        );
+                        return await CompleteAsync(compilerMessages, inferredNamespaces);
+                    }
+                }
+
+                if (TryInferMissingNamespaces(
+                    projectPath,
+                    snippetRootPath,
+                    parsedSnippet,
+                    compilerMessages,
+                    out var retryNamespaces
+                ))
+                {
+                    inferredNamespaces = retryNamespaces;
+                    compilerMessages = await CompileSnippetAsync(
+                        SnippetReturnMode.ObjectResult,
+                        retryNamespaces
+                    );
+                }
+
+                return await CompleteAsync(compilerMessages, inferredNamespaces);
             }
             catch (SnippetParseException exception)
             {
@@ -362,6 +423,22 @@ namespace Conduit
             string displaySourcePath,
             SnippetParseResult parsedSnippet,
             IReadOnlyList<string>? inferredNamespaces = null
+        ) => BuildSnippetSourceCore(
+            typeName,
+            displaySourcePath,
+            parsedSnippet,
+            inferredNamespaces,
+            SnippetReturnMode.ObjectResult,
+            null
+        );
+
+        static string BuildSnippetSourceCore(
+            string typeName,
+            string displaySourcePath,
+            SnippetParseResult parsedSnippet,
+            IReadOnlyList<string>? inferredNamespaces,
+            SnippetReturnMode returnMode,
+            SnippetChunk? bodyOverride
         )
         {
             var builder = new StringBuilder();
@@ -421,11 +498,19 @@ namespace Conduit
 
             builder.AppendLine("        [HideInCallstack]");
             builder.AppendLine("        [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
-            builder.AppendLine("        public static async Task<object> Execute()");
+            builder.AppendLine(
+                returnMode == SnippetReturnMode.ObjectResult
+                    ? "        public static async Task<object> Execute()"
+                    : "        public static async Task Execute()"
+            );
             builder.AppendLine("        {");
-            AppendChunk(builder, parsedSnippet.Body, displaySourcePath);
-            builder.AppendLine("#line hidden");
-            builder.AppendLine("            return null;");
+            AppendChunk(builder, bodyOverride ?? parsedSnippet.Body, displaySourcePath);
+            if (returnMode == SnippetReturnMode.ObjectResult)
+            {
+                builder.AppendLine("#line hidden");
+                builder.AppendLine("            return null;");
+            }
+
             builder.AppendLine("        }");
             builder.AppendLine("    }");
             builder.AppendLine("}");
@@ -445,6 +530,210 @@ namespace Conduit
 
             builder.AppendLine("#line default");
         }
+
+        internal static bool TryNormalizeBareReturns(
+            SnippetChunk body,
+            CompilerMessage[] objectResultMessages,
+            CompilerMessage[] noResultMessages,
+            out SnippetChunk normalizedBody,
+            out Dictionary<(int Line, int Column), int> recoveredLocations
+        )
+        {
+            normalizedBody = body;
+            recoveredLocations = new();
+            var remainingNoResultErrors = GetCompilerErrorLocationCounts(noResultMessages, "CS0126");
+            foreach (var message in objectResultMessages)
+            {
+                if (!IsCompilerErrorCode(message, "CS0126"))
+                    continue;
+
+                var location = (message.line, message.column);
+                if (remainingNoResultErrors.TryGetValue(location, out var remainingCount)
+                    && remainingCount > 0)
+                {
+                    remainingNoResultErrors[location] = remainingCount - 1;
+                    continue;
+                }
+
+                recoveredLocations.TryGetValue(location, out var recoveredCount);
+                recoveredLocations[location] = recoveredCount + 1;
+            }
+
+            if (recoveredLocations.Count == 0)
+                return false;
+
+            using var pooledOffsets = ConduitUtility.GetPooledList<int>(out var insertionOffsets);
+            foreach (var location in recoveredLocations.Keys)
+            {
+                if (!TryGetBareReturnInsertionOffset(
+                    body,
+                    location.Line,
+                    location.Column,
+                    out var insertionOffset
+                ))
+                {
+                    recoveredLocations.Clear();
+                    return false;
+                }
+
+                insertionOffsets.Add(insertionOffset);
+            }
+
+            insertionOffsets.Sort();
+            var builder = new StringBuilder(body.Text);
+            for (var index = insertionOffsets.Count - 1; index >= 0; index--)
+                builder.Insert(insertionOffsets[index], " null");
+
+            normalizedBody.Text = builder.ToString();
+            return true;
+        }
+
+        static Dictionary<(int Line, int Column), int> GetCompilerErrorLocationCounts(
+            CompilerMessage[] messages,
+            string errorCode
+        )
+        {
+            var counts = new Dictionary<(int Line, int Column), int>();
+            foreach (var message in messages)
+            {
+                if (!IsCompilerErrorCode(message, errorCode))
+                    continue;
+
+                var location = (message.line, message.column);
+                counts.TryGetValue(location, out var count);
+                counts[location] = count + 1;
+            }
+
+            return counts;
+        }
+
+        static bool TryGetBareReturnInsertionOffset(
+            SnippetChunk body,
+            int targetLine,
+            int targetColumn,
+            out int insertionOffset
+        )
+        {
+            insertionOffset = 0;
+            if (targetLine < body.StartLine || targetColumn < 1)
+                return false;
+
+            var offset = 0;
+            var line = body.StartLine;
+            var column = 1;
+            while (offset < body.Text.Length && (line != targetLine || column != targetColumn))
+            {
+                if (body.Text[offset++] == '\n')
+                {
+                    line++;
+                    column = 1;
+                }
+                else
+                    column++;
+            }
+
+            const string returnKeyword = "return";
+            if (line != targetLine
+                || column != targetColumn
+                || offset + returnKeyword.Length > body.Text.Length
+                || !body.Text.AsSpan(offset, returnKeyword.Length).SequenceEqual(returnKeyword.AsSpan())
+                || offset > 0 && IsIdentifierPart(body.Text[offset - 1])
+                || offset + returnKeyword.Length < body.Text.Length
+                && IsIdentifierPart(body.Text[offset + returnKeyword.Length]))
+                return false;
+
+            var cursor = offset + returnKeyword.Length;
+            while (cursor < body.Text.Length)
+            {
+                if (char.IsWhiteSpace(body.Text[cursor]))
+                {
+                    cursor++;
+                    continue;
+                }
+
+                if (cursor + 1 < body.Text.Length
+                    && body.Text[cursor] == '/'
+                    && body.Text[cursor + 1] == '/')
+                {
+                    cursor += 2;
+                    while (cursor < body.Text.Length && body.Text[cursor] != '\n')
+                        cursor++;
+
+                    continue;
+                }
+
+                if (cursor + 1 < body.Text.Length
+                    && body.Text[cursor] == '/'
+                    && body.Text[cursor + 1] == '*')
+                {
+                    var commentEnd = body.Text.IndexOf("*/", cursor + 2, StringComparison.Ordinal);
+                    if (commentEnd < 0)
+                        return false;
+
+                    cursor = commentEnd + 2;
+                    continue;
+                }
+
+                break;
+            }
+
+            if (cursor >= body.Text.Length || body.Text[cursor] != ';')
+                return false;
+
+            insertionOffset = offset + returnKeyword.Length;
+            return true;
+        }
+
+        static CompilerMessage[] ExcludeRecoveredBareReturnErrors(
+            CompilerMessage[] messages,
+            IReadOnlyDictionary<(int Line, int Column), int> recoveredLocations
+        )
+        {
+            var remainingRecovered = new Dictionary<(int Line, int Column), int>(recoveredLocations);
+            using var pooledFiltered = ConduitUtility.GetPooledList<CompilerMessage>(out var filtered);
+            foreach (var message in messages)
+            {
+                var location = (message.line, message.column);
+                if (IsCompilerErrorCode(message, "CS0126")
+                    && remainingRecovered.TryGetValue(location, out var remainingCount)
+                    && remainingCount > 0)
+                {
+                    remainingRecovered[location] = remainingCount - 1;
+                    continue;
+                }
+
+                filtered.Add(message);
+            }
+
+            return filtered.ToArray();
+        }
+
+        static bool HasCompilerErrors(CompilerMessage[] messages)
+        {
+            foreach (var message in messages)
+                if (message.type == CompilerMessageType.Error)
+                    return true;
+
+            return false;
+        }
+
+        static bool HasCompilerErrorCode(CompilerMessage[] messages, string errorCode)
+        {
+            foreach (var message in messages)
+                if (IsCompilerErrorCode(message, errorCode))
+                    return true;
+
+            return false;
+        }
+
+        static bool IsCompilerErrorCode(CompilerMessage message, string errorCode)
+            => message.type == CompilerMessageType.Error
+               && message.message is { Length: > 0 }
+               && TryGetCompilerErrorCode(message.message, out var actualErrorCode)
+               && string.Equals(actualErrorCode, errorCode, StringComparison.Ordinal);
+
+        static bool IsIdentifierPart(char ch)
+            => char.IsLetterOrDigit(ch) || ch == '_';
 
         internal static CompilerMessage[] FilterCompilerMessages(CompilerMessage[] messages, CompilerMessageType type)
         {
@@ -833,6 +1122,12 @@ namespace Conduit
             public byte[]? AssemblyBytes;
             public string? CompileErrorDiagnostic;
             public string? WarningDiagnostic;
+        }
+
+        enum SnippetReturnMode
+        {
+            ObjectResult,
+            NoResult,
         }
     }
 }

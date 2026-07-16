@@ -53,6 +53,8 @@ static class HelpTool
                 You can also use `Reflect.Type("NativeArrayUnsafeUtility")`, `Reflect.Methods(type: "Camera")`, `Reflect.Interfaces(member: "Dispose")`,
                 `Reflect.Classes("Handler")`, `Reflect.Enum("AggressiveInlining")` etc. for easy reflection lookup with the same API as the `reflect` tool.
                 (Singular `Reflect.Method` returns exactly one MethodInfo; plural `Reflect.Methods` returns an array, and so on.)
+
+                Use `return <value>;` to print the value in the tool response. `return;` exits without a result.
                 """;
     }
 

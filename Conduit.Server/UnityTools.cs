@@ -243,7 +243,8 @@ public sealed class UnityTools
         """
         Immediately compiles and runs a one-off C# snippet inside the Unity editor. Works in edit mode and in play mode.
         Supports top-level statements, local functions, leading using directives, leading type declarations, and leading static fields.
-        The generated snippet already imports System, generic collections, IO, Linq, Tasks, UnityEditor, and UnityEngine; skip these namespaces.
+        You can optionally return a result value to print it in the response.
+        The generated snippet already imports System, System.Collections.Generic, System.IO, Linq, Tasks, UnityEditor, and UnityEngine; skip these namespaces.
         It also supports object search helpers; call Search<T>("query") or SearchMany<T>("query") to resolve Unity objects,
         supporting same query features as the `search` tool (use the help command for more search tips), as well as reflection helpers based on the `reflect` tool;
         for example, `Type t = Reflect.Type("Camera")`, `MethodInfo[] methods = Reflect.Methods(type: "UnsafeUtility")`.

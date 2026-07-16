@@ -1745,6 +1745,82 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ExecuteCode_NormalizeBareReturns_RewritesOnlyEntryPointDiagnostics()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse(
+            "object Broken() { return; }\n"
+            + "if (true)\n"
+            + "    return /* first */ ;\n"
+            + "if (false) return;\n"
+            + "return \"ok\";\n"
+        );
+        var objectResultMessages = new[]
+        {
+            Error(1, 19, "CS0126", "An object of a type convertible to 'object' is required"),
+            Error(3, 5, "CS0126", "An object of a type convertible to 'object' is required"),
+            Error(4, 12, "CS0126", "An object of a type convertible to 'object' is required"),
+        };
+        var noResultMessages = new[]
+        {
+            Error(1, 19, "CS0126", "An object of a type convertible to 'object' is required"),
+            Error(5, 1, "CS1997", "A return keyword must not be followed by an object expression"),
+        };
+
+        var normalized = execute_code.TryNormalizeBareReturns(
+            parsedSnippet.Body,
+            objectResultMessages,
+            noResultMessages,
+            out var normalizedBody,
+            out var recoveredLocations
+        );
+
+        Assert.That(normalized, Is.True);
+        Assert.That(recoveredLocations, Has.Count.EqualTo(2));
+        Assert.That(recoveredLocations[(3, 5)], Is.EqualTo(1));
+        Assert.That(recoveredLocations[(4, 12)], Is.EqualTo(1));
+        Assert.That(normalizedBody.Text, Does.Contain("object Broken() { return; }"));
+        Assert.That(normalizedBody.Text, Does.Contain("return null /* first */ ;"));
+        Assert.That(normalizedBody.Text, Does.Contain("if (false) return null;"));
+
+        static CompilerMessage Error(int line, int column, string code, string text) => new()
+        {
+            type = CompilerMessageType.Error,
+            file = "Temp/execute_code/1.cs",
+            line = line,
+            column = column,
+            message = $"Temp/execute_code/1.cs({line},{column}): error {code}: {text}",
+        };
+    }
+
+    [Test]
+    public void ExecuteCode_NormalizeBareReturns_FailsClosedForInvalidCompilerLocation()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse("Debug.Log(\"return;\");");
+        var objectResultMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                line = 1,
+                column = 1,
+                message = "Temp/execute_code/1.cs(1,1): error CS0126: An object of a type convertible to 'object' is required",
+            },
+        };
+
+        var normalized = execute_code.TryNormalizeBareReturns(
+            parsedSnippet.Body,
+            objectResultMessages,
+            Array.Empty<CompilerMessage>(),
+            out var normalizedBody,
+            out var recoveredLocations
+        );
+
+        Assert.That(normalized, Is.False);
+        Assert.That(normalizedBody.Text, Is.EqualTo(parsedSnippet.Body.Text));
+        Assert.That(recoveredLocations, Is.Empty);
+    }
+
+    [Test]
     public void ExecuteCode_ParseRetryableMissingSymbol_RecognizesSupportedDiagnostics()
     {
         var missingName = new CompilerMessage
