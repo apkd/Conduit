@@ -151,6 +151,9 @@ namespace Conduit
         internal static bool ShouldSuppressCapturedLogEntry(string message)
             => ToolLogCapture.ShouldSuppressCapturedLogEntry(message);
 
+        internal static bool ShouldSuppressCapturedLogEntry(string message, BridgeCommandKind commandKind)
+            => ToolLogCapture.ShouldSuppressCapturedLogEntry(message, commandKind);
+
         internal static string NormalizeCapturedLogMessage(string message)
             => ToolLogCapture.NormalizeCapturedLogMessage(message);
 

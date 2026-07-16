@@ -615,6 +615,11 @@ namespace Conduit
         public static bool ShouldSuppressCapturedLogEntry(string message)
             => view_burst_asm.ShouldSuppressBurstDiagnostic(message);
 
+        public static bool ShouldSuppressCapturedLogEntry(string message, BridgeCommandKind commandKind)
+            => ShouldSuppressCapturedLogEntry(message)
+               || commandKind == BridgeCommandKind.ExecuteCode
+                  && execute_code.ShouldSuppressCompilerWarning(message);
+
         public static string NormalizeCapturedLogMessage(string message)
             => view_burst_asm.IsBurstDiagnostic(message)
                 ? view_burst_asm.SimplifyBurstDiagnostic(message)
@@ -634,7 +639,7 @@ namespace Conduit
 
         void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
         {
-            if (ShouldSuppressCapturedLogEntry(condition))
+            if (ShouldSuppressCapturedLogEntry(condition, activeCommandKind))
                 return;
 
             // burst diagnostics can embed assembly-qualified signatures longer than the useful error text

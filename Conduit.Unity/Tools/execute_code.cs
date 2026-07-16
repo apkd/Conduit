@@ -446,15 +446,22 @@ namespace Conduit
             builder.AppendLine("#line default");
         }
 
-        static CompilerMessage[] FilterCompilerMessages(CompilerMessage[] messages, CompilerMessageType type)
+        internal static CompilerMessage[] FilterCompilerMessages(CompilerMessage[] messages, CompilerMessageType type)
         {
             using var pooledFiltered = ConduitUtility.GetPooledList<CompilerMessage>(out var filtered);
             foreach (var message in messages)
-                if (message.type == type)
+                if (message.type == type && !ShouldSuppressCompilerWarning(message))
                     filtered.Add(message);
 
             return filtered.Count == 0 ? Array.Empty<CompilerMessage>() : filtered.ToArray();
         }
+
+        internal static bool ShouldSuppressCompilerWarning(CompilerMessage message)
+            => message.type == CompilerMessageType.Warning
+               && ShouldSuppressCompilerWarning(message.message);
+
+        internal static bool ShouldSuppressCompilerWarning(string message)
+            => message.Contains(" warning MED011:", StringComparison.Ordinal);
 
         internal static string FormatCompilerMessages(IEnumerable<CompilerMessage> messages)
         {
