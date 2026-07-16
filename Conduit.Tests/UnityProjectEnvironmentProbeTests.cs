@@ -517,6 +517,47 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    public async Task FindMatchingProjectProcessRecognizesCreateProjectEditorAndIgnoresImportWorker()
+    {
+        var projectPath = CreateProjectPath();
+        UnityProjectProcessInfo[] processes =
+        [
+            new(
+                200,
+                "/opt/Unity/Editor/Unity",
+                $"Unity -adb2 -batchMode -name AssetImportWorkerHW0 -projectPath {projectPath} -parentPid 100"
+            ),
+            new(
+                100,
+                "/opt/Unity/Editor/Unity",
+                $"/opt/Unity/Editor/Unity -createproject {projectPath} -cloneFromTemplate template.tgz"
+            ),
+        ];
+
+        var match = UnityProjectEnvironmentProbe.FindMatchingProjectProcess(processes, projectPath);
+
+        await Assert.That(match?.ProcessId).IsEqualTo(100);
+    }
+
+    [Test]
+    public async Task FindMatchingProjectProcessDoesNotTreatImportWorkerAsEditor()
+    {
+        var projectPath = CreateProjectPath();
+        UnityProjectProcessInfo[] processes =
+        [
+            new(
+                200,
+                "/opt/Unity/Editor/Unity",
+                $"Unity -adb2 -batchMode -name AssetImportWorkerHW0 -projectPath {projectPath} -parentPid 100"
+            ),
+        ];
+
+        var match = UnityProjectEnvironmentProbe.FindMatchingProjectProcess(processes, projectPath);
+
+        await Assert.That(match).IsNull();
+    }
+
+    [Test]
     public async Task ResolveUnityEditorPathUsesConduitOverrideBeforeUnityOverride()
     {
         var conduitOverride = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "Unity-conduit-env"));

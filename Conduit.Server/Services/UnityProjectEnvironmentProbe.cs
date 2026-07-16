@@ -12,8 +12,11 @@ sealed partial class UnityProjectEnvironmentProbe
     internal const string RefreshAssetDatabaseSafeModeDiagnostic =
         "The Unity Editor is in safe mode. (To recompile scripts in safe mode, use the `restart` tool.)";
 
-    [GeneratedRegex("-projectPath\\s+(?:\"(?<path>[^\"]+)\"|(?<path>\\S+))", RegexOptions.IgnoreCase, "en-US")]
-    private static partial Regex ProjectPathArgumentRegex();
+    [GeneratedRegex("-(?:projectPath|createproject)\\s+(?:\"(?<path>[^\"]+)\"|(?<path>\\S+))", RegexOptions.IgnoreCase, "en-US")]
+    private static partial Regex EditorProjectPathArgumentRegex();
+
+    [GeneratedRegex("(?:^|\\s)(?:-adb2(?:\\s|$)|-parentPid(?:\\s|$)|-name\\s+\"?AssetImportWorker)", RegexOptions.IgnoreCase, "en-US")]
+    private static partial Regex AuxiliaryUnityProcessArgumentRegex();
 
     [GeneratedRegex("-logFile\\s+(?:\"(?<path>[^\"]*)\"|(?<path>\\S+))", RegexOptions.IgnoreCase, "en-US")]
     private static partial Regex LogFileArgumentRegex();
@@ -608,14 +611,18 @@ sealed partial class UnityProjectEnvironmentProbe
         }
     }
 
-    static UnityProjectProcessInfo? FindMatchingProjectProcess(
+    internal static UnityProjectProcessInfo? FindMatchingProjectProcess(
         IReadOnlyList<UnityProjectProcessInfo> runningUnityProcesses,
         string normalizedProjectPath
     )
     {
         foreach (var processInfo in runningUnityProcesses)
         {
-            var projectPath = ConduitUtility.TryExtractProjectPathFromCommandLine(processInfo.CommandLine, ProjectPathArgumentRegex());
+            // import workers use the editor executable and repeat their parent's project path
+            if (AuxiliaryUnityProcessArgumentRegex().IsMatch(processInfo.CommandLine ?? ""))
+                continue;
+
+            var projectPath = ConduitUtility.TryExtractProjectPathFromCommandLine(processInfo.CommandLine, EditorProjectPathArgumentRegex());
             if (string.Equals(projectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
                 return processInfo;
         }
