@@ -34,6 +34,20 @@ public sealed class UnityEditorProcessController(
 
             builder.AppendLine($"Project: {snapshot.ProjectPath}");
 
+            using var restartLock = await ProjectRestartLock.AcquireAsync(snapshot.ProjectPath, ct);
+            if (restartLock.WasContended)
+            {
+                builder.AppendLine("Waited for another Conduit process to finish restarting this project.");
+                var completedRestartProbe = await bridgeClient.ProbeAsync(snapshot.ProjectPath, null, ct);
+                if (completedRestartProbe.Handshake != null)
+                {
+                    builder.AppendLine("The Unity connection from that restart is responsive.");
+                    return ToolExecutionResult.Success(string.Empty, ConduitUtility.FinishText(builder));
+                }
+            }
+
+            snapshot = environmentInspector.Inspect(snapshot.ProjectPath);
+
             var probe = await bridgeClient.ProbeAsync(snapshot.ProjectPath, snapshot.MatchedProcess?.ProcessId, ct);
             var handshake = probe.Handshake;
             if (handshake != null)
@@ -58,11 +72,12 @@ public sealed class UnityEditorProcessController(
                         return terminationResult;
                 }
             }
-            else if (snapshot is { LockfileState: UnityProjectLockfileState.Locked, RunningUnityProcessCount: > 0 })
+            else if (snapshot.LockfileState == UnityProjectLockfileState.Locked)
             {
                 builder.AppendLine("Bridge is unreachable while the project lockfile is still held.");
                 builder.AppendLine("No exact Unity.exe process could be matched to this project.");
-                return ToolExecutionResult.Success(string.Empty, ConduitUtility.FinishText(builder));
+                builder.AppendLine("Conduit did not launch another editor because Unity would display a project-lock modal.");
+                return ToolExecutionResult.NotConnected(snapshot.ProjectPath, ConduitUtility.FinishText(builder));
             }
 
             var editorPath = environmentInspector.ResolveUnityEditorPath(snapshot, editorProcess);
@@ -84,6 +99,16 @@ public sealed class UnityEditorProcessController(
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
             var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
             ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
+
+            var prelaunchSnapshot = environmentInspector.Inspect(snapshot.ProjectPath);
+            if (prelaunchSnapshot.MatchedProcess != null
+                || prelaunchSnapshot.LockfileState == UnityProjectLockfileState.Locked)
+            {
+                builder.AppendLine("Another Unity editor claimed the project before launch.");
+                builder.AppendLine("Conduit did not launch a duplicate editor.");
+                return ToolExecutionResult.NotConnected(snapshot.ProjectPath, ConduitUtility.FinishText(builder));
+            }
+
             restartedProcess = Process.Start(startInfo);
 
             if (restartedProcess == null)

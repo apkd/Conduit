@@ -39,6 +39,8 @@ public sealed class UnityProjectOperations(
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
         = new(StringComparer.OrdinalIgnoreCase);
 
+    readonly ProjectSingleFlight<ToolExecutionResult> restartOperations = new();
+
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
         = new(bridgeClient, projectRegistry, environmentInspector, sceneReloadPromptRecovery, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
 
@@ -66,11 +68,13 @@ public sealed class UnityProjectOperations(
         }
     }
 
-    public async Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
-    {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
-        return await processController.RestartAsync(normalizedProjectPath, ct);
-    }
+    public Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
+        => restartOperations.RunAsync(
+            projectPath,
+            processController.RestartAsync,
+            applicationLifetime.ApplicationStopping,
+            ct
+        );
 
     public Task<ToolExecutionResult> EnterPlayModeAsync(string projectPath, CT ct)
         => EnqueueAsync(
