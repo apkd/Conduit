@@ -7,6 +7,8 @@ namespace Conduit
 {
     static class BridgeCommandTypes
     {
+        public const string Help = "help";
+        public const string Restart = "restart";
         public const string Status = "status";
         public const string PlayMode = "playmode";
         public const string EditMode = "editmode";
@@ -31,6 +33,7 @@ namespace Conduit
         public const string ProfilerRecord = "profiler_record";
         public const string ProfilerOverview = "profiler_overview";
         public const string ProfilerBrowse = "profiler_browse";
+
     }
 
     enum BridgeCommandKind : byte
@@ -180,6 +183,7 @@ namespace Conduit
         public string? test_filter;
         public bool @async;
         public bool rebuild_cache;
+        public bool track_usage;
         public bool is_restored;
         public string[] args = Array.Empty<string>();
     }
@@ -216,6 +220,8 @@ namespace Conduit
         public bool is_restored;
         public int client_id;
         public bool is_acknowledged;
+        // session state preserves this timestamp across play-mode and compilation domain reloads.
+        public long tool_usage_started_utc_ticks;
         public string[] args = Array.Empty<string>();
         public string[] reimport_asset_paths = Array.Empty<string>();
     }

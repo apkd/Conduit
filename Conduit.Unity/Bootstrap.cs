@@ -9,6 +9,7 @@ namespace Conduit
     {
         static Bootstrap()
         {
+            ConduitToolUsage.CompleteRestartFromEnvironment();
             ConduitToolRunner.Initialize();
             ConduitConnection.EnsureStarted();
         }

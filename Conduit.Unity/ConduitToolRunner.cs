@@ -226,6 +226,10 @@ namespace Conduit
 
                 StopOperationHooks();
                 OperationPersistence.ClearActiveOperation();
+                ConduitToolUsage.CompleteCall(
+                    operation.command_type,
+                    operation.tool_usage_started_utc_ticks
+                );
 
                 if (await ConduitConnection.TrySendResultAsync(operation.client_id, operation.request_id, result, operation.command_type))
                 {
@@ -286,7 +290,13 @@ namespace Conduit
                 if (incomingCommandKind == BridgeCommandKind.Status)
                 {
                     // status should answer immediately even when a long-running editor operation is active
-                    _ = AcknowledgeAndExecuteStatusAsync(clientId, message.request_id);
+                    _ = AcknowledgeAndExecuteStatusAsync(
+                        clientId,
+                        message.request_id,
+                        message.command.track_usage
+                            ? ConduitToolUsage.BeginCall(BridgeCommandTypes.Status)
+                            : 0L
+                    );
                     return;
                 }
 
@@ -352,6 +362,10 @@ namespace Conduit
                     return queuedOperation;
                 }
 
+                // queueing is Unity-side latency, so timing starts when the editor accepts the request.
+                long usageStartedUtcTicks = command.track_usage
+                    ? ConduitToolUsage.BeginCall(command.command_type)
+                    : 0L;
                 var operation = new PendingOperationState
                 {
                     request_id = message.request_id!,
@@ -363,18 +377,23 @@ namespace Conduit
                     test_filter = command.test_filter,
                     @async = command.@async,
                     rebuild_cache = command.rebuild_cache,
+                    tool_usage_started_utc_ticks = usageStartedUtcTicks,
                     args = command.args ?? Array.Empty<string>(),
                 };
                 queuedOperations.Add(operation);
                 return operation;
             }
 
-            async Task AcknowledgeAndExecuteStatusAsync(int clientId, string requestId)
+            async Task AcknowledgeAndExecuteStatusAsync(
+                int clientId,
+                string requestId,
+                long usageStartedUtcTicks
+            )
             {
                 if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
                     return;
 
-                await ExecuteStatusAsync(clientId, requestId);
+                await ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks);
             }
 
             async Task AcknowledgeQueuedCommandAsync(PendingOperationState operation)

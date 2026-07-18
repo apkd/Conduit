@@ -2666,6 +2666,7 @@ public sealed class ConduitMcpToolsTests
         {
             request_id = "play-restore-test",
             command_type = BridgeCommandTypes.PlayMode,
+            tool_usage_started_utc_ticks = 123456789L,
         };
 
         try
@@ -2677,6 +2678,7 @@ public sealed class ConduitMcpToolsTests
             Assert.That(restoredOperation, Is.Not.Null);
             Assert.That(restoredOperation!.command_type, Is.EqualTo(BridgeCommandTypes.PlayMode));
             Assert.That(restoredOperation.is_restored, Is.EqualTo(true));
+            Assert.That(restoredOperation.tool_usage_started_utc_ticks, Is.EqualTo(123456789L));
         }
         finally
         {

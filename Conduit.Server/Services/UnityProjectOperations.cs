@@ -47,14 +47,20 @@ public sealed class UnityProjectOperations(
     public async Task<string> StatusAsync(string projectPath, CT ct)
     {
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var usage = new StatusUsageState();
         try
         {
             var session = projectRegistry.GetOrAddProject(normalizedProjectPath);
-            var optimisticReport = await TryBuildOptimisticStatusReportAsync(normalizedProjectPath, session, ct);
+            var optimisticReport = await TryBuildOptimisticStatusReportAsync(
+                normalizedProjectPath,
+                session,
+                usage,
+                ct
+            );
             if (optimisticReport is { } report)
                 return report;
 
-            return await ExecuteStatusWithPreflightAsync(normalizedProjectPath, ct);
+            return await ExecuteStatusWithPreflightAsync(normalizedProjectPath, usage, ct);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -69,9 +75,12 @@ public sealed class UnityProjectOperations(
     }
 
     public Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
+        => RestartAsync(projectPath, trackUsage: true, ct);
+
+    Task<ToolExecutionResult> RestartAsync(string projectPath, bool trackUsage, CT ct)
         => restartOperations.RunAsync(
             projectPath,
-            processController.RestartAsync,
+            (path, token) => processController.RestartAsync(path, trackUsage, token),
             applicationLifetime.ApplicationStopping,
             ct
         );
@@ -362,6 +371,7 @@ public sealed class UnityProjectOperations(
 
     async Task<ToolExecutionResult> EnqueueAsync(string projectPath, BridgeCommand command, CT ct)
     {
+        command.TrackUsage = true;
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         var session = projectRegistry.GetOrAddProject(normalizedProjectPath);
         var blockedResult = await TryPrepareProjectAsync(normalizedProjectPath, session, command.CommandType, ct);
@@ -399,7 +409,12 @@ public sealed class UnityProjectOperations(
      * status call first and only pay for offline diagnostics when that fast path fails
      * to produce a real status payload.
      */
-    async Task<string?> TryBuildOptimisticStatusReportAsync(string normalizedProjectPath, ProjectSession session, CT ct)
+    async Task<string?> TryBuildOptimisticStatusReportAsync(
+        string normalizedProjectPath,
+        ProjectSession session,
+        StatusUsageState usage,
+        CT ct
+    )
     {
         if (!TrySkipOfflinePreflight(session, normalizedProjectPath, out var cachedHandshake))
             return null;
@@ -408,6 +423,7 @@ public sealed class UnityProjectOperations(
             normalizedProjectPath,
             cachedHandshake?.EditorProcessId,
             UnityToolTimeouts.StatusCommand,
+            usage,
             ct
         );
 
@@ -423,7 +439,11 @@ public sealed class UnityProjectOperations(
         return report;
     }
 
-    async Task<string> ExecuteStatusWithPreflightAsync(string normalizedProjectPath, CT ct)
+    async Task<string> ExecuteStatusWithPreflightAsync(
+        string normalizedProjectPath,
+        StatusUsageState usage,
+        CT ct
+    )
     {
         var preflight = await UnityProjectOfflinePreflight.ExecuteAsync(
             normalizedProjectPath,
@@ -446,6 +466,7 @@ public sealed class UnityProjectOperations(
                     preflight.Snapshot,
                     preflight.ProbeExecution,
                     timeout,
+                    usage,
                     ct
                 )
                 is { } progressExecution)
@@ -462,13 +483,20 @@ public sealed class UnityProjectOperations(
 
         var execution = ShouldUseProbeExecutionForStatus(preflight.ProbeExecution)
             ? preflight.ProbeExecution!
-            : await ExecuteRecoverableStatusCommandAsync(normalizedProjectPath, preflight.Snapshot.MatchedProcess?.ProcessId, timeout, ct);
+            : await ExecuteRecoverableStatusCommandAsync(
+                normalizedProjectPath,
+                preflight.Snapshot.MatchedProcess?.ProcessId,
+                timeout,
+                usage,
+                ct
+            );
 
         if (await TryWaitForStatusProgressWindowAsync(
                 normalizedProjectPath,
                 preflight.Snapshot,
                 execution,
                 timeout,
+                usage,
                 ct
             )
             is { } recoveredExecution)
@@ -622,7 +650,11 @@ public sealed class UnityProjectOperations(
 
             try
             {
-                var recoveryResult = await RestartAsync(projectPath, recoveryCts.Token);
+                var recoveryResult = await RestartAsync(
+                    projectPath,
+                    trackUsage: false,
+                    recoveryCts.Token
+                );
                 logger.LogInformation(
                     "Automatic recovery for timed out Unity test command '{CommandType}' completed with outcome {Outcome}.",
                     queuedCommand.Command.CommandType,
@@ -769,6 +801,7 @@ public sealed class UnityProjectOperations(
         UnityProjectEnvironmentSnapshot snapshot,
         BridgeClientResult? latestExecution,
         TimeSpan statusTimeout,
+        StatusUsageState usage,
         CT ct
     )
     {
@@ -799,6 +832,7 @@ public sealed class UnityProjectOperations(
                 normalizedProjectPath,
                 processId,
                 statusTimeout,
+                usage,
                 ct
             );
             if (TryParsePingSnapshot(lastExecution, out _))
@@ -856,29 +890,40 @@ public sealed class UnityProjectOperations(
             .TryFindMatchingProcessWindowTitle(processId, UnityWindowTitleClassifier.IsProgressTitle)
             ?.Title;
 
-    async Task<BridgeClientResult> ExecuteRecoverableStatusCommandAsync(string normalizedProjectPath, int? processIdHint, TimeSpan timeout, CT ct)
+    async Task<BridgeClientResult> ExecuteRecoverableStatusCommandAsync(
+        string normalizedProjectPath,
+        int? processIdHint,
+        TimeSpan timeout,
+        StatusUsageState usage,
+        CT ct
+    )
     {
         var requestId = ConduitUtility.CreateRequestId();
-        var execution = await bridgeClient.ExecuteCommandAsync(
-            normalizedProjectPath,
-            requestId,
-            new() { CommandType = BridgeCommandTypes.Status },
-            timeout,
-            processIdHint,
-            ct
-        );
+        var execution = await ExecuteAsync();
 
         if (!ShouldReplayRequest(execution))
             return execution;
 
-        return await bridgeClient.ExecuteCommandAsync(
-            normalizedProjectPath,
-            requestId,
-            new() { CommandType = BridgeCommandTypes.Status },
-            timeout,
-            processIdHint,
-            ct
-        );
+        return await ExecuteAsync();
+
+        async Task<BridgeClientResult> ExecuteAsync()
+        {
+            bool trackUsage = !usage.WasSent;
+            var result = await bridgeClient.ExecuteCommandAsync(
+                normalizedProjectPath,
+                requestId,
+                new()
+                {
+                    CommandType = BridgeCommandTypes.Status,
+                    TrackUsage = trackUsage,
+                },
+                timeout,
+                processIdHint,
+                ct
+            );
+            usage.WasSent |= trackUsage && result.CommandSent;
+            return result;
+        }
     }
 
     async Task UpdateProjectRegistryAsync(string normalizedProjectPath, BridgeProjectHandshake? handshake, CT ct)
@@ -1040,5 +1085,11 @@ public sealed class UnityProjectOperations(
 
         pingSnapshot = new();
         return false;
+    }
+
+    // one MCP status call may poll Unity repeatedly; only its first delivered command is usage.
+    sealed class StatusUsageState
+    {
+        internal bool WasSent;
     }
 }

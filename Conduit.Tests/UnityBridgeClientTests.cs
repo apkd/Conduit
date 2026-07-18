@@ -11,6 +11,24 @@ namespace Conduit;
 public sealed class UnityBridgeClientTests
 {
     [Test]
+    public async Task BridgeCommandSerializesToolUsageIntent()
+    {
+        var payload = BridgeProtocol.Serialize(
+            BridgeMessage.CreateCommand(
+                "usage-test",
+                new()
+                {
+                    CommandType = BridgeCommandTypes.Show,
+                    TrackUsage = true,
+                }
+            )
+        );
+        var command = JsonNode.Parse(payload)?["command"];
+
+        await Assert.That(command?["track_usage"]?.GetValue<bool>()).IsTrue();
+    }
+
+    [Test]
     public async Task ProbeTimeoutWhileWaitingForTheProjectGateReturnsATimeoutResult()
     {
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);

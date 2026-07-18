@@ -26,6 +26,7 @@ namespace Conduit
                         Target = operation.target,
                         Snippet = operation.snippet,
                         TestFilter = operation.test_filter,
+                        ToolUsageStartedUtcTicks = operation.tool_usage_started_utc_ticks,
                         ReimportAssetPaths = operation.reimport_asset_paths,
                     }
                 )
@@ -70,6 +71,7 @@ namespace Conduit
                 target = restoredState.Target,
                 snippet = restoredState.Snippet,
                 test_filter = restoredState.TestFilter,
+                tool_usage_started_utc_ticks = restoredState.ToolUsageStartedUtcTicks,
                 args = Array.Empty<string>(),
                 is_acknowledged = true,
                 is_restored = true,
@@ -141,6 +143,7 @@ namespace Conduit
             public string? Target;
             public string? Snippet;
             public string? TestFilter;
+            public long ToolUsageStartedUtcTicks;
             public string[] ReimportAssetPaths = Array.Empty<string>();
         }
     }

@@ -122,6 +122,10 @@ sealed class BridgeCommand
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? RebuildCache { get; set; }
 
+    // internal bridge probes use the same command types and must not inflate MCP usage totals.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool TrackUsage { get; set; }
+
     public string[] Args { get; set; } = [];
 }
 

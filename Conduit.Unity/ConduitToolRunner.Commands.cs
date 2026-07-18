@@ -7,30 +7,33 @@ namespace Conduit
 {
     static partial class ConduitToolRunner
     {
-        static async Task ExecuteStatusAsync(int clientId, string requestId)
+        static async Task ExecuteStatusAsync(
+            int clientId,
+            string requestId,
+            long usageStartedUtcTicks
+        )
         {
+            BridgeCommandResult result;
             try
             {
-                await ConduitConnection.TrySendResultAsync(
-                    clientId,
-                    requestId,
-                    new()
-                    {
-                        outcome = ToolOutcome.Success,
-                        return_value = status.Status(),
-                    },
-                    BridgeCommandTypes.Status
-                );
+                result = new()
+                {
+                    outcome = ToolOutcome.Success,
+                    return_value = status.Status(),
+                };
             }
             catch (Exception exception)
             {
-                await ConduitConnection.TrySendResultAsync(
-                    clientId,
-                    requestId,
-                    CreateExceptionResult(exception),
-                    BridgeCommandTypes.Status
-                );
+                result = CreateExceptionResult(exception);
             }
+
+            ConduitToolUsage.CompleteCall(BridgeCommandTypes.Status, usageStartedUtcTicks);
+            await ConduitConnection.TrySendResultAsync(
+                clientId,
+                requestId,
+                result,
+                BridgeCommandTypes.Status
+            );
         }
 
         static Task ExecuteGetDependenciesAsync(PendingOperationState operation)

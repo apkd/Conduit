@@ -10,9 +10,20 @@ public sealed class UnityEditorProcessController(
     UnityProjectEnvironmentInspector environmentInspector)
 {
     internal const string RestartedProcessExitedDiagnostic = "The restarted Unity process has shut down or crashed.";
+    internal const string RestartStartedUtcTicksEnvironmentVariable =
+        "CONDUIT_RESTART_STARTED_UTC_TICKS";
 
-    internal async Task<ToolExecutionResult> RestartAsync(string projectPath, CancellationToken ct)
+    internal Task<ToolExecutionResult> RestartAsync(string projectPath, CancellationToken ct)
+        => RestartAsync(projectPath, trackUsage: true, ct);
+
+    internal async Task<ToolExecutionResult> RestartAsync(
+        string projectPath,
+        bool trackUsage,
+        CancellationToken ct
+    )
     {
+        // the replacement editor can recover this per-call state only from its launch environment.
+        long? restartStartedUtcTicks = trackUsage ? DateTime.UtcNow.Ticks : null;
         var builder = new StringBuilder();
         string? restartLogPath = null;
         Process? editorProcess = null;
@@ -99,6 +110,7 @@ public sealed class UnityEditorProcessController(
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
             var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
             ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
+            ApplyRestartUsageTracking(startInfo, restartStartedUtcTicks);
 
             var prelaunchSnapshot = environmentInspector.Inspect(snapshot.ProjectPath);
             if (prelaunchSnapshot.MatchedProcess != null
@@ -457,6 +469,18 @@ public sealed class UnityEditorProcessController(
         }
 
         ApplyGraphicalSessionEnvironment(startInfo);
+    }
+
+    internal static void ApplyRestartUsageTracking(
+        ProcessStartInfo startInfo,
+        long? startedUtcTicks
+    )
+    {
+        // captured editor environments may contain an earlier restart marker.
+        startInfo.Environment.Remove(RestartStartedUtcTicksEnvironmentVariable);
+        if (startedUtcTicks is { } value)
+            startInfo.Environment[RestartStartedUtcTicksEnvironmentVariable] =
+                value.ToString(CultureInfo.InvariantCulture);
     }
 
     static bool IsValidEnvironmentVariableName(string variableName) =>

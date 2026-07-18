@@ -13,6 +13,10 @@ namespace Conduit
         const string SettingsPath = "Preferences/Conduit";
         const string UnfocusedGameViewDescription =
             "Saves some power by keeping the game view window unfocused during play mode runs.";
+        const string LocalToolUsageDescription =
+            "Count the number of times each MCP tool was used and the average call duration. " +
+            "This data is stored locally and never sent anywhere. Useful for analyzing and " +
+            "improving your MCP workflows.";
         static readonly Color successColor = new(0.45f, 0.8f, 0.45f);
         static readonly Color errorColor = new(0.85f, 0.45f, 0.45f);
         static readonly Color enabledColor = new(0.8f, 0.8f, 0.8f);
@@ -62,6 +66,8 @@ namespace Conduit
                     "Game View",
                     "Play Mode",
                     "Tests",
+                    "Usage",
+                    "Tracking",
                     "Server",
                     "Editor",
                     "Configuration",
@@ -193,6 +199,24 @@ namespace Conduit
                 settings.SetUnfocusedGameView(unfocusedGameView);
 
             EditorGUILayout.HelpBox(UnfocusedGameViewDescription, MessageType.None);
+
+            EditorGUILayout.Space();
+            EditorGUILayout.BeginHorizontal();
+            EditorGUI.BeginChangeCheck();
+            bool trackToolUsage = EditorGUILayout.ToggleLeft(
+                "Local tool usage tracking",
+                ConduitToolUsage.Enabled,
+                GUILayout.ExpandWidth(false)
+            );
+            if (EditorGUI.EndChangeCheck())
+                ConduitToolUsage.Enabled = trackToolUsage;
+            GUILayout.Space(6f);
+            if (EditorGUILayout.LinkButton("Show data"))
+                ConduitToolUsageWindow.Open();
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.HelpBox(LocalToolUsageDescription, MessageType.None);
         }
 
         void DrawSelectedEditor(ConduitSetupWizardUtility.EditorSpec[] specs, ConduitSettings settings)

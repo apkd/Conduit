@@ -8,6 +8,35 @@ namespace Conduit;
 public sealed class UnityRestartAndPreflightPolicyTests
 {
     [Test]
+    public async Task RestartUsageTimestampReplacesInheritedStateOnlyForTrackedRestarts()
+    {
+        var startInfo = new ProcessStartInfo { UseShellExecute = false };
+        startInfo.Environment[
+            UnityEditorProcessController.RestartStartedUtcTicksEnvironmentVariable
+        ] = "stale";
+
+        UnityEditorProcessController.ApplyRestartUsageTracking(
+            startInfo,
+            startedUtcTicks: null
+        );
+        await Assert.That(
+            startInfo.Environment.ContainsKey(
+                UnityEditorProcessController.RestartStartedUtcTicksEnvironmentVariable
+            )
+        ).IsFalse();
+
+        UnityEditorProcessController.ApplyRestartUsageTracking(
+            startInfo,
+            startedUtcTicks: 123L
+        );
+        await Assert.That(
+            startInfo.Environment[
+                UnityEditorProcessController.RestartStartedUtcTicksEnvironmentVariable
+            ]
+        ).IsEqualTo("123");
+    }
+
+    [Test]
     public async Task RestartLaunchArgumentsIncludeAbsoluteProjectLogPath()
     {
         var projectPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), $"conduit-project-{Guid.NewGuid():N}"));
