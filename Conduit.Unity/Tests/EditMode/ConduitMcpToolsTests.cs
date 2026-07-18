@@ -55,6 +55,18 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ObjectId_RoundTripsAcrossUnityVersions()
+    {
+        var camera = Camera.main;
+        Assert.That(camera, Is.Not.Null);
+
+        Assert.That(
+            ConduitUtility.ResolveObjectId(ConduitUtility.GetObjectId(camera)),
+            Is.SameAs(camera)
+        );
+    }
+
+    [Test]
     public void Resolve_AcceptsWhitespaceAfterExactObjectIdPrefix()
     {
         var camera = Camera.main;
@@ -2621,12 +2633,12 @@ public sealed class ConduitMcpToolsTests
             previouslyFocusedWindow?.Focus();
         }
 
-        HashSet<int> GetWindowIds(Type windowType)
+        HashSet<ulong> GetWindowIds(Type windowType)
         {
-            var ids = new HashSet<int>();
+            var ids = new HashSet<ulong>();
             foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
                 if (candidate is EditorWindow window)
-                    ids.Add(window.GetInstanceID());
+                    ids.Add(ConduitUtility.GetObjectId(window));
 
             return ids;
         }
@@ -2640,10 +2652,11 @@ public sealed class ConduitMcpToolsTests
             return EditorWindow.GetWindow(gameViewType, false, "Game", false);
         }
 
-        void CloseNewWindows(Type windowType, HashSet<int> existingWindowIds)
+        void CloseNewWindows(Type windowType, HashSet<ulong> existingWindowIds)
         {
             foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
-                if (candidate is EditorWindow window && !existingWindowIds.Contains(window.GetInstanceID()))
+                if (candidate is EditorWindow window
+                    && !existingWindowIds.Contains(ConduitUtility.GetObjectId(window)))
                     window.Close();
         }
     }

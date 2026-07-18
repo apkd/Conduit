@@ -15,7 +15,7 @@ namespace Conduit
     {
         // session state survives the domain reload between exiting edit mode and entering play mode
         const string ActiveStateKey = "Conduit.GameViewFocus.Active";
-        const string GameViewEntityIdStateKey = "Conduit.GameViewFocus.GameViewEntityId";
+        const string GameViewObjectIdStateKey = "Conduit.GameViewFocus.GameViewObjectId";
         const string PreviousBehaviorStateKey = "Conduit.GameViewFocus.PreviousBehavior";
 
         // unity 6 keeps the per-window play behavior and docking APIs internal, so failures must stay optional
@@ -86,8 +86,8 @@ namespace Conduit
 
                 // persist restoration data first because entering play mode may reload the domain immediately
                 SessionState.SetString(
-                    GameViewEntityIdStateKey,
-                    EntityId.ToULong(gameView.GetEntityId()).ToString(CultureInfo.InvariantCulture)
+                    GameViewObjectIdStateKey,
+                    ConduitUtility.GetObjectId(gameView).ToString(CultureInfo.InvariantCulture)
                 );
                 SessionState.SetInt(PreviousBehaviorStateKey, Convert.ToInt32(previousBehavior));
                 SessionState.SetBool(ActiveStateKey, true);
@@ -109,11 +109,11 @@ namespace Conduit
 
             try
             {
-                var entityId = EntityId.FromULong(ulong.Parse(
-                    SessionState.GetString(GameViewEntityIdStateKey, "0"),
+                var objectId = ulong.Parse(
+                    SessionState.GetString(GameViewObjectIdStateKey, "0"),
                     CultureInfo.InvariantCulture
-                ));
-                if (EditorUtility.EntityIdToObject(entityId) is EditorWindow gameView
+                );
+                if (ConduitUtility.ResolveObjectId(objectId) is EditorWindow gameView
                     && enterPlayModeBehaviorProperty is { } property)
                 {
                     var previousBehavior = Enum.ToObject(
@@ -130,7 +130,7 @@ namespace Conduit
             finally
             {
                 SessionState.EraseBool(ActiveStateKey);
-                SessionState.EraseString(GameViewEntityIdStateKey);
+                SessionState.EraseString(GameViewObjectIdStateKey);
                 SessionState.EraseInt(PreviousBehaviorStateKey);
             }
         }

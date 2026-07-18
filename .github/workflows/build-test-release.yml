@@ -378,8 +378,22 @@ jobs:
               -projectPath $PROJECT \
               -executeMethod Conduit.CI.RunTests
 
-      - uses: dorny/test-reporter@v3
+      - name: Locate Unity test results
+        id: unity-test-results
         if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          reports=("$RUNNER_TEMP"/test-results/*tests.xml)
+          if (( ${#reports[@]} > 0 )); then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Unity exited before producing a test report."
+          fi
+
+      - uses: dorny/test-reporter@v3
+        if: ${{ !cancelled() && steps.unity-test-results.outputs.found == 'true' }}
         with:
           name: Unity Test Results (${{ matrix.UNITY_VERSION }})
           reporter: dotnet-nunit
@@ -387,7 +401,7 @@ jobs:
           fail-on-error: false
 
       - name: Fail on Unity test errors
-        if: steps.unity-tests.outcome == 'failure'
+        if: steps.unity-tests.outcome == 'failure' || steps.unity-test-results.outputs.found != 'true'
         run: exit 1
 
   prepare:

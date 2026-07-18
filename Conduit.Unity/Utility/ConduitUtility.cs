@@ -285,6 +285,29 @@ namespace Conduit
         public static string FormatObjectId(ulong objectId) => $"id:{objectId.ToString(CultureInfo.InvariantCulture)}";
 #endif
 
+        /// <summary>Resolves an object identifier produced by <see cref="GetObjectId(Object)"/>.</summary>
+        public static Object? ResolveObjectId(ulong objectId)
+        {
+#if UNITY_6000_4_OR_NEWER
+            var entityId = EntityId.FromULong(objectId);
+            return entityId.IsValid()
+                ? UnityEditor.EditorUtility.EntityIdToObject(entityId)
+                : null;
+#elif UNITY_6000_3_OR_NEWER
+            var entityId = (EntityId)unchecked((int)objectId);
+            return entityId.IsValid()
+                ? UnityEditor.EditorUtility.EntityIdToObject(entityId)
+                : null;
+#elif UNITY_6000_2_OR_NEWER
+            var entityId = (EntityId)unchecked((int)objectId);
+            return entityId.IsValid()
+                ? UnityEditor.EditorUtility.InstanceIDToObject(unchecked((int)objectId))
+                : null;
+#else
+            return UnityEditor.EditorUtility.InstanceIDToObject(unchecked((int)objectId));
+#endif
+        }
+
         /// <summary>
         /// Formats the identifier of a Unity object for display in tool output.
         /// </summary>

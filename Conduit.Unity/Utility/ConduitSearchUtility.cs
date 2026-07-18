@@ -196,17 +196,11 @@ namespace Conduit
 #endif
                 return false;
 
+            var target = ConduitUtility.ResolveObjectId(
 #if UNITY_6000_4_OR_NEWER
-            var entityId = EntityId.FromULong(rawEntityId);
+                rawEntityId
 #else
-            var entityId = (EntityId)rawEntityId;
-#endif
-            if (!entityId.IsValid())
-                return false;
-
-            var target = ResolveEntityIdToObject(entityId
-#if !UNITY_6000_3_OR_NEWER
-                , rawEntityId
+                unchecked((ulong)rawEntityId)
 #endif
             );
             if (target == null)
@@ -215,17 +209,6 @@ namespace Conduit
             match = CreateMatch(target, ResolvedObjectMatchSource.EntityId);
             return true;
         }
-
-#if UNITY_6000_3_OR_NEWER
-        static Object? ResolveEntityIdToObject(EntityId entityId) => EditorUtility.EntityIdToObject(entityId);
-#else
-        static Object? ResolveEntityIdToObject(EntityId entityId, int instanceId)
-        {
-            // Unity 6000.2 exposes entity IDs, but not the editor-side reverse lookup helper yet.
-            _ = entityId;
-            return EditorUtility.InstanceIDToObject(instanceId);
-        }
-#endif
 
 #if !UNITY_6000_4_OR_NEWER
         static bool TryParseLegacyEntityId(ReadOnlySpan<char> candidate, out int entityId)

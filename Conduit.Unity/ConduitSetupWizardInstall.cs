@@ -69,12 +69,7 @@ namespace Conduit
             bool hasError
         )
         {
-            bool isOutdated = ShouldOfferServerUpdate(
-                executablePath,
-                out var installedVersion,
-                out var packageVersion
-            );
-            if (isOutdated && IsNixOsSystemProfilePath(executablePath))
+            if (IsNixOsSystemProfilePath(executablePath))
                 return new()
                 {
                     State = ActionState.Disabled,
@@ -84,6 +79,12 @@ namespace Conduit
                         "Update it through your NixOS configuration instead of this wizard.",
                     IsOutdated = false,
                 };
+
+            bool isOutdated = ShouldOfferServerUpdate(
+                executablePath,
+                out var installedVersion,
+                out var packageVersion
+            );
 
             if (isRunning)
                 return new()

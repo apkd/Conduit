@@ -942,11 +942,13 @@ public sealed class ConduitSetupWizardTests
     }
 
     [Test]
-    public void OutdatedNixOsSystemProfileExecutableDefersToNixOsConfiguration()
+    public void NixOsSystemProfileExecutableDefersWithoutVersionProbe()
     {
         const string executablePath = "/run/current-system/sw/bin/conduit";
-        ConduitSetupWizardUtility.GetCurrentPackageVersionOverride = static () => "0.3.12";
-        ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ => "0.3.11";
+        ConduitSetupWizardUtility.GetCurrentPackageVersionOverride = static () =>
+            throw new InvalidOperationException("NixOS-managed executables must not be version-probed.");
+        ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ =>
+            throw new InvalidOperationException("NixOS-managed executables must not be version-probed.");
 
         var button = ConduitSetupWizardUtility.EvaluateDownloadButtonCore(
             ConduitSetupWizardUtility.ConfigurationLocation.User,
