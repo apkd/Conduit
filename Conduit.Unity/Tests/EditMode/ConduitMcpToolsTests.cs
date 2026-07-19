@@ -1860,6 +1860,11 @@ public sealed class ConduitMcpToolsTests
             type = CompilerMessageType.Error,
             message = "Temp/execute_code/1.cs(9,36): error CS0103: The name 'bindingFlags' does not exist in the current context",
         };
+        var lowercaseType = new CompilerMessage
+        {
+            type = CompilerMessageType.Error,
+            message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'math' does not exist in the current context",
+        };
         var unsupported = new CompilerMessage
         {
             type = CompilerMessageType.Error,
@@ -1867,6 +1872,7 @@ public sealed class ConduitMcpToolsTests
         };
 
         Assert.That(execute_code.TryParseRetryableMissingSymbol(missingVariable, out _), Is.False);
+        Assert.That(execute_code.TryParseRetryableMissingSymbol(lowercaseType, out _), Is.False);
         Assert.That(execute_code.TryParseRetryableMissingSymbol(unsupported, out _), Is.False);
     }
 
@@ -1911,6 +1917,89 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(inferred, Is.True);
         Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection" }));
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_ResolvesAllLowercaseMathematicsTypes()
+    {
+        var projectPath = execute_code.GetCurrentProjectPath();
+        var mathematicsAssembly = Array.Find(
+            AppDomain.CurrentDomain.GetAssemblies(),
+            assembly => assembly.GetName().Name == "Unity.Mathematics"
+        );
+        Assert.That(mathematicsAssembly, Is.Not.Null);
+
+        var lowercaseTypeNames = new List<string>();
+        foreach (var type in mathematicsAssembly!.GetTypes())
+        {
+            var aritySeparator = type.Name.IndexOf('`');
+            var typeName = aritySeparator >= 0 ? type.Name[..aritySeparator] : type.Name;
+            if (!type.IsNested
+                && type.Namespace == "Unity.Mathematics"
+                && IsLowercaseTypeName(typeName))
+                lowercaseTypeNames.Add(typeName);
+        }
+
+        Assert.That(lowercaseTypeNames, Does.Contain("math"));
+        foreach (var typeName in lowercaseTypeNames)
+        {
+            var parsedSnippet = ConduitCodeParser.Parse($"return typeof({typeName}).Name;");
+            var compilerMessages = new[]
+            {
+                new CompilerMessage
+                {
+                    type = CompilerMessageType.Error,
+                    message = $"Temp/execute_code/1.cs(1,15): error CS0246: The type or namespace name '{typeName}' could not be found (are you missing a using directive or an assembly reference?)",
+                },
+            };
+
+            var inferred = execute_code.TryInferMissingNamespaces(
+                projectPath,
+                execute_code.GetSnippetRootPath(projectPath),
+                parsedSnippet,
+                compilerMessages,
+                out var inferredNamespaces
+            );
+
+            Assert.That(inferred, Is.True, typeName);
+            Assert.That(inferredNamespaces, Is.EqualTo(new[] { "Unity.Mathematics" }), typeName);
+        }
+
+        static bool IsLowercaseTypeName(string typeName)
+        {
+            if (typeName.Length == 0 || !char.IsLower(typeName[0]))
+                return false;
+
+            foreach (var ch in typeName)
+                if (char.IsUpper(ch))
+                    return false;
+
+            return true;
+        }
+    }
+
+    [Test]
+    public void ExecuteCode_InferMissingNamespaces_RejectsMissingVariables()
+    {
+        var parsedSnippet = ConduitCodeParser.Parse("return bindingFlags.ToString();");
+        var compilerMessages = new[]
+        {
+            new CompilerMessage
+            {
+                type = CompilerMessageType.Error,
+                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'bindingFlags' does not exist in the current context",
+            },
+        };
+
+        var inferred = execute_code.TryInferMissingNamespaces(
+            execute_code.GetCurrentProjectPath(),
+            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
+            parsedSnippet,
+            compilerMessages,
+            out _
+        );
+
+        Assert.That(inferred, Is.False);
     }
 
     [Test]

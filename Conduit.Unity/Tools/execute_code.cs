@@ -19,6 +19,7 @@ namespace Conduit
     {
         const string SnippetNamespace = "ConduitGenerated.ExecuteCode";
         const string SnippetTempDirectoryName = "execute_code";
+        const string UnityMathematicsNamespace = "Unity.Mathematics";
         static readonly string linqUsingDirective = string.Concat("using System.", "Linq;");
         static readonly object cacheGate = new();
         static bool initialized;
@@ -823,7 +824,15 @@ namespace Conduit
             foreach (var errorMessage in errorMessages)
             {
                 if (!TryParseRetryableMissingSymbol(errorMessage, out var missingSymbol))
-                    return false;
+                {
+                    if (!TryParseMissingSymbol(errorMessage, requireTypeLikeName: false, out missingSymbol)
+                        || importedNamespaces.Contains(UnityMathematicsNamespace)
+                        || !IsLowercaseMathematicsType(missingSymbol, typeNamespaceLookup))
+                        return false;
+
+                    resolvedNamespaces.Add(UnityMathematicsNamespace);
+                    continue;
+                }
 
                 if (!TryResolveMissingSymbolNamespace(missingSymbol, typeNamespaceLookup, importedNamespaces, resolvedNamespaces, out var resolvedNamespace))
                     return false;
@@ -850,6 +859,13 @@ namespace Conduit
         }
 
         internal static bool TryParseRetryableMissingSymbol(CompilerMessage compilerMessage, out string symbolName)
+            => TryParseMissingSymbol(compilerMessage, requireTypeLikeName: true, out symbolName);
+
+        static bool TryParseMissingSymbol(
+            CompilerMessage compilerMessage,
+            bool requireTypeLikeName,
+            out string symbolName
+        )
         {
             symbolName = string.Empty;
             if (compilerMessage.type != CompilerMessageType.Error
@@ -863,14 +879,14 @@ namespace Conduit
                     message,
                     "The name '",
                     "' does not exist in the current context",
-                    requireTypeLikeName: true,
+                    requireTypeLikeName,
                     out symbolName
                 ),
                 "CS0246" => TryExtractQuotedValue(
                     message,
                     "The type or namespace name '",
                     "' could not be found",
-                    requireTypeLikeName: true,
+                    requireTypeLikeName,
                     out symbolName
                 ),
                 _ => false,
@@ -921,13 +937,35 @@ namespace Conduit
             if (symbolName.Length == 0 || symbolName.Contains(".") || symbolName.Contains("::"))
                 return false;
 
-            return !requireTypeLikeName || LooksLikeTypeName(symbolName);
+            return requireTypeLikeName
+                ? LooksLikeTypeName(symbolName)
+                : IsSimpleIdentifier(symbolName);
         }
 
         static bool LooksLikeTypeName(string symbolName)
             => symbolName.Length > 0
                && (char.IsUpper(symbolName[0]) || symbolName[0] == '_')
                && IsSimpleIdentifier(symbolName);
+
+        static bool IsLowercaseMathematicsType(
+            string symbolName,
+            Dictionary<string, string[]> typeNamespaceLookup
+        )
+        {
+            if (!char.IsLower(symbolName[0])
+                || !typeNamespaceLookup.TryGetValue(symbolName, out var candidateNamespaces))
+                return false;
+
+            foreach (var ch in symbolName)
+                if (char.IsUpper(ch))
+                    return false;
+
+            foreach (var candidateNamespace in candidateNamespaces)
+                if (candidateNamespace == UnityMathematicsNamespace)
+                    return true;
+
+            return false;
+        }
 
         static bool IsSimpleIdentifier(string value)
         {

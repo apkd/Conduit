@@ -507,6 +507,23 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
+    [Order(15)]
+    public async Task ExecuteCode_AutoInfersLowercaseTypeNamespace()
+    {
+        const string snippet = "return math.length(new float3(3f, 4f, 0f));";
+
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(
+                ("projectPath", projectPath),
+                ("snippet", snippet)
+            )
+        );
+
+        AssertSuccessful(result, "5");
+    }
+
+    [Test]
     [Order(16)]
     public async Task ExecuteCode_ImportsConduitHelpers()
     {
