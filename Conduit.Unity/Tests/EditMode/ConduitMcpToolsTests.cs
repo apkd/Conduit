@@ -2662,6 +2662,129 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void LowResolutionGameView_PrepareAndRestorePreservesSelectedSize()
+    {
+        RequireInteractiveEditorWindows();
+
+        var editorAssembly = typeof(EditorWindow).Assembly;
+        var gameViewType = editorAssembly.GetType("UnityEditor.GameView")
+                           ?? throw new TypeLoadException("UnityEditor.GameView");
+        var gameViewSizesType = editorAssembly.GetType("UnityEditor.GameViewSizes")
+                                ?? throw new TypeLoadException("UnityEditor.GameViewSizes");
+        var selectedSizeIndexProperty = gameViewType.GetProperty("selectedSizeIndex")
+                                        ?? throw new MissingMemberException(
+                                            "UnityEditor.GameView.selectedSizeIndex"
+                                        );
+        var sizes = gameViewSizesType.GetProperty(
+                        "instance",
+                        BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy
+                    )?.GetValue(null)
+                    ?? throw new MissingMemberException("UnityEditor.GameViewSizes.instance");
+        var group = gameViewSizesType.GetProperty("currentGroup")?.GetValue(sizes)
+                    ?? throw new MissingMemberException("UnityEditor.GameViewSizes.currentGroup");
+        var getTotalCount = group.GetType().GetMethod("GetTotalCount")
+                            ?? throw new MissingMemberException(
+                                "UnityEditor.GameViewSizeGroup.GetTotalCount"
+                            );
+        var getGameViewSize = group.GetType().GetMethod("GetGameViewSize")
+                              ?? throw new MissingMemberException(
+                                  "UnityEditor.GameViewSizeGroup.GetGameViewSize"
+                              );
+        var existingGameViews = new HashSet<ulong>();
+        foreach (var candidate in Resources.FindObjectsOfTypeAll(gameViewType))
+            if (candidate is EditorWindow window)
+                existingGameViews.Add(ConduitUtility.GetObjectId(window));
+        var previouslyFocusedWindow = EditorWindow.focusedWindow;
+        var gameView = ConduitGameView.FindOrOpen();
+        int originalSizeIndex = Convert.ToInt32(selectedSizeIndexProperty.GetValue(gameView));
+        int originalTargetSizeIndex = FindTargetSizeIndex();
+        int previousSizeIndex = originalTargetSizeIndex == 0 ? 1 : 0;
+
+        try
+        {
+            ConduitGameViewResolution.Restore();
+            selectedSizeIndexProperty.SetValue(gameView, previousSizeIndex);
+
+            ConduitGameViewResolution.Prepare(true);
+
+            int targetSizeIndex = FindTargetSizeIndex();
+            Assert.That(ConduitGameViewResolution.IsPrepared, Is.True);
+            Assert.That(targetSizeIndex, Is.GreaterThanOrEqualTo(0));
+            Assert.That(
+                Convert.ToInt32(selectedSizeIndexProperty.GetValue(gameView)),
+                Is.EqualTo(targetSizeIndex)
+            );
+
+            ConduitGameViewResolution.Restore();
+
+            Assert.That(ConduitGameViewResolution.IsPrepared, Is.False);
+            Assert.That(
+                Convert.ToInt32(selectedSizeIndexProperty.GetValue(gameView)),
+                Is.EqualTo(previousSizeIndex)
+            );
+        }
+        finally
+        {
+            ConduitGameViewResolution.Restore();
+            selectedSizeIndexProperty.SetValue(gameView, originalSizeIndex);
+            if (originalTargetSizeIndex < 0)
+                RemoveTargetSize();
+
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(gameViewType))
+                if (candidate is EditorWindow window
+                    && !existingGameViews.Contains(ConduitUtility.GetObjectId(window)))
+                    window.Close();
+
+            previouslyFocusedWindow?.Focus();
+        }
+
+        int FindTargetSizeIndex()
+        {
+            int sizeCount = Convert.ToInt32(getTotalCount.Invoke(group, null));
+            for (int index = 0; index < sizeCount; ++index)
+            {
+                var size = getGameViewSize.Invoke(group, new object[] { index })
+                           ?? throw new InvalidOperationException("A Game View size was unavailable.");
+                var sizeType = size.GetType();
+                string? typeName = sizeType.GetProperty("sizeType")?.GetValue(size)?.ToString();
+                int width = Convert.ToInt32(sizeType.GetProperty("width")?.GetValue(size));
+                int height = Convert.ToInt32(sizeType.GetProperty("height")?.GetValue(size));
+                if (typeName == "FixedResolution"
+                    && width == ConduitGameViewResolution.TargetWidth
+                    && height == ConduitGameViewResolution.TargetHeight)
+                    return index;
+            }
+
+            return -1;
+        }
+
+        void RemoveTargetSize()
+        {
+            int targetSizeIndex = FindTargetSizeIndex();
+            if (targetSizeIndex < 0)
+                return;
+
+            var totalIndexToCustomIndex = group.GetType().GetMethod("TotalIndexToCustomIndex")
+                                          ?? throw new MissingMemberException(
+                                              "UnityEditor.GameViewSizeGroup.TotalIndexToCustomIndex"
+                                          );
+            var removeCustomSize = group.GetType().GetMethod("RemoveCustomSize")
+                                   ?? throw new MissingMemberException(
+                                       "UnityEditor.GameViewSizeGroup.RemoveCustomSize"
+                                   );
+            int customSizeIndex = Convert.ToInt32(
+                totalIndexToCustomIndex.Invoke(group, new object[] { targetSizeIndex })
+            );
+            removeCustomSize.Invoke(
+                group,
+                new object[] { customSizeIndex }
+            );
+            gameViewSizesType.GetMethod("Changed")?.Invoke(sizes, null);
+            gameViewSizesType.GetMethod("SaveToHDD")?.Invoke(sizes, null);
+        }
+    }
+
+    [Test]
     public void RefreshAssetDatabasePlayModeGuard_BlocksPlayMode()
     {
         Assert.That(ConduitToolRunner.ShouldBlockReimportForPlayMode(true), Is.True);

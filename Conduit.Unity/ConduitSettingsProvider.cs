@@ -13,6 +13,9 @@ namespace Conduit
         const string SettingsPath = "Preferences/Conduit";
         const string UnfocusedGameViewDescription =
             "Saves some power by keeping the game view window unfocused during play mode runs.";
+        const string LowResolutionPlayModeDescription =
+            "Lowers the game view resolution to 480x320 when executing play mode commands. " +
+            "This helps preserve GPU resources. Useful when running multiple Unity instances at the same time.";
         const string LocalToolUsageDescription =
             "Count the number of times each MCP tool was used and the average call duration. " +
             "This data is stored locally and never sent anywhere. Useful for analyzing and " +
@@ -64,6 +67,8 @@ namespace Conduit
                     "Conduit",
                     "MCP",
                     "Game View",
+                    "Resolution",
+                    "GPU",
                     "Play Mode",
                     "Tests",
                     "Usage",
@@ -192,13 +197,24 @@ namespace Conduit
         {
             EditorGUI.BeginChangeCheck();
             bool unfocusedGameView = EditorGUILayout.ToggleLeft(
-                "Unfocused Game View",
+                "Hide game view in play mode",
                 settings.UnfocusedGameView
             );
             if (EditorGUI.EndChangeCheck())
                 settings.SetUnfocusedGameView(unfocusedGameView);
 
             EditorGUILayout.HelpBox(UnfocusedGameViewDescription, MessageType.None);
+
+            EditorGUILayout.Space();
+            EditorGUI.BeginChangeCheck();
+            bool lowResolutionPlayMode = EditorGUILayout.ToggleLeft(
+                "Low resolution play mode",
+                settings.LowResolutionPlayMode
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetLowResolutionPlayMode(lowResolutionPlayMode);
+
+            EditorGUILayout.HelpBox(LowResolutionPlayModeDescription, MessageType.None);
 
             EditorGUILayout.Space();
             EditorGUILayout.BeginHorizontal();

@@ -10,11 +10,13 @@ namespace Conduit
     sealed class ConduitSettings : ScriptableSingleton<ConduitSettings>
     {
         [SerializeField] bool unfocusedGameView;
+        [SerializeField] bool lowResolutionPlayMode;
         [SerializeField] string selectedEditorId = string.Empty;
         [SerializeField] string serverExecutablePath = string.Empty;
         [SerializeField] ConduitSetupWizardUtility.ConfigurationLocation configurationLocation;
 
         internal bool UnfocusedGameView => unfocusedGameView;
+        internal bool LowResolutionPlayMode => lowResolutionPlayMode;
         internal string SelectedEditorId => selectedEditorId;
         internal string ServerExecutablePath => serverExecutablePath;
         internal ConduitSetupWizardUtility.ConfigurationLocation ConfigurationLocation
@@ -26,6 +28,15 @@ namespace Conduit
                 return;
 
             unfocusedGameView = value;
+            Save(true);
+        }
+
+        internal void SetLowResolutionPlayMode(bool value)
+        {
+            if (lowResolutionPlayMode == value)
+                return;
+
+            lowResolutionPlayMode = value;
             Save(true);
         }
 

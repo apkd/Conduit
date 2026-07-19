@@ -19,7 +19,6 @@ namespace Conduit
         const string PreviousBehaviorStateKey = "Conduit.GameViewFocus.PreviousBehavior";
 
         // unity 6 keeps the per-window play behavior and docking APIs internal, so failures must stay optional
-        static readonly Type? gameViewType = typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView");
         static readonly Type? playModeViewType = typeof(EditorWindow).Assembly.GetType("UnityEditor.PlayModeView");
         static readonly Type? dockAreaType = typeof(EditorWindow).Assembly.GetType("UnityEditor.DockArea");
         static readonly Type? testRunnerWindowType = typeof(TestRunnerApi).Assembly.GetType(
@@ -28,10 +27,6 @@ namespace Conduit
         static readonly PropertyInfo? enterPlayModeBehaviorProperty = playModeViewType?.GetProperty(
             "enterPlayModeBehavior",
             BindingFlags.Instance | BindingFlags.Public
-        );
-        static readonly MethodInfo? getMainPlayModeViewMethod = playModeViewType?.GetMethod(
-            "GetMainPlayModeView",
-            BindingFlags.Static | BindingFlags.NonPublic
         );
         static readonly FieldInfo? parentField = typeof(EditorWindow).GetField(
             "m_Parent",
@@ -75,7 +70,7 @@ namespace Conduit
 
             try
             {
-                var gameView = FindOrOpenGameView();
+                var gameView = ConduitGameView.FindOrOpen();
                 var property = enterPlayModeBehaviorProperty
                                ?? throw new MissingMemberException("UnityEditor.PlayModeView.enterPlayModeBehavior");
                 var previousBehavior = property.GetValue(gameView)
@@ -164,22 +159,6 @@ namespace Conduit
             // the override is transition-scoped; retaining it would silently change the user's window preference
             if (state is PlayModeStateChange.EnteredPlayMode or PlayModeStateChange.EnteredEditMode)
                 Restore();
-        }
-
-        static EditorWindow FindOrOpenGameView()
-        {
-            if (gameViewType is null)
-                throw new TypeLoadException("UnityEditor.GameView");
-
-            if (getMainPlayModeViewMethod?.Invoke(null, null) is EditorWindow mainGameView
-                && gameViewType.IsInstanceOfType(mainGameView))
-                return mainGameView;
-
-            foreach (var candidate in Resources.FindObjectsOfTypeAll(gameViewType))
-                if (candidate is EditorWindow gameView)
-                    return gameView;
-
-            return EditorWindow.GetWindow(gameViewType, false, "Game", false);
         }
 
         static void CoverGameView(EditorWindow gameView)
