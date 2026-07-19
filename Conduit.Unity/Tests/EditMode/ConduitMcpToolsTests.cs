@@ -1961,14 +1961,9 @@ public sealed class ConduitMcpToolsTests
     public void ExecuteCode_InferMissingNamespaces_ResolvesAllLowercaseMathematicsTypes()
     {
         var projectPath = execute_code.GetCurrentProjectPath();
-        var mathematicsAssembly = Array.Find(
-            AppDomain.CurrentDomain.GetAssemblies(),
-            assembly => assembly.GetName().Name == "Unity.Mathematics"
-        );
-        Assert.That(mathematicsAssembly, Is.Not.Null);
-
-        var lowercaseTypeNames = new List<string>();
-        foreach (var type in mathematicsAssembly!.GetTypes())
+        var lowercaseTypeNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        foreach (var type in GetLoadableTypes(assembly))
         {
             var aritySeparator = type.Name.IndexOf('`');
             var typeName = aritySeparator >= 0 ? type.Name[..aritySeparator] : type.Name;
@@ -2013,6 +2008,23 @@ public sealed class ConduitMcpToolsTests
                     return false;
 
             return true;
+        }
+
+        static IEnumerable<Type> GetLoadableTypes(System.Reflection.Assembly assembly)
+        {
+            Type?[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                types = exception.Types;
+            }
+
+            foreach (var type in types)
+                if (type is not null)
+                    yield return type;
         }
     }
 
