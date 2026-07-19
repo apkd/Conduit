@@ -37,6 +37,8 @@ namespace Conduit
 
         static readonly Regex StackTraceFilePattern = new(@"\s*\[0x[0-9a-fA-F]+\]\s+in\s+(.+?)(?::line\s+|:)(\d+)\s*$", RegexOptions.Compiled);
         static readonly Regex RuntimeLocationPattern = new(@"\s*\(<[^>]+>:\d+\)\s*$", RegexOptions.Compiled);
+        static readonly Regex StateMachineFramePattern = new(@"^(?<type>.+)/<(?<method>.+)>d(?:__\d+)?:MoveNext$", RegexOptions.Compiled);
+        static readonly Regex LocalFunctionNamePattern = new(@"^<(?<outer>[^>]+)>g__(?<local>[^|]+)\|[\d_]+$", RegexOptions.Compiled);
 
         public static string? Stringify(object? value)
         {
@@ -382,9 +384,7 @@ namespace Conduit
                 : typeName;
         }
 
-        /// <summary>
-        /// Removes internal Conduit frames and shortens source locations to file-and-line form.
-        /// </summary>
+        /// <summary>Produces compact logical frames from runtime and compiler-generated stack traces.</summary>
         public static string? SimplifyStackTrace(string? stackTrace)
         {
             if (string.IsNullOrWhiteSpace(stackTrace))
@@ -394,15 +394,30 @@ namespace Conduit
             try
             {
                 using var reader = new StringReader(stackTrace);
+                string? pendingSourceWrapper = null;
                 while (reader.ReadLine() is { } line)
                 {
-                    if (line.Trim() is not { Length: > 0 } trimmed || IsInternalStackTraceFrame(trimmed))
+                    if (line.Trim() is not { Length: > 0 } trimmed
+                        || IsInternalStackTraceFrame(trimmed)
+                        || IsAsyncMethodBuilderFrame(trimmed))
                         continue;
+
+                    var frame = SimplifyStackTraceLine(trimmed);
+
+                    // before the first suspension, roslyn reports both MoveNext and its source wrapper.
+                    // carry one expected wrapper across ignored builder frames without collapsing recursion.
+                    if (pendingSourceWrapper is { } sourceWrapper)
+                    {
+                        pendingSourceWrapper = null;
+                        if (!frame.IsStateMachine && frame.Identity == sourceWrapper)
+                            continue;
+                    }
 
                     if (builder.Length > 0)
                         builder.AppendLine();
 
-                    builder.Append(SimplifyStackTraceLine(trimmed));
+                    builder.Append(frame.Text);
+                    pendingSourceWrapper = frame.IsStateMachine ? frame.Identity : null;
                 }
 
                 return builder.Length == 0 ? null : builder.ToString();
@@ -423,19 +438,62 @@ namespace Conduit
             => line.Contains("Conduit.", StringComparison.Ordinal)
                || line.Contains("ConduitGenerated.", StringComparison.Ordinal);
 
-        static string SimplifyStackTraceLine(string line)
+        static bool IsAsyncMethodBuilderFrame(string line)
+        {
+            var frame = line.StartsWith("at ", StringComparison.Ordinal) ? line[3..] : line;
+            return frame.StartsWith("System.Runtime.CompilerServices.AsyncVoidMethodBuilder", StringComparison.Ordinal)
+                   || frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
+                   || frame.StartsWith("System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder", StringComparison.Ordinal);
+        }
+
+        static (string Text, string Identity, bool IsStateMachine) SimplifyStackTraceLine(string line)
         {
             var match = StackTraceFilePattern.Match(line);
+            var frame = match.Success
+                ? line[..match.Index].TrimEnd()
+                : RuntimeLocationPattern.Replace(line, string.Empty).TrimEnd();
+            var simplified = SimplifyGeneratedMethodFrame(RemoveMethodParameters(frame));
+
             if (match.Success)
             {
                 var filePath = match.Groups[1].Value.Replace('/', Path.DirectorySeparatorChar);
                 var fileName = GetSafeFileName(filePath);
                 var lineNumber = match.Groups[2].Value;
-                return RemoveMethodParameters(line[..match.Index].TrimEnd()) + $" ({fileName}:{lineNumber})";
+                return ($"{simplified.Text} ({fileName}:{lineNumber})", simplified.Text, simplified.IsStateMachine);
             }
 
-            var withoutRuntimeLocation = RuntimeLocationPattern.Replace(line, string.Empty).TrimEnd();
-            return RemoveMethodParameters(withoutRuntimeLocation);
+            return (simplified.Text, simplified.Text, simplified.IsStateMachine);
+        }
+
+        static (string Text, bool IsStateMachine) SimplifyGeneratedMethodFrame(string frame)
+        {
+            var stateMachineMatch = StateMachineFramePattern.Match(frame);
+            if (stateMachineMatch.Success
+                && SimplifyStateMachineMethodName(stateMachineMatch.Groups["method"].Value) is { } methodName)
+                return (stateMachineMatch.Groups["type"].Value + ':' + methodName, true);
+
+            var methodSeparator = frame.LastIndexOf(':');
+            return methodSeparator >= 0
+                   && SimplifyLocalFunctionName(frame[(methodSeparator + 1)..]) is { } localFunctionName
+                ? (frame[..(methodSeparator + 1)] + localFunctionName, false)
+                : (frame, false);
+        }
+
+        // only stable roslyn naming shapes are decoded; unfamiliar generated frames retain their diagnostic value.
+        static string? SimplifyStateMachineMethodName(string generatedName)
+            => SimplifyLocalFunctionName(generatedName)
+               ?? (generatedName.Length > 0
+                   && generatedName.IndexOf('<') < 0
+                   && generatedName.IndexOf('>') < 0
+                   ? generatedName
+                   : null);
+
+        static string? SimplifyLocalFunctionName(string generatedName)
+        {
+            var match = LocalFunctionNamePattern.Match(generatedName);
+            return match.Success
+                ? match.Groups["outer"].Value + '.' + match.Groups["local"].Value
+                : null;
         }
 
         static string? GetSafeFileName(string? filePath)
@@ -459,7 +517,7 @@ namespace Conduit
             if (openParen < 0)
                 return line;
 
-            return line.Remove(openParen, closeParen - openParen + 1);
+            return line.Remove(openParen, closeParen - openParen + 1).TrimEnd();
         }
     }
 }

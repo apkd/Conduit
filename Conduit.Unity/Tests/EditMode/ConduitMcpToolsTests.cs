@@ -2780,6 +2780,53 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void SimplifyStackTrace_RestoresAsyncLocalFunction()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Logger:Log",
+            "HK.Analytics/<<EnsureInitialized>g__InitializeAsync|17_0>d:MoveNext ()",
+            "System.Runtime.CompilerServices.AsyncVoidMethodBuilder:Start<HK.Analytics/<<EnsureInitialized>g__InitializeAsync|17_0>d>",
+            "HK.Analytics:<EnsureInitialized>g__InitializeAsync|17_0",
+            "HK.Analytics:EnsureInitialized ()",
+            "HK.Analytics:Bootstrap ()");
+
+        Assert.That(
+            ConduitUtility.SimplifyStackTrace(stackTrace),
+            Is.EqualTo(string.Join("\n",
+                "UnityEngine.Logger:Log",
+                "HK.Analytics:EnsureInitialized.InitializeAsync",
+                "HK.Analytics:EnsureInitialized",
+                "HK.Analytics:Bootstrap")));
+    }
+
+    [Test]
+    public void CommandLogStackCleanup_RemovesAsyncBuilderFramesAndSchedulerTail()
+    {
+        string stackTrace = string.Join("\n",
+            "UnityEngine.Debug:LogWarning ",
+            "Unity.Services.Analytics.Internal.Dispatcher:Flush () ",
+            "Unity.Services.Analytics.AnalyticsServiceInstance:Flush () ",
+            "Unity.Services.Analytics.AnalyticsServiceInstance:ApplicationQuit () ",
+            "Unity.Services.Analytics.AnalyticsContainer:CleanUp () ",
+            "Unity.Services.Analytics.AnalyticsContainer:EditorCleanUp (UnityEditor.PlayModeStateChange) ",
+            "UnityEditor.EditorApplication:Internal_PlayModeStateChanged ",
+            "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<bool>:SetResult ",
+            "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1<bool>:SetResult ",
+            "UnityEngine.UnitySynchronizationContext:ExecuteTasks ()");
+
+        Assert.That(
+            ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.Show, stackTrace, LogType.Warning),
+            Is.EqualTo(string.Join("\n",
+                "UnityEngine.Debug:LogWarning",
+                "Unity.Services.Analytics.Internal.Dispatcher:Flush",
+                "Unity.Services.Analytics.AnalyticsServiceInstance:Flush",
+                "Unity.Services.Analytics.AnalyticsServiceInstance:ApplicationQuit",
+                "Unity.Services.Analytics.AnalyticsContainer:CleanUp",
+                "Unity.Services.Analytics.AnalyticsContainer:EditorCleanUp",
+                "UnityEditor.EditorApplication:Internal_PlayModeStateChanged")));
+    }
+
+    [Test]
     public void ExecuteCode_LogStackCleanup_RemovesDebugLogCompilerCallbackStack()
     {
         string stackTrace = string.Join("\n",
@@ -2848,7 +2895,10 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(
             ConduitToolRunner.CleanCapturedLogStack(BridgeCommandKind.Show, stackTrace, LogType.Warning),
-            Is.EqualTo(stackTrace));
+            Is.EqualTo(string.Join("\n",
+                "UnityEngine.Debug:LogWarning",
+                "System.Reflection.MethodBase:Invoke",
+                "HK.UpdateManager:RuntimeLateUpdate")));
     }
 
     [Test]

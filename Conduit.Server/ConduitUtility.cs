@@ -331,9 +331,7 @@ public static partial class ConduitUtility
             : typeName;
     }
 
-    /// <summary>
-    /// Removes internal Conduit frames and shortens source locations to file-and-line form.
-    /// </summary>
+    /// <summary>Produces compact logical frames from runtime and compiler-generated stack traces.</summary>
     public static string? SimplifyStackTrace(string? stackTrace)
     {
         if (string.IsNullOrWhiteSpace(stackTrace))
@@ -343,16 +341,31 @@ public static partial class ConduitUtility
         {
             using var builder = ZString.CreateStringBuilder();
             using var reader = new StringReader(stackTrace);
+            string? pendingSourceWrapper = null;
             while (reader.ReadLine() is { } line)
             {
                 var trimmed = line.Trim();
-                if (trimmed.Length == 0 || IsInternalStackTraceFrame(trimmed))
+                if (trimmed.Length == 0
+                    || IsInternalStackTraceFrame(trimmed)
+                    || IsAsyncMethodBuilderFrame(trimmed))
                     continue;
+
+                var frame = SimplifyStackTraceLine(trimmed);
+
+                // before the first suspension, roslyn reports both MoveNext and its source wrapper.
+                // carry one expected wrapper across ignored builder frames without collapsing recursion.
+                if (pendingSourceWrapper is { } sourceWrapper)
+                {
+                    pendingSourceWrapper = null;
+                    if (!frame.IsStateMachine && frame.Identity == sourceWrapper)
+                        continue;
+                }
 
                 if (builder.Length > 0)
                     builder.Append('\n');
 
-                builder.Append(SimplifyStackTraceLine(trimmed));
+                builder.Append(frame.Text);
+                pendingSourceWrapper = frame.IsStateMachine ? frame.Identity : null;
             }
 
             return builder.Length == 0 ? null : builder.ToString();
@@ -367,19 +380,62 @@ public static partial class ConduitUtility
         line.Contains("Conduit.", StringComparison.Ordinal)
         || line.Contains("ConduitGenerated.", StringComparison.Ordinal);
 
-    static string SimplifyStackTraceLine(string line)
+    static bool IsAsyncMethodBuilderFrame(string line)
+    {
+        var frame = line.StartsWith("at ", StringComparison.Ordinal) ? line[3..] : line;
+        return frame.StartsWith("System.Runtime.CompilerServices.AsyncVoidMethodBuilder", StringComparison.Ordinal)
+               || frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
+               || frame.StartsWith("System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder", StringComparison.Ordinal);
+    }
+
+    static (string Text, string Identity, bool IsStateMachine) SimplifyStackTraceLine(string line)
     {
         var match = StackTraceFilePatternRegex().Match(line);
+        var frame = match.Success
+            ? line[..match.Index].TrimEnd()
+            : RuntimeLocationPatternRegex().Replace(line, string.Empty).TrimEnd();
+        var simplified = SimplifyGeneratedMethodFrame(RemoveMethodParameters(frame));
+
         if (match.Success)
         {
             var filePath = match.Groups[1].Value.Replace('/', Path.DirectorySeparatorChar);
             var fileName = GetSafeFileName(filePath);
             var lineNumber = match.Groups[2].Value;
-            return RemoveMethodParameters(line[..match.Index].TrimEnd()) + $" ({fileName}:{lineNumber})";
+            return ($"{simplified.Text} ({fileName}:{lineNumber})", simplified.Text, simplified.IsStateMachine);
         }
 
-        var withoutRuntimeLocation = RuntimeLocationPatternRegex().Replace(line, string.Empty).TrimEnd();
-        return RemoveMethodParameters(withoutRuntimeLocation);
+        return (simplified.Text, simplified.Text, simplified.IsStateMachine);
+    }
+
+    static (string Text, bool IsStateMachine) SimplifyGeneratedMethodFrame(string frame)
+    {
+        var stateMachineMatch = StateMachineFramePatternRegex().Match(frame);
+        if (stateMachineMatch.Success
+            && SimplifyStateMachineMethodName(stateMachineMatch.Groups["method"].Value) is { } methodName)
+            return (stateMachineMatch.Groups["type"].Value + ':' + methodName, true);
+
+        var methodSeparator = frame.LastIndexOf(':');
+        return methodSeparator >= 0
+               && SimplifyLocalFunctionName(frame[(methodSeparator + 1)..]) is { } localFunctionName
+            ? (frame[..(methodSeparator + 1)] + localFunctionName, false)
+            : (frame, false);
+    }
+
+    // only stable roslyn naming shapes are decoded; unfamiliar generated frames retain their diagnostic value.
+    static string? SimplifyStateMachineMethodName(string generatedName)
+        => SimplifyLocalFunctionName(generatedName)
+           ?? (generatedName.Length > 0
+               && generatedName.IndexOf('<') < 0
+               && generatedName.IndexOf('>') < 0
+               ? generatedName
+               : null);
+
+    static string? SimplifyLocalFunctionName(string generatedName)
+    {
+        var match = LocalFunctionNamePatternRegex().Match(generatedName);
+        return match.Success
+            ? match.Groups["outer"].Value + '.' + match.Groups["local"].Value
+            : null;
     }
 
     static string GetSafeFileName(string filePath)
@@ -403,8 +459,14 @@ public static partial class ConduitUtility
         if (openParen < 0)
             return line;
 
-        return line.Remove(openParen, closeParen - openParen + 1);
+        return line.Remove(openParen, closeParen - openParen + 1).TrimEnd();
     }
+
+    [GeneratedRegex(@"^(?<type>.+)/<(?<method>.+)>d(?:__\d+)?:MoveNext$", RegexOptions.Compiled)]
+    private static partial Regex StateMachineFramePatternRegex();
+
+    [GeneratedRegex(@"^<(?<outer>[^>]+)>g__(?<local>[^|]+)\|[\d_]+$", RegexOptions.Compiled)]
+    private static partial Regex LocalFunctionNamePatternRegex();
 
     [GeneratedRegex(@"\s*\(<[^>]+>:\d+\)\s*$", RegexOptions.Compiled)]
     private static partial Regex RuntimeLocationPatternRegex();
