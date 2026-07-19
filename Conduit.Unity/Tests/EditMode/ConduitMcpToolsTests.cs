@@ -1737,6 +1737,44 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ExecuteCode_SnippetFileNamesRequireCanonicalPositiveIds()
+    {
+        Assert.That(execute_code.TryParseSnippetFileName("17.cs", out var artifactId), Is.True);
+        Assert.That(artifactId, Is.EqualTo("17"));
+
+        foreach (var value in new[]
+                 {
+                     "0.cs",
+                     "01.cs",
+                     "-1.cs",
+                     "17.CS",
+                     " 17.cs",
+                     "17.cs ",
+                     "../17.cs",
+                     "snippet.cs",
+                 })
+            Assert.That(execute_code.TryParseSnippetFileName(value, out _), Is.False, value);
+    }
+
+    [Test]
+    public void ExecuteCode_ExistingSnippetFilesAdvanceArtifactIds()
+    {
+        var directoryPath = Path.Combine(Path.GetTempPath(), $"ConduitSnippetIds_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directoryPath);
+        try
+        {
+            foreach (var fileName in new[] { "2.cs", "11.cs", "03.cs", "snippet.cs", "12.cs.bak" })
+                File.WriteAllText(Path.Combine(directoryPath, fileName), string.Empty);
+
+            Assert.That(execute_code.GetHighestSnippetArtifactId(directoryPath), Is.EqualTo(11));
+        }
+        finally
+        {
+            Directory.Delete(directoryPath, true);
+        }
+    }
+
+    [Test]
     public void ExecuteCode_CompilerMessageFormattingAvoidsDuplicateLocationPrefix()
     {
         var compilerMessage = new CompilerMessage

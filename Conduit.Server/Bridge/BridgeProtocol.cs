@@ -136,6 +136,9 @@ sealed class BridgeCommandResult
     public string Logs { get; set; } = string.Empty;
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayName { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ReturnValue { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -149,6 +152,7 @@ sealed class BridgeCommandResult
         {
             Outcome = Outcome,
             Logs = ConduitUtility.NormalizeOptionalUserFacingText(Logs),
+            DisplayName = ConduitUtility.NormalizeOptionalUserFacingText(DisplayName),
             ReturnValue = ConduitUtility.NormalizeOptionalPayloadText(ReturnValue),
             Exception = TryNormalizeException(Exception),
             Diagnostic = ConduitUtility.NormalizeDiagnostic(Diagnostic, Exception?.Message),

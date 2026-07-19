@@ -20,6 +20,54 @@ public sealed class ToolResponseFormatterTests
     }
 
     [Test]
+    public async Task NamedSuccessPrefixesRawPayload()
+    {
+        var text = ToolResponseFormatter.Format(
+            new()
+            {
+                Outcome = ToolOutcome.Success,
+                DisplayName = "17.cs",
+                ReturnValue = "hello",
+            }
+        );
+
+        await Assert.That(text).IsEqualTo("# 17.cs\nhello");
+    }
+
+    [Test]
+    public async Task NamedEmptySuccessReturnsOnlyName()
+    {
+        var text = ToolResponseFormatter.Format(
+            new()
+            {
+                Outcome = ToolOutcome.Success,
+                DisplayName = "17.cs",
+            }
+        );
+
+        await Assert.That(text).IsEqualTo("# 17.cs");
+    }
+
+    [Test]
+    public async Task NamedRuntimeFailurePrefixesFormattedException()
+    {
+        var text = ToolResponseFormatter.Format(
+            new()
+            {
+                Outcome = ToolOutcome.Exception,
+                DisplayName = "17.cs",
+                Exception = new()
+                {
+                    Type = "InvalidOperationException",
+                    Message = "boom",
+                },
+            }
+        );
+
+        await Assert.That(text).IsEqualTo("# 17.cs\nInvalidOperationException: boom");
+    }
+
+    [Test]
     public async Task SuccessWithReturnValueAndLogsUsesSections()
     {
         var text = ToolResponseFormatter.Format(

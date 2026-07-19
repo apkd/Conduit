@@ -193,6 +193,7 @@ namespace Conduit
     {
         public string outcome = ToolOutcome.Success;
         public string logs = string.Empty;
+        public string? display_name;
         public string? return_value;
         public BridgeExceptionInfo? exception;
         public string? diagnostic;

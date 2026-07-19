@@ -7,10 +7,16 @@ static class ToolResponseFormatter
     public static string Format(ToolExecutionResult result)
     {
         var exceptionText = FormatException(result.Exception);
-        var singleContent = TryGetSingleContent(result, exceptionText);
-        if (singleContent is not null)
-            return singleContent;
+        var content = TryGetSingleContent(result, exceptionText)
+                      ?? FormatSections(result, exceptionText);
+        if (!string.IsNullOrWhiteSpace(result.DisplayName))
+            return FormatDisplayName(result.DisplayName, content);
 
+        return content ?? FormatOutcomeFallback(result.Outcome);
+    }
+
+    static string? FormatSections(ToolExecutionResult result, string? exceptionText)
+    {
         var builder = ZString.CreateStringBuilder();
         try
         {
@@ -28,9 +34,28 @@ static class ToolResponseFormatter
                 AppendSection(ref builder, "LOG", result.Logs);
             }
 
-            return builder.Length == 0
-                ? FormatOutcomeFallback(result.Outcome)
-                : ConduitUtility.FinishText(ref builder);
+            return builder.Length == 0 ? null : ConduitUtility.FinishText(ref builder);
+        }
+        finally
+        {
+            builder.Dispose();
+        }
+    }
+
+    static string FormatDisplayName(string displayName, string? content)
+    {
+        var builder = ZString.CreateStringBuilder();
+        try
+        {
+            builder.Append("# ");
+            builder.Append(displayName);
+            if (!string.IsNullOrEmpty(content))
+            {
+                builder.Append('\n');
+                builder.Append(content);
+            }
+
+            return ConduitUtility.FinishText(ref builder);
         }
         finally
         {

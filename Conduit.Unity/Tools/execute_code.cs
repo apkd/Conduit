@@ -27,6 +27,7 @@ namespace Conduit
         static CachedAdditionalReferences? additionalReferencesCache;
         static CachedTypeNamespaceLookup? typeNamespaceLookupCache;
         static readonly Dictionary<string, CachedSnippetCompilation> compilationCache = new(StringComparer.Ordinal);
+        static readonly Dictionary<string, CachedSnippetCompilation> namedCompilationCache = new(StringComparer.Ordinal);
 
         static readonly HashSet<string> defaultUsingDirectives = new(StringComparer.Ordinal)
         {
@@ -44,19 +45,42 @@ namespace Conduit
 
         public static async Task<BridgeCommandResult> ExecuteAsync(PendingOperationState operation)
         {
+            string? invokedSnippetFileName = null;
             try
             {
                 Initialize();
                 var snippetText = operation.snippet ?? string.Empty;
+                var projectPath = GetCurrentProjectPath();
+                var snippetRootPath = GetSnippetRootPath(projectPath);
+
+                void MarkInvoking(string sourceFileName) => invokedSnippetFileName = sourceFileName;
+
+                if (TryParseSnippetFileName(snippetText, out var referencedArtifactId))
+                {
+                    var referencedCompilation = await GetNamedCompilationAsync(
+                        projectPath,
+                        snippetRootPath,
+                        referencedArtifactId
+                    );
+                    if (referencedCompilation == null)
+                    {
+                        return new()
+                        {
+                            outcome = ToolOutcome.Exception,
+                            diagnostic = $"Snippet '{snippetText}' was not found in the current editor session.",
+                        };
+                    }
+
+                    return await ExecuteCachedCompilationAsync(referencedCompilation, MarkInvoking);
+                }
+
                 if (TryGetCachedCompilation(snippetText, out var cachedCompilation))
-                    return await ExecuteCachedCompilationAsync(cachedCompilation);
+                    return await ExecuteCachedCompilationAsync(cachedCompilation, MarkInvoking);
 
                 var parsedSnippet = ConduitCodeParser.Parse(snippetText);
-                var projectPath = GetCurrentProjectPath();
                 var snippetArtifactId = AllocateSnippetArtifactId();
                 var typeName = $"SnippetHost_{snippetArtifactId}";
                 var fullTypeName = $"{SnippetNamespace}.{typeName}";
-                var snippetRootPath = GetSnippetRootPath(projectPath);
                 var sourceFileName = snippetArtifactId + ".cs";
                 var displaySourcePath = sourceFileName;
                 var sourceFilePath = Path.Combine(snippetRootPath, sourceFileName);
@@ -99,11 +123,13 @@ namespace Conduit
                 ) => ExecuteCachedCompilationAsync(
                     CacheCompilation(
                         snippetText,
+                        sourceFileName,
                         fullTypeName,
                         assemblyPath,
                         messages,
                         inferredNamespaces
-                    )
+                    ),
+                    MarkInvoking
                 );
 
                 var compilerMessages = await CompileSnippetAsync();
@@ -179,6 +205,7 @@ namespace Conduit
                 return new()
                 {
                     outcome = ToolOutcome.Exception,
+                    display_name = invokedSnippetFileName,
                     exception = exceptionInfo,
                     diagnostic = ConduitUtility.NormalizeDiagnostic(exception.Message, exceptionInfo.message),
                 };
@@ -196,15 +223,29 @@ namespace Conduit
 
         static void CleanupGeneratedFiles()
         {
+            var projectPath = GetCurrentProjectPath();
             lock (cacheGate)
             {
-                nextSnippetArtifactId = 0;
+                // temp artifacts survive domain reloads within the current editor process
+                nextSnippetArtifactId = GetHighestSnippetArtifactId(GetSnippetRootPath(projectPath));
                 typeNamespaceLookupCache = null;
             }
 
-            var projectPath = GetCurrentProjectPath();
             DeleteDirectoryIfPresent(Path.Combine(projectPath, "Library", "Conduit", "ExecuteCode"));
             DeleteDirectoryIfPresent(Path.Combine(projectPath, "Library", "Conduit", "ExecuteSnippet"));
+        }
+
+        internal static int GetHighestSnippetArtifactId(string snippetRootPath)
+        {
+            if (!Directory.Exists(snippetRootPath))
+                return 0;
+
+            var highestArtifactId = 0;
+            foreach (var sourceFilePath in Directory.EnumerateFiles(snippetRootPath, "*.cs"))
+                if (TryParseSnippetFileName(Path.GetFileName(sourceFilePath), out var artifactId))
+                    highestArtifactId = Math.Max(highestArtifactId, int.Parse(artifactId, CultureInfo.InvariantCulture));
+
+            return highestArtifactId;
         }
 
         static void DeleteDirectoryIfPresent(string directoryPath)
@@ -230,6 +271,8 @@ namespace Conduit
             string assemblyPath
         )
         {
+            DeleteCompiledArtifact(assemblyPath); // failed retries must not leave an earlier assembly
+
             // Unity raises buildFinished while checking AssemblyBuilder status inside isCompiling.
             // queued continuations avoid errors caused by execution during collection enumeration
             var completion = new TaskCompletionSource<CompilerMessage[]>(
@@ -267,6 +310,16 @@ namespace Conduit
             }
 
             return await completion.Task;
+        }
+
+        static void DeleteCompiledArtifact(string assemblyPath)
+        {
+            if (File.Exists(assemblyPath))
+                File.Delete(assemblyPath);
+
+            var symbolsPath = Path.ChangeExtension(assemblyPath, ".pdb");
+            if (File.Exists(symbolsPath))
+                File.Delete(symbolsPath);
         }
 
         static Task AwaitEditorUpdateAsync()
@@ -333,7 +386,11 @@ namespace Conduit
 
         [HideInCallstack]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static async Task<object?> InvokeAsync(byte[] assemblyBytes, string fullTypeName)
+        static async Task<object?> InvokeAsync(
+            byte[] assemblyBytes,
+            string fullTypeName,
+            Action onInvoking
+        )
         {
             var assembly = Assembly.Load(assemblyBytes);
             var snippetType = assembly.GetType(fullTypeName, true)
@@ -342,6 +399,7 @@ namespace Conduit
             if (method == null)
                 throw new InvalidOperationException($"Generated snippet entry point '{fullTypeName}.Execute' was not found.");
 
+            onInvoking();
             var invocationResult = method.Invoke(null, null);
             if (invocationResult is not Task task)
                 return invocationResult;
@@ -356,7 +414,10 @@ namespace Conduit
                 ?.GetValue(invocationResult, null);
         }
 
-        static async Task<BridgeCommandResult> ExecuteCachedCompilationAsync(CachedSnippetCompilation compilation)
+        static async Task<BridgeCommandResult> ExecuteCachedCompilationAsync(
+            CachedSnippetCompilation compilation,
+            Action<string> onInvoking
+        )
         {
             if (compilation.CompileErrorDiagnostic is { } compileErrorDiagnostic)
             {
@@ -370,11 +431,13 @@ namespace Conduit
             var returnValue = await InvokeAsync(
                 compilation.AssemblyBytes
                 ?? throw new InvalidOperationException($"Cached assembly bytes for '{compilation.FullTypeName}' were not available."),
-                compilation.FullTypeName
+                compilation.FullTypeName,
+                () => onInvoking(compilation.SourceFileName)
             );
             return new()
             {
                 outcome = ToolOutcome.Success,
+                display_name = compilation.SourceFileName,
                 return_value = ConduitUtility.Stringify(returnValue),
                 diagnostic = compilation.WarningDiagnostic,
             };
@@ -388,6 +451,32 @@ namespace Conduit
 
         static CachedSnippetCompilation CacheCompilation(
             string snippetText,
+            string sourceFileName,
+            string fullTypeName,
+            string assemblyPath,
+            CompilerMessage[] compilerMessages,
+            string[]? inferredNamespaces = null
+        )
+        {
+            var compilation = CreateCompilation(
+                sourceFileName,
+                fullTypeName,
+                assemblyPath,
+                compilerMessages,
+                inferredNamespaces
+            );
+
+            lock (cacheGate)
+            {
+                compilationCache[snippetText] = compilation;
+                namedCompilationCache[sourceFileName] = compilation;
+            }
+
+            return compilation;
+        }
+
+        static CachedSnippetCompilation CreateCompilation(
+            string sourceFileName,
             string fullTypeName,
             string assemblyPath,
             CompilerMessage[] compilerMessages,
@@ -401,16 +490,78 @@ namespace Conduit
             var warningDiagnostic = FormatCompilerMessages(FilterCompilerMessages(compilerMessages, CompilerMessageType.Warning));
             var compilation = new CachedSnippetCompilation
             {
+                SourceFileName = sourceFileName,
                 FullTypeName = fullTypeName,
                 AssemblyBytes = string.IsNullOrWhiteSpace(compileErrorDiagnostic) ? File.ReadAllBytes(assemblyPath) : null,
                 CompileErrorDiagnostic = string.IsNullOrWhiteSpace(compileErrorDiagnostic) ? null : compileErrorDiagnostic,
                 WarningDiagnostic = string.IsNullOrWhiteSpace(warningDiagnostic) ? null : warningDiagnostic,
             };
 
+            return compilation;
+        }
+
+        static async Task<CachedSnippetCompilation?> GetNamedCompilationAsync(
+            string projectPath,
+            string snippetRootPath,
+            string artifactId
+        )
+        {
+            var sourceFileName = artifactId + ".cs";
             lock (cacheGate)
-                compilationCache[snippetText] = compilation;
+                if (namedCompilationCache.TryGetValue(sourceFileName, out var cachedCompilation))
+                    return cachedCompilation;
+
+            var sourceFilePath = Path.Combine(snippetRootPath, sourceFileName);
+            if (!File.Exists(sourceFilePath))
+                return null;
+
+            var assemblyPath = Path.Combine(snippetRootPath, artifactId + ".dll");
+            var fullTypeName = $"{SnippetNamespace}.SnippetHost_{artifactId}";
+            CachedSnippetCompilation compilation;
+            if (File.Exists(assemblyPath))
+            {
+                compilation = new()
+                {
+                    SourceFileName = sourceFileName,
+                    FullTypeName = fullTypeName,
+                    AssemblyBytes = File.ReadAllBytes(assemblyPath),
+                };
+            }
+            else
+            {
+                compilation = CreateCompilation(
+                    sourceFileName,
+                    fullTypeName,
+                    assemblyPath,
+                    await CompileAssemblyAsync(
+                        projectPath,
+                        snippetRootPath,
+                        sourceFilePath,
+                        assemblyPath
+                    )
+                );
+            }
+
+            lock (cacheGate)
+                namedCompilationCache[sourceFileName] = compilation;
 
             return compilation;
+        }
+
+        internal static bool TryParseSnippetFileName(string value, out string artifactId)
+        {
+            artifactId = string.Empty;
+            if (!value.EndsWith(".cs", StringComparison.Ordinal))
+                return false;
+
+            var candidate = value[..^3];
+            if (!int.TryParse(candidate, NumberStyles.None, CultureInfo.InvariantCulture, out var numericId)
+                || numericId <= 0
+                || candidate != numericId.ToString(CultureInfo.InvariantCulture))
+                return false;
+
+            artifactId = candidate;
+            return true;
         }
 
         internal static string AllocateSnippetArtifactId()
@@ -1156,6 +1307,7 @@ namespace Conduit
 
         sealed class CachedSnippetCompilation
         {
+            public string SourceFileName = string.Empty;
             public string FullTypeName = string.Empty;
             public byte[]? AssemblyBytes;
             public string? CompileErrorDiagnostic;

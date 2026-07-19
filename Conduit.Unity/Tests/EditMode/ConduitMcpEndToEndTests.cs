@@ -542,6 +542,63 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_RerunsNamedSnippetWithoutRecompiling()
+    {
+        var counterPath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCodeCounter_{Guid.NewGuid():N}.txt");
+        var snippet
+            = "var p = @\""
+              + counterPath.Replace("\"", "\"\"")
+              + "\"; var n = File.Exists(p) ? int.Parse(File.ReadAllText(p)) : 0; "
+              + "File.WriteAllText(p, (++n).ToString()); return n;";
+        try
+        {
+            var first = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", snippet)
+                )
+            );
+            var snippetFileName = GetSnippetFileName(first.Text);
+            var assemblyPath = Path.Combine(
+                editorProjectPath,
+                "Temp",
+                "execute_code",
+                Path.ChangeExtension(snippetFileName, ".dll")
+            );
+            Assert.That(File.Exists(assemblyPath), Is.True, assemblyPath);
+            var assemblyWriteTime = File.GetLastWriteTimeUtc(assemblyPath);
+
+            var rerun = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", snippetFileName)
+                )
+            );
+            var missing = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", "2147483647.cs")
+                )
+            );
+
+            Assert.That(first.Text, Is.EqualTo($"# {snippetFileName}\n1"));
+            Assert.That(rerun.Text, Is.EqualTo($"# {snippetFileName}\n2"));
+            Assert.That(File.GetLastWriteTimeUtc(assemblyPath), Is.EqualTo(assemblyWriteTime));
+            Assert.That(missing.Text, Does.Contain("was not found"));
+            Assert.That(missing.Text, Does.Not.StartWith("# "));
+        }
+        finally
+        {
+            if (File.Exists(counterPath))
+                File.Delete(counterPath);
+        }
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_DefersSnippetUntilAssemblyBuilderEnumerationCompletes()
     {
         var marker = Guid.NewGuid().ToString("N");
@@ -612,8 +669,11 @@ public sealed class ConduitMcpEndToEndTests
         AssertSuccessful(mixed, "Public:Main Camera");
         AssertSuccessful(cachedMixed, "Public:Main Camera");
         AssertSuccessful(noResult);
+        Assert.That(noResult.Text, Is.EqualTo($"# {GetSnippetFileName(noResult.Text)}"));
         Assert.That(nestedFailure.Text, Does.Contain("CS0126"));
         Assert.That(lambdaFailure.Text, Does.Contain("CS0126"));
+        Assert.That(nestedFailure.Text, Does.Not.StartWith("# "));
+        Assert.That(lambdaFailure.Text, Does.Not.StartWith("# "));
     }
 
     [Test]
@@ -646,11 +706,12 @@ public sealed class ConduitMcpEndToEndTests
             );
 
             File.WriteAllText(runtimeTogglePath, string.Empty);
+            var snippetFileName = GetSnippetFileName(success.Text);
             var runtimeFailure = await client.CallToolAsync(
                 BridgeCommandTypes.ExecuteCode,
                 Args(
                     ("projectPath", projectPath),
-                    ("snippet", snippet)
+                    ("snippet", snippetFileName)
                 )
             );
 
@@ -678,8 +739,11 @@ public sealed class ConduitMcpEndToEndTests
 
             AssertSuccessful(success, "5");
             AssertSuccessful(cachedSuccess, "5");
+            Assert.That(GetSnippetFileName(cachedSuccess.Text), Is.EqualTo(snippetFileName));
+            Assert.That(GetSnippetFileName(runtimeFailure.Text), Is.EqualTo(snippetFileName));
             AssertTextContainsAny(runtimeFailure.Text, "FormatException", "Input string");
             AssertTextContainsAny(compileFailure.Text, "Namespace declarations are not supported", "execute_code(");
+            Assert.That(compileFailure.Text, Does.Not.StartWith("# "));
             Assert.That(unsupportedCompileFailure.Text, Does.Contain("bindingFlags"));
             Assert.That(unsupportedCompileFailure.Text, Does.Not.Contain("Retried with inferred namespaces"));
             Assert.That(retryFailure.Text, Does.Contain("Retried with inferred namespaces: System.Reflection."));
@@ -915,6 +979,15 @@ public sealed class ConduitMcpEndToEndTests
                 Is.GreaterThanOrEqualTo(0),
                 result.Text
             );
+    }
+
+    static string GetSnippetFileName(string text)
+    {
+        Assert.That(text, Does.StartWith("# "));
+        var lineEnd = text.IndexOf('\n');
+        var fileName = lineEnd < 0 ? text[2..] : text[2..lineEnd];
+        Assert.That(fileName, Does.Match("^[1-9][0-9]*\\.cs$"));
+        return fileName;
     }
 
     static void AssertTextContainsAny(string text, params string[] expectedSubstrings)

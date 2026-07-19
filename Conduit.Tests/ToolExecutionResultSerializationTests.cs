@@ -30,6 +30,7 @@ public sealed class ToolExecutionResultSerializationTests
         {
             Outcome = ToolOutcome.Success,
             Logs = string.Empty,
+            DisplayName = string.Empty,
             ReturnValue = string.Empty,
             Diagnostic = string.Empty,
             Exception = new()
@@ -40,6 +41,7 @@ public sealed class ToolExecutionResultSerializationTests
         }.ToToolExecutionResult();
 
         await Assert.That(result.Logs).IsNull();
+        await Assert.That(result.DisplayName).IsNull();
         await Assert.That(result.ReturnValue).IsNull();
         await Assert.That(result.Diagnostic).IsNull();
         await Assert.That(result.Exception).IsNull();
@@ -66,6 +68,18 @@ public sealed class ToolExecutionResultSerializationTests
         await Assert.That(result.Exception).IsNotNull();
         await Assert.That(result.Exception.Message).IsEqualTo("boom\nagain");
         await Assert.That(result.Exception.StackTrace).IsEqualTo("frame 1\nframe 2\nframe 3");
+    }
+
+    [Test]
+    public async Task BridgeResultPreservesDisplayName()
+    {
+        var result = new BridgeCommandResult
+        {
+            Outcome = ToolOutcome.Success,
+            DisplayName = "17.cs",
+        }.ToToolExecutionResult();
+
+        await Assert.That(result.DisplayName).IsEqualTo("17.cs");
     }
 
     [Test]
@@ -150,6 +164,7 @@ public sealed class ToolExecutionResultSerializationTests
             new()
             {
                 Outcome = ToolOutcome.Exception,
+                DisplayName = "17.cs",
                 Logs = "captured log",
                 ReturnValue = "value",
                 Diagnostic = "diagnostic",
@@ -162,6 +177,7 @@ public sealed class ToolExecutionResultSerializationTests
             ConduitJsonContext.Default.ToolExecutionResult
         );
 
+        await Assert.That(payload).Contains("\"display_name\":\"17.cs\"");
         await Assert.That(payload).Contains("\"logs\":\"captured log\"");
         await Assert.That(payload).Contains("\"return_value\":\"value\"");
         await Assert.That(payload).Contains("\"diagnostic\":\"diagnostic\"");

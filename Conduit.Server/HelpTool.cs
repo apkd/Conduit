@@ -55,6 +55,7 @@ static class HelpTool
                 (Singular `Reflect.Method` returns exactly one MethodInfo; plural `Reflect.Methods` returns an array, and so on.)
 
                 Use `return <value>;` to print the value in the tool response. `return;` exits without a result.
+                Pass a prior snippet's filename, such as `7.cs` instead of source code to run it again.
                 """;
     }
 

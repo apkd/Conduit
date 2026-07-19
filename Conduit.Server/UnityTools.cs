@@ -242,6 +242,7 @@ public sealed class UnityTools
     [Description(
         """
         Immediately compiles and runs a one-off C# snippet inside the Unity editor. Works in edit mode and in play mode.
+        Pass a snippet filename returned by an earlier invocation, such as `7.cs`, to run it again without recompiling.
         Supports top-level statements, local functions, leading using directives, leading type declarations, and leading static fields.
         You can optionally return a result value to print it in the response.
         The generated snippet already imports System, System.Collections.Generic, System.IO, Linq, Tasks, UnityEditor, and UnityEngine; skip these namespaces.
@@ -254,7 +255,8 @@ public sealed class UnityTools
     )]
     public static Task<string> ExecuteCode(
         [Description("Project path")] string projectPath,
-        [Description("C# code to execute")] string snippet,
+        [Description("C# code to execute, or a prior script filename such as 7.cs to run again")]
+        string snippet,
         UnityProjectOperations operations,
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ExecuteCodeAsync(projectPath, snippet, ct));
