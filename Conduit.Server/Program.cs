@@ -76,7 +76,7 @@ static async Task RunStdioAsync()
     ConfigureCommon(builder.Configuration, builder.Logging, builder.Services);
     builder.Services
         .AddMcpServer()
-        .WithRequestFilters(filters => filters.AddCallToolFilter(ToolCallExceptionFilter.Apply))
+        .WithRequestFilters(filters => filters.AddCallToolFilter(ToolCallArgumentValidationFilter.Apply))
         .WithStdioServerTransport()
         .WithTools<UnityTools>(CreateToolSerializerOptions());
 
@@ -92,7 +92,7 @@ static async Task RunHttpAsync(string? url, ushort? port)
     ConfigureCommon(builder.Configuration, builder.Logging, builder.Services);
     builder.Services
         .AddMcpServer()
-        .WithRequestFilters(filters => filters.AddCallToolFilter(ToolCallExceptionFilter.Apply))
+        .WithRequestFilters(filters => filters.AddCallToolFilter(ToolCallArgumentValidationFilter.Apply))
         .WithHttpTransport()
         .WithTools<UnityTools>(CreateToolSerializerOptions());
 
