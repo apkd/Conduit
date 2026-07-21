@@ -748,14 +748,14 @@ namespace Conduit
             if (property is { isArray: true, propertyType: not SerializedPropertyType.String })
             {
                 builder.Append(' ', indent);
-                builder.AppendLine($"- {property.propertyPath}: {FormatArrayProperty(target, property)}");
+                builder.AppendLine($"- {property.name}: {FormatArrayProperty(target, property)}");
                 return;
             }
 
             if (property is { hasVisibleChildren: true, propertyType: SerializedPropertyType.Generic })
             {
                 builder.Append(' ', indent);
-                builder.AppendLine($"- {property.propertyPath}:");
+                builder.AppendLine($"- {property.name}:");
                 foreach (var child in GetImmediateChildren(property))
                     AppendSerializedProperty(builder, target, child, indent + 2);
 
@@ -763,7 +763,7 @@ namespace Conduit
             }
 
             builder.Append(' ', indent);
-            builder.AppendLine($"- {property.propertyPath}: {FormatSerializedValue(property)}");
+            builder.AppendLine($"- {property.name}: {FormatSerializedValue(property)}");
         }
 
         static SerializedProperty[] GetImmediateChildren(SerializedProperty property)

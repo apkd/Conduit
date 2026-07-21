@@ -1179,6 +1179,31 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Show_SerializableHierarchyUsesLocalPropertyNames()
+    {
+        var target = ScriptableObject.CreateInstance<ConduitNestedShowAsset>();
+        try
+        {
+            var output = show.Show(ConduitUtility.FormatObjectId(target));
+
+            Assert.That(
+                output,
+                Does.Contain(
+                    "    - loadout:\n" +
+                    "      - inventoryLoot:\n" +
+                    "        - entries: [1, 2]\n" +
+                    "        - chooseSingle: false"
+                )
+            );
+            Assert.That(output, Does.Not.Contain("loadout.inventoryLoot"));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(target);
+        }
+    }
+
+    [Test]
     public void ToJson_ReturnsPrettyJsonForExactObject()
     {
         var camera = Camera.main;
@@ -3689,6 +3714,24 @@ sealed class ConduitNativeIndexableAsset : ScriptableObject
 
 sealed class ConduitShowFormatAsset : ScriptableObject
 {
+}
+
+sealed class ConduitNestedShowAsset : ScriptableObject
+{
+    [SerializeField] ConduitNestedShowLoadout loadout = new();
+}
+
+[Serializable]
+sealed class ConduitNestedShowLoadout
+{
+    [SerializeField] ConduitNestedShowInventoryLoot inventoryLoot = new();
+}
+
+[Serializable]
+sealed class ConduitNestedShowInventoryLoot
+{
+    [SerializeField] int[] entries = { 1, 2 };
+    [SerializeField] bool chooseSingle;
 }
 
 interface ConduitReflectInterfaceFixture
