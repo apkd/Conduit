@@ -123,18 +123,7 @@ static class ToolCallArgumentValidationFilter
             return value.TryGetInt32(out _);
         if (parameterType == typeof(double))
             return value.TryGetDouble(out var number) && double.IsFinite(number);
-        if (parameterType == typeof(string) || parameterType == typeof(bool) || parameterType.IsEnum)
-            return true;
-
-        try
-        {
-            _ = value.Deserialize(parameterType, McpJsonUtilities.DefaultOptions);
-            return true;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
+        return true;
     }
 
     static bool AcceptsValueKind(JsonElement schema, JsonValueKind valueKind)
