@@ -2220,6 +2220,39 @@ public sealed class ConduitMcpToolsTests
         Assert.That(CountOccurrences(generatedSource, "using static Conduit.ConduitSearch;"), Is.EqualTo(1), generatedSource);
         Assert.That(CountOccurrences(generatedSource, "using Reflect = Conduit.ConduitReflect;"), Is.EqualTo(1), generatedSource);
         Assert.That(CountOccurrences(generatedSource, "using Object = UnityEngine.Object;"), Is.EqualTo(1), generatedSource);
+        Assert.That(generatedSource, Does.Contain("public static object Execute()"), generatedSource);
+        Assert.That(generatedSource, Does.Not.Contain("async Task<object> Execute()"), generatedSource);
+    }
+
+    [Test]
+    public void ExecuteCode_AsyncContextRetry_RequiresRemovedDiagnostic()
+    {
+        var wrapperAwait = CompilerError("CS4032", 1, 1);
+        var nestedAwait = CompilerError("CS4033", 2, 5);
+
+        Assert.That(
+            execute_code.RemovesAsyncContextError(
+                new[] { wrapperAwait, nestedAwait },
+                new[] { nestedAwait }
+            ),
+            Is.True
+        );
+        Assert.That(
+            execute_code.RemovesAsyncContextError(
+                new[] { nestedAwait },
+                new[] { nestedAwait }
+            ),
+            Is.False
+        );
+
+        static CompilerMessage CompilerError(string code, int line, int column)
+            => new()
+            {
+                type = CompilerMessageType.Error,
+                line = line,
+                column = column,
+                message = $"Temp/execute_code/1.cs({line},{column}): error {code}: async context required",
+            };
     }
 
     [Test]

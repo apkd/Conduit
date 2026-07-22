@@ -542,6 +542,45 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_SelectsSyncWrapperUnlessTopLevelAwaitRequiresAsync()
+    {
+        const string refSnippet
+            = "var value = 1; ref var alias = ref value; alias = 7; return value;";
+        const string nestedAsyncSnippet
+            = "async Task TouchAsync() { await Task.CompletedTask; }\n"
+              + "TouchAsync().GetAwaiter().GetResult();\n"
+              + "var value = 2; ref var alias = ref value; alias = 8; return value;";
+        const string topLevelAwaitSnippet
+            = "await Task.Yield();\n"
+              + "if (false) return;\n"
+              + "return BindingFlags.Public.ToString();";
+        const string asyncNoResultSnippet = "await Task.Yield(); return;";
+
+        var refResult = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(("projectPath", projectPath), ("snippet", refSnippet))
+        );
+        var nestedAsyncResult = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(("projectPath", projectPath), ("snippet", nestedAsyncSnippet))
+        );
+        var topLevelAwaitResult = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(("projectPath", projectPath), ("snippet", topLevelAwaitSnippet))
+        );
+        var asyncNoResult = await client.CallToolAsync(
+            BridgeCommandTypes.ExecuteCode,
+            Args(("projectPath", projectPath), ("snippet", asyncNoResultSnippet))
+        );
+
+        AssertSuccessful(refResult, "7");
+        AssertSuccessful(nestedAsyncResult, "8");
+        AssertSuccessful(topLevelAwaitResult, "Public");
+        AssertSuccessful(asyncNoResult);
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_RerunsNamedSnippetWithoutRecompiling()
     {
         var counterPath = Path.Combine(Path.GetTempPath(), $"ConduitExecuteCodeCounter_{Guid.NewGuid():N}.txt");

@@ -87,13 +87,13 @@ namespace Conduit
                 var assemblyPath = Path.Combine(snippetRootPath, snippetArtifactId + ".dll");
                 var hasCompiled = false;
 
-                async Task<CompilerMessage[]> CompileSnippetAsync(
+                void WriteSnippet(
+                    SnippetExecutionMode executionMode,
                     SnippetReturnMode returnMode = SnippetReturnMode.ObjectResult,
                     IReadOnlyList<string>? namespaces = null,
                     SnippetChunk? bodyOverride = null
                 )
-                {
-                    WriteSnippetSource(
+                    => WriteSnippetSource(
                         snippetRootPath,
                         sourceFilePath,
                         BuildSnippetSourceCore(
@@ -101,10 +101,20 @@ namespace Conduit
                             displaySourcePath,
                             parsedSnippet,
                             namespaces,
+                            executionMode,
                             returnMode,
                             bodyOverride
                         )
                     );
+
+                async Task<CompilerMessage[]> CompileSnippetAsync(
+                    SnippetExecutionMode executionMode,
+                    SnippetReturnMode returnMode = SnippetReturnMode.ObjectResult,
+                    IReadOnlyList<string>? namespaces = null,
+                    SnippetChunk? bodyOverride = null
+                )
+                {
+                    WriteSnippet(executionMode, returnMode, namespaces, bodyOverride);
                     if (hasCompiled)
                         await AwaitEditorUpdateAsync();
 
@@ -132,13 +142,31 @@ namespace Conduit
                     MarkInvoking
                 );
 
-                var compilerMessages = await CompileSnippetAsync();
+                var executionMode = SnippetExecutionMode.Synchronous;
+                var compilerMessages = await CompileSnippetAsync(executionMode);
+                if (HasAsyncContextError(compilerMessages))
+                {
+                    // errors removed by changing only the generated method belong to the snippet body;
+                    // await errors in local functions remain and keep the wrapper synchronous.
+                    var asyncMessages = await CompileSnippetAsync(SnippetExecutionMode.Asynchronous);
+                    if (RemovesAsyncContextError(compilerMessages, asyncMessages))
+                    {
+                        executionMode = SnippetExecutionMode.Asynchronous;
+                        compilerMessages = asyncMessages;
+                    }
+                    else
+                        WriteSnippet(executionMode);
+                }
+
                 string[]? inferredNamespaces = null;
                 if (HasCompilerErrorCode(compilerMessages, "CS0126"))
                 {
                     // changing only the generated entry point's return type identifies which bare returns
                     // belong to the snippet body without rewriting local functions, lambdas, or leading types.
-                    var noResultMessages = await CompileSnippetAsync(SnippetReturnMode.NoResult);
+                    var noResultMessages = await CompileSnippetAsync(
+                        executionMode,
+                        SnippetReturnMode.NoResult
+                    );
                     if (TryNormalizeBareReturns(
                         parsedSnippet.Body,
                         compilerMessages,
@@ -164,6 +192,7 @@ namespace Conduit
                             inferredNamespaces = recoveryNamespaces;
 
                         compilerMessages = await CompileSnippetAsync(
+                            executionMode,
                             SnippetReturnMode.ObjectResult,
                             inferredNamespaces,
                             normalizedBody
@@ -182,6 +211,7 @@ namespace Conduit
                 {
                     inferredNamespaces = retryNamespaces;
                     compilerMessages = await CompileSnippetAsync(
+                        executionMode,
                         SnippetReturnMode.ObjectResult,
                         retryNamespaces
                     );
@@ -400,7 +430,21 @@ namespace Conduit
                 throw new InvalidOperationException($"Generated snippet entry point '{fullTypeName}.Execute' was not found.");
 
             onInvoking();
-            var invocationResult = method.Invoke(null, null);
+            object? invocationResult;
+            if (method.ReturnType == typeof(void))
+            {
+                ((Action)method.CreateDelegate(typeof(Action)))();
+                invocationResult = null;
+            }
+            else if (method.ReturnType == typeof(object))
+                invocationResult = ((Func<object?>)method.CreateDelegate(typeof(Func<object>)))();
+            else if (method.ReturnType == typeof(Task))
+                invocationResult = ((Func<Task>)method.CreateDelegate(typeof(Func<Task>)))();
+            else if (method.ReturnType == typeof(Task<object>))
+                invocationResult = ((Func<Task<object>>)method.CreateDelegate(typeof(Func<Task<object>>)))();
+            else
+                throw new InvalidOperationException($"Generated snippet entry point '{fullTypeName}.Execute' has unsupported return type '{method.ReturnType}'.");
+
             if (invocationResult is not Task task)
                 return invocationResult;
 
@@ -580,6 +624,7 @@ namespace Conduit
             displaySourcePath,
             parsedSnippet,
             inferredNamespaces,
+            SnippetExecutionMode.Synchronous,
             SnippetReturnMode.ObjectResult,
             null
         );
@@ -589,6 +634,7 @@ namespace Conduit
             string displaySourcePath,
             SnippetParseResult parsedSnippet,
             IReadOnlyList<string>? inferredNamespaces,
+            SnippetExecutionMode executionMode,
             SnippetReturnMode returnMode,
             SnippetChunk? bodyOverride
         )
@@ -650,11 +696,16 @@ namespace Conduit
 
             builder.AppendLine("        [HideInCallstack]");
             builder.AppendLine("        [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
-            builder.AppendLine(
-                returnMode == SnippetReturnMode.ObjectResult
-                    ? "        public static async Task<object> Execute()"
-                    : "        public static async Task Execute()"
-            );
+            builder.AppendLine((executionMode, returnMode) switch
+            {
+                (SnippetExecutionMode.Synchronous, SnippetReturnMode.ObjectResult)
+                    => "        public static object Execute()",
+                (SnippetExecutionMode.Synchronous, SnippetReturnMode.NoResult)
+                    => "        public static void Execute()",
+                (SnippetExecutionMode.Asynchronous, SnippetReturnMode.ObjectResult)
+                    => "        public static async Task<object> Execute()",
+                _ => "        public static async Task Execute()",
+            });
             builder.AppendLine("        {");
             AppendChunk(builder, bodyOverride ?? parsedSnippet.Body, displaySourcePath);
             if (returnMode == SnippetReturnMode.ObjectResult)
@@ -874,6 +925,39 @@ namespace Conduit
             foreach (var message in messages)
                 if (IsCompilerErrorCode(message, errorCode))
                     return true;
+
+            return false;
+        }
+
+        static bool HasAsyncContextError(CompilerMessage[] messages)
+            => HasCompilerErrorCode(messages, "CS4032")
+               || HasCompilerErrorCode(messages, "CS4033");
+
+        internal static bool RemovesAsyncContextError(
+            CompilerMessage[] synchronousMessages,
+            CompilerMessage[] asynchronousMessages
+        ) => RemovesCompilerError(synchronousMessages, asynchronousMessages, "CS4032")
+             || RemovesCompilerError(synchronousMessages, asynchronousMessages, "CS4033");
+
+        static bool RemovesCompilerError(
+            CompilerMessage[] before,
+            CompilerMessage[] after,
+            string errorCode
+        )
+        {
+            var remainingErrors = GetCompilerErrorLocationCounts(after, errorCode);
+            foreach (var message in before)
+            {
+                if (!IsCompilerErrorCode(message, errorCode))
+                    continue;
+
+                var location = (message.line, message.column);
+                if (!remainingErrors.TryGetValue(location, out var remainingCount)
+                    || remainingCount == 0)
+                    return true;
+
+                remainingErrors[location] = remainingCount - 1;
+            }
 
             return false;
         }
@@ -1318,6 +1402,12 @@ namespace Conduit
         {
             ObjectResult,
             NoResult,
+        }
+
+        enum SnippetExecutionMode
+        {
+            Synchronous,
+            Asynchronous,
         }
     }
 }
