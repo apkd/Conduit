@@ -65,7 +65,7 @@ namespace Conduit
 
         internal static void Prepare(bool enabled)
         {
-            if (!enabled || IsPrepared)
+            if (!enabled || IsPrepared || ConduitGameView.IsOtherWindowMaximized())
                 return;
 
             try

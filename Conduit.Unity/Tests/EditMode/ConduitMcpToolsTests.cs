@@ -2785,6 +2785,44 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void GameViewPreparation_SkipsFocusButAppliesResolutionForMaximizedNonGameView()
+    {
+        RequireInteractiveEditorWindows();
+
+        var sceneView = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
+        EditorWindow? previouslyMaximizedWindow = null;
+        foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            if (window.maximized)
+            {
+                previouslyMaximizedWindow = window;
+                break;
+            }
+
+        try
+        {
+            ConduitGameViewFocus.Restore();
+            ConduitGameViewResolution.Restore();
+            sceneView.maximized = true;
+
+            Assert.That(ConduitGameView.IsOtherWindowMaximized(), Is.True);
+
+            ConduitGameViewFocus.Prepare(true);
+            ConduitGameViewResolution.Prepare(true);
+
+            Assert.That(ConduitGameViewFocus.IsPrepared, Is.False);
+            Assert.That(ConduitGameViewResolution.IsPrepared, Is.True);
+        }
+        finally
+        {
+            ConduitGameViewFocus.Restore();
+            ConduitGameViewResolution.Restore();
+            sceneView.maximized = false;
+            if (previouslyMaximizedWindow is { } window)
+                window.maximized = true;
+        }
+    }
+
+    [Test]
     public void UnfocusedGameView_PrepareAndRestorePreservesPlayBehavior()
     {
         RequireInteractiveEditorWindows();

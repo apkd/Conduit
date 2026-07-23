@@ -17,12 +17,21 @@ namespace Conduit
             "GetMainPlayModeView",
             StaticMembers
         );
+        static readonly Func<EditorWindow?>? getMaximizedWindow = typeof(EditorWindow).Assembly
+                .GetType("UnityEditor.WindowLayout")
+                ?.GetMethod("GetMaximizedWindow", StaticMembers)
+                ?.CreateDelegate(typeof(Func<EditorWindow>))
+            as Func<EditorWindow>;
 
         internal static void PrepareForPlayMode()
         {
-            ConduitGameViewResolution.Prepare();
             ConduitGameViewFocus.Prepare();
+            ConduitGameViewResolution.Prepare();
         }
+
+        internal static bool IsOtherWindowMaximized()
+            => getMaximizedWindow?.Invoke() is { } window
+               && GameViewType?.IsInstanceOfType(window) != true;
 
         internal static EditorWindow FindOrOpen()
         {
