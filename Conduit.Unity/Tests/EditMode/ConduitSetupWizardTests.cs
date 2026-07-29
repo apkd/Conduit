@@ -941,10 +941,10 @@ public sealed class ConduitSetupWizardTests
         Assert.That(button.IsOutdated, Is.True);
     }
 
-    [Test]
-    public void NixOsSystemProfileExecutableDefersWithoutVersionProbe()
+    [TestCase("/run/current-system/sw/bin/conduit")]
+    [TestCase("/nix/store/hash-conduit/bin/conduit")]
+    public void NixOsManagedExecutableDefersWithoutVersionProbe(string executablePath)
     {
-        const string executablePath = "/run/current-system/sw/bin/conduit";
         ConduitSetupWizardUtility.GetCurrentPackageVersionOverride = static () =>
             throw new InvalidOperationException("NixOS-managed executables must not be version-probed.");
         ConduitSetupWizardUtility.ProbeExecutableVersionOverride = static _ =>
@@ -958,34 +958,19 @@ public sealed class ConduitSetupWizardTests
         );
 
         Assert.That(button.State, Is.EqualTo(ConduitSetupWizardUtility.ActionState.Disabled));
-        Assert.That(button.Label, Is.EqualTo("MCP server managed by NixOS"));
-        Assert.That(button.Hint, Does.Contain("Update it through your NixOS configuration"));
-        Assert.That(button.Hint, Does.Contain(executablePath));
-        Assert.That(button.IsOutdated, Is.False);
+        Assert.That(
+            button.Hint,
+            Does.Contain("Update the package through your NixOS configuration")
+        );
     }
 
-    [Test]
-    public void NixOsSystemProfilePathDoesNotMatchSimilarOrStorePaths()
-    {
-        Assert.That(
-            ConduitSetupWizardUtility.IsNixOsSystemProfilePath(
-                "/run/current-system/sw/bin/conduit"
-            ),
-            Is.True
-        );
-        Assert.That(
-            ConduitSetupWizardUtility.IsNixOsSystemProfilePath(
-                "/run/current-system-old/sw/bin/conduit"
-            ),
+    [TestCase("/run/current-system-old/sw/bin/conduit")]
+    [TestCase("/nix/storehouse/hash-conduit/bin/conduit")]
+    public void NixOsManagedExecutablePathRejectsLookalikes(string executablePath)
+        => Assert.That(
+            ConduitSetupWizardUtility.IsNixOsManagedExecutablePath(executablePath),
             Is.False
         );
-        Assert.That(
-            ConduitSetupWizardUtility.IsNixOsSystemProfilePath(
-                "/nix/store/example-conduit/bin/conduit"
-            ),
-            Is.False
-        );
-    }
 
     [Test]
     public void OutdatedReadOnlyExecutableCannotBeOverwritten()

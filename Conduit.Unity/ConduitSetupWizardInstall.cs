@@ -69,14 +69,15 @@ namespace Conduit
             bool hasError
         )
         {
-            if (IsNixOsSystemProfilePath(executablePath))
+            // immutable nix paths can only be updated by rebuilding the configuration that owns them.
+            if (IsNixOsManagedExecutablePath(executablePath))
                 return new()
                 {
                     State = ActionState.Disabled,
                     Label = "MCP server managed by NixOS",
                     Hint =
-                        $"Conduit is installed through the NixOS system profile at `{executablePath}`. " +
-                        "Update it through your NixOS configuration instead of this wizard.",
+                        $"Conduit is managed by NixOS at `{executablePath}`. " +
+                        "Update the package through your NixOS configuration instead of this wizard.",
                     IsOutdated = false,
                 };
 
@@ -596,13 +597,13 @@ namespace Conduit
             }
         }
 
-        internal static bool IsNixOsSystemProfilePath(string path)
+        internal static bool IsNixOsManagedExecutablePath(string path)
         {
             try
             {
-                // /run/current-system is the immutable system profile selected by a NixOS rebuild
                 string fullPath = Path.GetFullPath(path).Replace('\\', '/');
-                return fullPath.StartsWith("/run/current-system/", StringComparison.Ordinal);
+                return fullPath.StartsWith("/nix/store/", StringComparison.Ordinal)
+                       || fullPath.StartsWith("/run/current-system/", StringComparison.Ordinal);
             }
             catch
             {

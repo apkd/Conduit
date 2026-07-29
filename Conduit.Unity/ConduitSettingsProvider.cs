@@ -130,6 +130,10 @@ namespace Conduit
                 settings.ServerExecutablePath,
                 configuredExecutablePath
             );
+            // updating through UPM would bypass the package owner and change only the client.
+            bool isNixOsManaged = ConduitSetupWizardUtility.IsNixOsManagedExecutablePath(
+                effectiveExecutablePath
+            );
             var downloadModel = ConduitSetupWizardUtility.EvaluateDownloadButton(
                 location,
                 settings.ServerExecutablePath,
@@ -138,13 +142,12 @@ namespace Conduit
                 HasError(ConduitSetupWizardUtility.ActionKind.DownloadServer)
             );
 
-            bool hasOutdatedWarning = downloadModel.IsOutdated
-                                      || packageUpdateStatus.State == ConduitPackageUpdateState.Outdated;
-            if (hasOutdatedWarning)
-                DrawOutdatedWarning(
-                    downloadModel.IsOutdated,
-                    packageUpdateStatus.State == ConduitPackageUpdateState.Outdated
-                );
+            bool clientOutdated = packageUpdateStatus.State is ConduitPackageUpdateState.Outdated;
+            DrawOutdatedWarning(
+                downloadModel.IsOutdated,
+                clientOutdated,
+                isNixOsManaged
+            );
 
             BeginGroup("Installation Options");
             DrawSelectedEditor(specs, settings);
@@ -153,7 +156,13 @@ namespace Conduit
             EndGroup();
 
             BeginGroup("Setup Wizard");
-            DrawButtons(specs, settings, effectiveExecutablePath, downloadModel);
+            DrawButtons(
+                specs,
+                settings,
+                effectiveExecutablePath,
+                downloadModel,
+                isNixOsManaged
+            );
             EndGroup();
 
             BeginGroup("Other Settings");
@@ -161,17 +170,24 @@ namespace Conduit
             EndGroup();
         }
 
-        static void DrawOutdatedWarning(bool serverOutdated, bool clientOutdated)
+        static void DrawOutdatedWarning(
+            bool serverOutdated,
+            bool clientOutdated,
+            bool isNixOsManaged
+        )
         {
             if (!serverOutdated && !clientOutdated)
                 return;
 
-            string message = (serverOutdated, clientOutdated) switch
+            string message = (isNixOsManaged, serverOutdated, clientOutdated) switch
             {
-                (true, true) =>
+                (true, _, _) =>
+                    "A new version of Conduit is available. " +
+                    "Update the Conduit NixOS package through your NixOS configuration.",
+                (_, true, true) =>
                     "New versions of the Conduit MCP server and Unity MCP client are available. " +
                     "Use the wizard below to update, or download the latest release from:",
-                (true, false) =>
+                (_, true, _) =>
                     "A new version of the Conduit MCP server is available. " +
                     "Use the wizard below to update, or download the latest release from:",
                 _ =>
@@ -181,13 +197,13 @@ namespace Conduit
 
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
             GUILayout.Label(
-                EditorGUIUtility.IconContent("console.erroricon"),
+                EditorGUIUtility.IconContent("console.warnicon"),
                 GUILayout.Width(32f),
                 GUILayout.Height(32f)
             );
             EditorGUILayout.BeginVertical();
             EditorGUILayout.LabelField(message, EditorStyles.wordWrappedLabel);
-            if (EditorGUILayout.LinkButton(ConduitPackageUpdater.ReleasesUrl))
+            if (!isNixOsManaged && EditorGUILayout.LinkButton(ConduitPackageUpdater.ReleasesUrl))
                 Application.OpenURL(ConduitPackageUpdater.ReleasesUrl);
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndHorizontal();
@@ -398,11 +414,12 @@ namespace Conduit
             ConduitSetupWizardUtility.EditorSpec[] specs,
             ConduitSettings settings,
             string effectiveExecutablePath,
-            ConduitSetupWizardUtility.ButtonModel downloadModel
+            ConduitSetupWizardUtility.ButtonModel downloadModel,
+            bool isNixOsManaged
         )
         {
             var location = GetConfigurationLocation(specs, settings);
-            if (packageUpdateStatus.State == ConduitPackageUpdateState.Outdated)
+            if (!isNixOsManaged && packageUpdateStatus.State is ConduitPackageUpdateState.Outdated)
             {
                 // a UPM update reloads this code, so it takes precedence over server actions in the current view
                 DrawButton(
