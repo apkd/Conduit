@@ -131,29 +131,27 @@ namespace Conduit
                 if (frame < 0)
                     return Success("No profiler frames available. Use profiler_record action=capture first.");
 
-                if (!TryResolveThread(frame, threadSelector, out var thread, out var threadDiagnostic))
+                if (!TryBuildBrowseHierarchy(frame, threadSelector, sort, out var root, out var frameTimeMs, out var aggregateWorkerCount, out var threadSummary, out var threadDiagnostic))
                     return Failure("Unable to browse profiler hierarchy.", threadDiagnostic, null);
 
-                using var hierarchy = ProfilerDriver.GetHierarchyFrameDataView(
-                    frame,
-                    thread.Index,
-                    HierarchyFrameDataView.ViewModes.MergeSamplesWithTheSameName,
-                    HierarchyFrameDataView.columnDontSort,
-                    false
-                );
-
-                if (!hierarchy.valid)
-                    return Failure("Unable to browse profiler hierarchy.", $"No hierarchy data is available for frame {frame} thread {thread.Index}.", null);
-
-                var root = BuildHierarchy(hierarchy, sort);
                 AssignPublicIds(root);
                 var selectedRoot = ResolveRoot(root, rootSelector, warnings);
                 if (selectedRoot == null)
                     return Failure("Unable to browse profiler hierarchy.", $"Root '{rootSelector}' was not found.", null);
 
-                var visibleRows = SelectVisibleRows(selectedRoot, depth, sort, onlyNonTrivial, hierarchy.frameTimeMs);
+                var visibleRows = SelectVisibleRows(selectedRoot, depth, sort, onlyNonTrivial, frameTimeMs);
                 var builder = new StringBuilder();
-                builder.AppendLine("id      depth  total_ms  self_ms  gc_kb  calls  frame_%  name");
+                if (!string.IsNullOrEmpty(threadSummary))
+                {
+                    builder.AppendLine(threadSummary);
+                    builder.AppendLine();
+                }
+
+                builder.AppendLine(
+                    aggregateWorkerCount > 0
+                        ? "id        depth  total_ms  mean_ms  min_ms  max_ms  workers  self_ms  gc_kb  calls  frame_%  name"
+                        : "id        depth  total_ms  self_ms  gc_kb  calls  frame_%  name"
+                );
 
                 var printed = 0;
                 foreach (var row in EnumerateForOutput(selectedRoot, visibleRows, sort))
@@ -164,7 +162,7 @@ namespace Conduit
                         break;
                     }
 
-                    AppendBrowseRow(builder, row, selectedRoot.Depth, hierarchy.frameTimeMs);
+                    AppendBrowseRow(builder, row, selectedRoot.Depth, frameTimeMs, aggregateWorkerCount);
                     printed++;
                 }
 
@@ -440,6 +438,150 @@ namespace Conduit
             }
 
             return bytes;
+        }
+
+        static bool TryBuildBrowseHierarchy(
+            int frameIndex,
+            string threadSelector,
+            string sort,
+            out HierarchyRow root,
+            out float frameTimeMs,
+            out int aggregateWorkerCount,
+            out string threadSummary,
+            out string diagnostic
+        )
+        {
+            if (string.Equals(threadSelector, "all_workers", StringComparison.OrdinalIgnoreCase))
+                return TryBuildWorkerHierarchy(frameIndex, sort, out root, out frameTimeMs, out aggregateWorkerCount, out threadSummary, out diagnostic);
+
+            root = null!;
+            frameTimeMs = 0;
+            aggregateWorkerCount = 0;
+            threadSummary = string.Empty;
+            if (!TryResolveThread(frameIndex, threadSelector, out var thread, out diagnostic))
+                return false;
+
+            using var hierarchy = ProfilerDriver.GetHierarchyFrameDataView(
+                frameIndex,
+                thread.Index,
+                HierarchyFrameDataView.ViewModes.MergeSamplesWithTheSameName,
+                HierarchyFrameDataView.columnDontSort,
+                false
+            );
+
+            if (!hierarchy.valid)
+            {
+                diagnostic = $"No hierarchy data is available for frame {frameIndex} thread {thread.Index}.";
+                return false;
+            }
+
+            root = BuildHierarchy(hierarchy, sort);
+            frameTimeMs = hierarchy.frameTimeMs;
+            diagnostic = string.Empty;
+            return true;
+        }
+
+        static bool TryBuildWorkerHierarchy(
+            int frameIndex,
+            string sort,
+            out HierarchyRow root,
+            out float frameTimeMs,
+            out int aggregateWorkerCount,
+            out string threadSummary,
+            out string diagnostic
+        )
+        {
+            root = CreateWorkerAggregateRoot();
+            frameTimeMs = 0;
+            aggregateWorkerCount = 0;
+            threadSummary = string.Empty;
+            var labels = new List<string>();
+            foreach (var thread in ListThreads(frameIndex))
+            {
+                if (!TryParseJobWorkerIndex(thread, out var workerIndex))
+                    continue;
+
+                using var hierarchy = ProfilerDriver.GetHierarchyFrameDataView(
+                    frameIndex,
+                    thread.Index,
+                    HierarchyFrameDataView.ViewModes.MergeSamplesWithTheSameName,
+                    HierarchyFrameDataView.columnDontSort,
+                    false
+                );
+
+                if (!hierarchy.valid)
+                    continue;
+
+                if (labels.Count == 0)
+                    frameTimeMs = hierarchy.frameTimeMs;
+
+                MergeWorkerHierarchy(root, BuildHierarchy(hierarchy, sort));
+                labels.Add($"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}");
+            }
+
+            if (labels.Count == 0)
+            {
+                diagnostic = $"No Job Worker hierarchy data is available for frame {frameIndex}.";
+                return false;
+            }
+
+            aggregateWorkerCount = labels.Count;
+            threadSummary =
+                $"Threads: {FormatThreadLabels(labels)}\n" +
+                $"Aggregation: {labels.Count.ToString(CultureInfo.InvariantCulture)} Job Worker threads; total/self/GC/calls are summed, mean/min/max use workers containing each path.";
+            diagnostic = string.Empty;
+            return true;
+        }
+
+        static HierarchyRow CreateWorkerAggregateRoot() =>
+            new()
+            {
+                Name = "Job Workers",
+                IdentityPath = "Job Workers[1]",
+                DisplayPath = "Job Workers",
+            };
+
+        static void MergeWorkerHierarchy(HierarchyRow aggregate, HierarchyRow workerRoot)
+        {
+            AddWorkerMetrics(aggregate, workerRoot);
+
+            // worker-specific roots are discarded so equivalent job paths merge
+            foreach (var child in workerRoot.Children)
+                MergeHierarchyRow(aggregate, child);
+        }
+
+        static void MergeHierarchyRow(HierarchyRow parent, HierarchyRow source)
+        {
+            var target = parent.Children.Find(child => string.Equals(child.Name, source.Name, StringComparison.Ordinal));
+            if (target == null)
+            {
+                target = new()
+                {
+                    Parent = parent,
+                    Name = source.Name,
+                    Depth = parent.Depth + 1,
+                    IdentityPath = $"{parent.IdentityPath}/{NormalizeIdentitySegment(source.Name)}[1]",
+                    DisplayPath = $"{parent.DisplayPath}/{source.Name}",
+                };
+                parent.Children.Add(target);
+            }
+
+            AddWorkerMetrics(target, source);
+            foreach (var child in source.Children)
+                MergeHierarchyRow(target, child);
+        }
+
+        static void AddWorkerMetrics(HierarchyRow target, HierarchyRow source)
+        {
+            target.MinTotalMs = target.ContributingWorkerCount == 0
+                ? source.TotalMs
+                : Math.Min(target.MinTotalMs, source.TotalMs);
+            target.MaxTotalMs = Math.Max(target.MaxTotalMs, source.TotalMs);
+            target.ContributingWorkerCount++;
+            target.TotalMs += source.TotalMs;
+            target.SelfMs += source.SelfMs;
+            target.GcBytes += source.GcBytes;
+            target.Calls += source.Calls;
         }
 
         static HierarchyRow BuildHierarchy(HierarchyFrameDataView hierarchy, string sort)
@@ -721,7 +863,7 @@ namespace Conduit
                 && int.TryParse(selector["worker".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var workerIndex))
                 return TryFindThread(threads, info => TryParseJobWorkerIndex(info, out var index) && index == workerIndex, out thread, out diagnostic);
 
-            diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, or worker<N>.";
+            diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, all_workers, or worker<N>.";
             thread = default;
             return false;
         }
@@ -1073,19 +1215,32 @@ namespace Conduit
             }
         }
 
-        static void AppendBrowseRow(StringBuilder builder, HierarchyRow row, int rootDepth, float frameTimeMs)
+        static void AppendBrowseRow(StringBuilder builder, HierarchyRow row, int rootDepth, float frameTimeMs, int aggregateWorkerCount)
         {
             var relativeDepth = row.Depth - rootDepth;
-            builder.Append((row.PublicId ?? "").PadRight(8));
+            var normalizedMs = aggregateWorkerCount > 0 ? GetNormalizedWorkerMs(row, aggregateWorkerCount) : row.TotalMs;
+            builder.Append((row.PublicId ?? "").PadRight(10));
             builder.Append(relativeDepth.ToString(CultureInfo.InvariantCulture).PadRight(7));
             builder.Append(FormatNumber(row.TotalMs).PadRight(10));
+            if (aggregateWorkerCount > 0)
+            {
+                builder.Append(FormatNumber(GetWorkerMeanMs(row)).PadRight(9));
+                builder.Append(FormatNumber(row.MinTotalMs).PadRight(8));
+                builder.Append(FormatNumber(row.MaxTotalMs).PadRight(8));
+                builder.Append(row.ContributingWorkerCount.ToString(CultureInfo.InvariantCulture).PadRight(9));
+            }
+
             builder.Append(FormatNumber(row.SelfMs).PadRight(9));
             builder.Append(FormatKb(row.GcBytes).PadRight(7));
             builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
-            builder.Append(FormatPercent(row.TotalMs, frameTimeMs).PadRight(9));
+            builder.Append(FormatPercent(normalizedMs, frameTimeMs).PadRight(9));
             builder.Append(new string(' ', Math.Max(0, relativeDepth * 2)));
             builder.AppendLine(FormatSampleName(row.Name));
         }
+
+        static double GetWorkerMeanMs(HierarchyRow row) => row.TotalMs / row.ContributingWorkerCount;
+
+        static double GetNormalizedWorkerMs(HierarchyRow row, int workerCount) => row.TotalMs / workerCount;
 
         static void AppendWarnings(StringBuilder builder, List<string> warnings)
         {
@@ -1389,6 +1544,20 @@ namespace Conduit
 
         internal static string FormatSamplePathForTest(string displayPath) => FormatSamplePath(displayPath);
 
+        internal static HierarchyRow AggregateWorkerHierarchiesForTest(params HierarchyRow[] workerRoots)
+        {
+            var aggregate = CreateWorkerAggregateRoot();
+            foreach (var workerRoot in workerRoots)
+                MergeWorkerHierarchy(aggregate, workerRoot);
+
+            return aggregate;
+        }
+
+        internal static double GetWorkerMeanMsForTest(HierarchyRow row) => GetWorkerMeanMs(row);
+
+        internal static double GetNormalizedWorkerMsForTest(HierarchyRow row, int workerCount)
+            => GetNormalizedWorkerMs(row, workerCount);
+
         internal struct CapturePath
         {
             public string AbsolutePath;
@@ -1431,7 +1600,7 @@ namespace Conduit
             public float FrameTimeMs;
         }
 
-        sealed class HierarchyRow
+        internal sealed class HierarchyRow
         {
             public int ItemId;
             public HierarchyRow? Parent;
@@ -1444,6 +1613,9 @@ namespace Conduit
             public double SelfMs;
             public double GcBytes;
             public double Calls;
+            public int ContributingWorkerCount;
+            public double MinTotalMs;
+            public double MaxTotalMs;
             public List<HierarchyRow> Children { get; } = new();
         }
     }

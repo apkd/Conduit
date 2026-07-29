@@ -380,7 +380,7 @@ public sealed class UnityTools
         CancellationToken ct,
         [Description("Frame selector: selected, latest, or an available-frame ordinal.")]
         string frame = "selected",
-        [Description("Thread selector: main, render, or worker<N>.")]
+        [Description("Thread selector: main, render, all_workers, or worker<N>.")]
         string thread = "main",
         [Description("Root selector: empty root, an output id, slash-separated path, or exact marker/sample name.")]
         string root = "",

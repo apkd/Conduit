@@ -338,6 +338,84 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ProfilerBrowse_WorkerAggregateSumsMatchingHierarchyPaths()
+    {
+        var worker0 = Row(
+            "Worker 0",
+            totalMs: 4,
+            selfMs: 1,
+            gcBytes: 32,
+            calls: 1,
+            Row("Execute", 3, 1, 16, 2, Row("JobA", 2, 2, 8, 2))
+        );
+        var worker1 = Row(
+            "Worker 1",
+            totalMs: 6,
+            selfMs: 2,
+            gcBytes: 64,
+            calls: 1,
+            Row("Execute", 5, 2, 32, 3, Row("JobA", 3, 3, 16, 3), Row("JobB", 1, 1, 0, 1))
+        );
+
+        var aggregate = profiler.AggregateWorkerHierarchiesForTest(worker0, worker1);
+
+        Assert.That(aggregate.Name, Is.EqualTo("Job Workers"));
+        Assert.That(aggregate.TotalMs, Is.EqualTo(10));
+        Assert.That(aggregate.SelfMs, Is.EqualTo(3));
+        Assert.That(aggregate.GcBytes, Is.EqualTo(96));
+        Assert.That(aggregate.Calls, Is.EqualTo(2));
+        Assert.That(aggregate.ContributingWorkerCount, Is.EqualTo(2));
+        Assert.That(aggregate.MinTotalMs, Is.EqualTo(4));
+        Assert.That(aggregate.MaxTotalMs, Is.EqualTo(6));
+        Assert.That(profiler.GetWorkerMeanMsForTest(aggregate), Is.EqualTo(5));
+        Assert.That(aggregate.Children, Has.Count.EqualTo(1));
+
+        var execute = aggregate.Children[0];
+        Assert.That(execute.TotalMs, Is.EqualTo(8));
+        Assert.That(execute.SelfMs, Is.EqualTo(3));
+        Assert.That(execute.GcBytes, Is.EqualTo(48));
+        Assert.That(execute.Calls, Is.EqualTo(5));
+        Assert.That(execute.ContributingWorkerCount, Is.EqualTo(2));
+        Assert.That(execute.MinTotalMs, Is.EqualTo(3));
+        Assert.That(execute.MaxTotalMs, Is.EqualTo(5));
+        Assert.That(execute.Children, Has.Count.EqualTo(2));
+        var jobA = execute.Children.Find(row => row.Name == "JobA")!;
+        Assert.That(jobA.TotalMs, Is.EqualTo(5));
+        Assert.That(jobA.ContributingWorkerCount, Is.EqualTo(2));
+        Assert.That(jobA.MinTotalMs, Is.EqualTo(2));
+        Assert.That(jobA.MaxTotalMs, Is.EqualTo(3));
+
+        var jobB = execute.Children.Find(row => row.Name == "JobB")!;
+        Assert.That(jobB.TotalMs, Is.EqualTo(1));
+        Assert.That(jobB.ContributingWorkerCount, Is.EqualTo(1));
+        Assert.That(profiler.GetWorkerMeanMsForTest(jobB), Is.EqualTo(1));
+        Assert.That(profiler.GetNormalizedWorkerMsForTest(jobB, workerCount: 2), Is.EqualTo(0.5));
+        Assert.That(jobB.MinTotalMs, Is.EqualTo(1));
+        Assert.That(jobB.MaxTotalMs, Is.EqualTo(1));
+
+        static profiler.HierarchyRow Row(
+            string name,
+            double totalMs,
+            double selfMs,
+            double gcBytes,
+            double calls,
+            params profiler.HierarchyRow[] children
+        )
+        {
+            var row = new profiler.HierarchyRow
+            {
+                Name = name,
+                TotalMs = totalMs,
+                SelfMs = selfMs,
+                GcBytes = gcBytes,
+                Calls = calls,
+            };
+            row.Children.AddRange(children);
+            return row;
+        }
+    }
+
+    [Test]
     public void ProfilerOverview_ThreadLabelsOnlyShowMainRenderAndJobWorkers()
     {
         Assert.That(profiler.TryGetOverviewThreadLabelForTest("Main Thread", "", out var label), Is.True);
