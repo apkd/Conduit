@@ -131,7 +131,6 @@ namespace Conduit
         }
 
         internal static int GetCoverTabIndex(
-            int selectedIndex,
             int gameViewIndex,
             int testRunnerIndex,
             int lastSelectedIndex,
@@ -140,9 +139,6 @@ namespace Conduit
         {
             if (testRunnerIndex >= 0)
                 return testRunnerIndex;
-
-            if (selectedIndex >= 0 && selectedIndex < paneCount && selectedIndex != gameViewIndex)
-                return selectedIndex;
 
             if (lastSelectedIndex >= 0 && lastSelectedIndex < paneCount && lastSelectedIndex != gameViewIndex)
                 return lastSelectedIndex;
@@ -177,9 +173,11 @@ namespace Conduit
 
                 int testRunnerIndex = FindTestRunnerIndex(panes);
                 int selectedIndex = selectedProperty?.GetValue(dockArea) as int? ?? -1;
+                if (selectedIndex != gameViewIndex)
+                    return;
+
                 int lastSelectedIndex = lastSelectedField?.GetValue(dockArea) as int? ?? -1;
                 int coverIndex = GetCoverTabIndex(
-                    selectedIndex,
                     gameViewIndex,
                     testRunnerIndex,
                     lastSelectedIndex,

@@ -2855,11 +2855,10 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void UnfocusedGameView_CoverTabSelectionPrefersTestRunnerThenExistingTabs()
     {
-        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 1, 2, 0, 3), Is.EqualTo(2));
-        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 1, -1, 2, 3), Is.EqualTo(0));
-        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(1, 1, -1, 2, 3), Is.EqualTo(2));
-        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(-1, 1, -1, -1, 3), Is.EqualTo(0));
-        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, 0, -1, 0, 1), Is.EqualTo(-1));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(1, 2, 0, 3), Is.EqualTo(2));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(1, -1, 2, 3), Is.EqualTo(2));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(1, -1, -1, 3), Is.EqualTo(0));
+        Assert.That(ConduitGameViewFocus.GetCoverTabIndex(0, -1, 0, 1), Is.EqualTo(-1));
     }
 
     [Test]
