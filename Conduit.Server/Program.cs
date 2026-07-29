@@ -93,7 +93,7 @@ static async Task RunHttpAsync(string? url, ushort? port)
     builder.Services
         .AddMcpServer()
         .WithRequestFilters(filters => filters.AddCallToolFilter(ToolCallArgumentValidationFilter.Apply))
-        .WithHttpTransport()
+        .WithHttpTransport(options => options.Stateless = true)
         .WithTools<UnityTools>(CreateToolSerializerOptions());
 
     var app = builder.Build();
