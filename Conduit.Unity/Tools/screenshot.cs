@@ -485,11 +485,14 @@ namespace Conduit
         static Task WaitForNextEditorUpdateAsync()
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            EditorApplication.delayCall += Complete;
+            EditorApplication.update += Complete;
             return completion.Task;
 
             void Complete()
-                => completion.TrySetResult(true);
+            {
+                EditorApplication.update -= Complete;
+                completion.TrySetResult(true);
+            }
         }
 
         static string CaptureSceneView(SceneView window)
