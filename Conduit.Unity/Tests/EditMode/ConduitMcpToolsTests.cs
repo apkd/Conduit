@@ -2540,8 +2540,11 @@ public sealed class ConduitMcpToolsTests
     {
         RequireInteractiveEditorWindows();
 
-        OpenScreenshotTestWindow<ConduitWindowMatchAlphaWindow>();
-        OpenScreenshotTestWindow<ConduitWindowMatchBetaWindow>();
+        var alphaWindow = OpenScreenshotTestWindow<ConduitWindowMatchAlphaWindow>();
+        var betaWindow = OpenScreenshotTestWindow<ConduitWindowMatchBetaWindow>();
+
+        Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(alphaWindow), Is.True);
+        Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(betaWindow), Is.True);
 
         var result = await InvokeScreenshotAsync("window:window match");
 
@@ -2567,8 +2570,11 @@ public sealed class ConduitMcpToolsTests
     {
         RequireInteractiveEditorWindows();
 
-        OpenScreenshotTestWindow<ConduitWindowMatchAlphaWindow>();
-        OpenScreenshotTestWindow<ConduitWindowMatchBetaWindow>();
+        var alphaWindow = OpenScreenshotTestWindow<ConduitWindowMatchAlphaWindow>();
+        var betaWindow = OpenScreenshotTestWindow<ConduitWindowMatchBetaWindow>();
+
+        Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(alphaWindow), Is.True);
+        Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(betaWindow), Is.True);
 
         var result = ConduitSearchUtility.Search("window:window match");
 
@@ -2654,7 +2660,7 @@ public sealed class ConduitMcpToolsTests
         Assert.That(result, Does.Contain("Title: Conduit Capture Probe"));
         Assert.That(result, Does.Contain("Object: "));
         Assert.That(result, Does.Contain("Focused: "));
-        Assert.That(result, Does.Contain("Docked: "));
+        Assert.That(result, Does.Contain("Docked: yes"));
         Assert.That(result, Does.Contain("Position: x="));
     }
 
@@ -3722,10 +3728,7 @@ public sealed class ConduitMcpToolsTests
     static TWindow OpenScreenshotTestWindow<TWindow>()
         where TWindow : EditorWindow
     {
-        var window = EditorWindow.GetWindow<TWindow>();
-        window.position = new Rect(120f, 120f, 320f, 240f);
-        window.Show();
-        window.Focus();
+        var window = (TWindow)ConduitEditorWindowDocking.CreateDockedTab(typeof(TWindow));
         window.Repaint();
         return window;
     }

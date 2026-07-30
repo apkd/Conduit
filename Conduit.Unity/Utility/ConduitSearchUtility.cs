@@ -697,10 +697,8 @@ namespace Conduit
 
             try
             {
-                var window = EditorWindow.GetWindow(windowType, false, null, true);
-                return window == null
-                    ? new()
-                    : new() { CreateMatch(window, ResolvedObjectMatchSource.EditorWindowQuery) };
+                var window = ConduitEditorWindowDocking.CreateDockedTab(windowType);
+                return new() { CreateMatch(window, ResolvedObjectMatchSource.EditorWindowQuery) };
             }
             catch (Exception exception)
             {

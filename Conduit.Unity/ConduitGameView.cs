@@ -86,6 +86,27 @@ namespace Conduit
                 _ => 9
             };
 
+        internal static EditorWindow CreateDockedTab(Type windowType)
+        {
+            var target = FindPreferredMainDockTarget(windowType)
+                         ?? throw new InvalidOperationException(
+                             $"Could not find a docked main-editor window for '{windowType.Name}'."
+                         );
+            var window = ScriptableObject.CreateInstance(windowType) as EditorWindow
+                         ?? throw new InvalidOperationException($"Could not create editor window '{windowType.Name}'.");
+            try
+            {
+                // attach the new pane directly so Unity does not create a floating host first
+                DockAsTab(window, target);
+                return window;
+            }
+            catch
+            {
+                window.Close();
+                throw;
+            }
+        }
+
         internal static void DockAsTab(EditorWindow window, EditorWindow target)
         {
             var targetDockArea = GetDockArea(target);
