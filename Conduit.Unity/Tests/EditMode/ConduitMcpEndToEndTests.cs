@@ -24,6 +24,7 @@ public sealed class ConduitMcpEndToEndTests
     const string SourceAsset = SettingsRoot + "/DependencyPipeline.asset";
     const string DependencyAsset = SettingsRoot + "/DependencyRenderer.asset";
     const string VolumeProfileAsset = SettingsRoot + "/SceneEffectsProfile.asset";
+    const string PackageScriptAsset = "Packages/dev.tryfinally.conduit/ConduitToolRunner.Execution.cs";
     const string TempRoot = "Assets/ConduitMcpE2ETemp";
     const string MissingScenePath = "Assets/ConduitMcpDefinitelyMissingScene.unity";
     const string MissingQuery = "ConduitMcpDefinitelyMissingObject";
@@ -962,6 +963,24 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(103)]
+    public async Task ReimportAssets_RejectsScriptCompilationInputs()
+    {
+        var result = await client.CallToolAsync(
+            BridgeCommandTypes.ReimportAssets,
+            Args(
+                ("projectPath", projectPath),
+                ("query", PackageScriptAsset)
+            ),
+            timeout: TimeSpan.FromSeconds(10)
+        );
+
+        Assert.That(result.Text, Does.Contain(PackageScriptAsset));
+        Assert.That(result.Text, Does.Contain("No assets were reimported"));
+        Assert.That(result.Text, Does.Contain(BridgeCommandTypes.RefreshAssetDatabase));
+    }
+
+    [Test]
+    [Order(104)]
     public async Task RefreshAssetDatabase_PlayModeRefusesPromptly()
     {
         var originalOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;

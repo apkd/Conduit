@@ -3229,6 +3229,36 @@ public sealed class ConduitMcpToolsTests
         Assert.That(ConduitToolRunner.ShouldWaitForReimportIdle(true, false, false, 8), Is.False);
     }
 
+    [TestCase("Assets/Example.cs", false, true)]
+    [TestCase("Assets/Example.ASMDEF", false, true)]
+    [TestCase("Assets/Example.asmref", false, true)]
+    [TestCase("Assets/csc.rsp", false, true)]
+    [TestCase("Assets/Managed.dll", true, true)]
+    [TestCase("Assets/Native.dll", false, false)]
+    [TestCase("Assets/Example.shader", false, false)]
+    public void ReimportAssets_IdentifiesScriptCompilationInputs(
+        string assetPath,
+        bool isManagedAssembly,
+        bool expected
+    )
+        => Assert.That(
+            AssetImportMonitor.IsCompilationInputAssetPath(assetPath, isManagedAssembly),
+            Is.EqualTo(expected)
+        );
+
+    [Test]
+    public void ReimportAssets_CompilationInputDiagnosticDirectsToRefresh()
+    {
+        const string assetPath = "Assets/Example.cs";
+
+        var diagnostic = AssetImportMonitor.BuildCompilationInputReimportDiagnostic(assetPath);
+
+        Assert.That(diagnostic, Does.Contain(assetPath));
+        Assert.That(diagnostic, Does.Contain(BridgeCommandTypes.ReimportAssets));
+        Assert.That(diagnostic, Does.Contain("No assets were reimported"));
+        Assert.That(diagnostic, Does.Contain(BridgeCommandTypes.RefreshAssetDatabase));
+    }
+
     [Test]
     public void SimplifyStackTrace_RestoresAsyncLocalFunction()
     {

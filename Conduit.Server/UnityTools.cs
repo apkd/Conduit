@@ -215,6 +215,7 @@ public sealed class UnityTools
     [Description(
         """
         Triggers AssetDatabase.Refresh for the project and waits for the editor to become stable again.
+        Preferred over `reimport_assets`. Use this during normal iteration to refresh editor state after making changes.
         Never call AssetDatabase.Refresh manually. ALWAYS use refresh_asset_database instead.
         """
     )]
@@ -228,6 +229,7 @@ public sealed class UnityTools
     [Description(
         """
         Resolves all assets matching the query, forces synchronous reimport, and waits for the editor to become stable again.
+        Do not use unless you actually need to force reimport an asset. Usually prefer `refresh_asset_database` after making changes.
         """
     )]
     public static Task<string> ReimportAssets(

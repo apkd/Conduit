@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -305,6 +306,20 @@ namespace Conduit
         public static string BuildRestoredCompileErrorDiagnostic()
             => "Asset refresh completed, but the project has compilation errors.";
 
+        internal static bool IsCompilationInputAssetPath(string assetPath, bool isManagedAssembly)
+        {
+            var extension = Path.GetExtension(assetPath);
+            return extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)
+                   || extension.Equals(".asmdef", StringComparison.OrdinalIgnoreCase)
+                   || extension.Equals(".asmref", StringComparison.OrdinalIgnoreCase)
+                   || extension.Equals(".rsp", StringComparison.OrdinalIgnoreCase)
+                   || isManagedAssembly && extension.Equals(".dll", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static string BuildCompilationInputReimportDiagnostic(string assetPath)
+            => $"Cannot reimport script compilation input '{assetPath}' with '{BridgeCommandTypes.ReimportAssets}'. "
+               + $"No assets were reimported. Use '{BridgeCommandTypes.RefreshAssetDatabase}' instead.";
+
         public static string FormatReimportedAssetFilenames(string? assetPathPayload)
             => FormatReimportedAssetFilenames(SplitReimportAssetPaths(assetPathPayload));
 
@@ -370,6 +385,24 @@ namespace Conduit
                     {
                         outcome = ToolOutcome.Success,
                         return_value = "No assets matched the query.",
+                    }
+                );
+                return false;
+            }
+
+            // code imports can reload the domain before the bridge reports completion
+            foreach (var assetPath in assetPaths)
+            {
+                var isManagedAssembly = Path.GetExtension(assetPath).Equals(".dll", StringComparison.OrdinalIgnoreCase)
+                                        && AssetImporter.GetAtPath(assetPath) is PluginImporter { isNativePlugin: false };
+                if (!IsCompilationInputAssetPath(assetPath, isManagedAssembly))
+                    continue;
+
+                _ = complete(
+                    new()
+                    {
+                        outcome = ToolOutcome.Exception,
+                        diagnostic = BuildCompilationInputReimportDiagnostic(assetPath),
                     }
                 );
                 return false;
