@@ -2862,6 +2862,54 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void GameViewDockTarget_UsesPreferredMainWindowOrder()
+    {
+        var editorAssembly = typeof(EditorWindow).Assembly;
+        var windowTypes = new[]
+        {
+            typeof(SceneView),
+            editorAssembly.GetType("UnityEditor.PreferenceSettingsWindow"),
+            editorAssembly.GetType("UnityEditor.ProjectSettingsWindow"),
+            editorAssembly.GetType("UnityEditor.PackageManager.UI.PackageManagerWindow"),
+            editorAssembly.GetType("UnityEditor.ProfilerWindow")
+        };
+
+        Assert.That(windowTypes, Has.None.Null);
+        for (int index = 0; index < windowTypes.Length; ++index)
+            Assert.That(
+                ConduitEditorWindowDocking.GetTargetPriority(windowTypes[index]!),
+                Is.EqualTo(index)
+            );
+    }
+
+    [Test]
+    public void GameViewDocking_AttachesNewTabsToExistingMainWindow()
+    {
+        RequireInteractiveEditorWindows();
+
+        var gameViewType = ConduitGameView.GameViewType
+                           ?? throw new TypeLoadException("UnityEditor.GameView");
+        var target = ConduitEditorWindowDocking.FindPreferredMainDockTarget(gameViewType);
+        Assert.That(target, Is.Not.Null);
+        var probe = ScriptableObject.CreateInstance<ConduitCaptureProbeWindow>();
+
+        try
+        {
+            ConduitEditorWindowDocking.DockAsTab(probe, target!);
+
+            Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(probe), Is.True);
+            Assert.That(
+                ConduitEditorWindowDocking.GetDockArea(probe),
+                Is.SameAs(ConduitEditorWindowDocking.GetDockArea(target!))
+            );
+        }
+        finally
+        {
+            probe.Close();
+        }
+    }
+
+    [Test]
     public void GameViewPreparation_SkipsFocusButAppliesResolutionForMaximizedNonGameView()
     {
         RequireInteractiveEditorWindows();
@@ -2917,7 +2965,7 @@ public sealed class ConduitMcpToolsTests
         var existingGameViews = GetWindowIds(gameViewType);
         var existingTestRunners = GetWindowIds(testRunnerWindowType);
         var previouslyFocusedWindow = EditorWindow.focusedWindow;
-        var gameView = FindOrOpenGameView();
+        var gameView = ConduitGameView.FindOrOpen();
         var originalBehavior = behaviorProperty.GetValue(gameView);
         var playFocused = Enum.Parse(behaviorProperty.PropertyType, "PlayFocused");
 
@@ -2930,6 +2978,14 @@ public sealed class ConduitMcpToolsTests
 
             Assert.That(ConduitGameViewFocus.IsPrepared, Is.True);
             Assert.That(behaviorProperty.GetValue(gameView)?.ToString(), Is.EqualTo("PlayUnfocused"));
+            Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(gameView), Is.True);
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(testRunnerWindowType))
+                if (candidate is EditorWindow testRunner
+                    && !existingTestRunners.Contains(ConduitUtility.GetObjectId(testRunner)))
+                    Assert.That(
+                        ConduitEditorWindowDocking.IsDockedInMainWindow(testRunner),
+                        Is.True
+                    );
 
             ConduitGameViewFocus.Restore();
 
@@ -2953,15 +3009,6 @@ public sealed class ConduitMcpToolsTests
                     ids.Add(ConduitUtility.GetObjectId(window));
 
             return ids;
-        }
-
-        EditorWindow FindOrOpenGameView()
-        {
-            foreach (var candidate in Resources.FindObjectsOfTypeAll(gameViewType))
-                if (candidate is EditorWindow window)
-                    return window;
-
-            return EditorWindow.GetWindow(gameViewType, false, "Game", false);
         }
 
         void CloseNewWindows(Type windowType, HashSet<ulong> existingWindowIds)

@@ -20,7 +20,6 @@ namespace Conduit
 
         // unity 6 keeps the per-window play behavior and docking APIs internal, so failures must stay optional
         static readonly Type? playModeViewType = typeof(EditorWindow).Assembly.GetType("UnityEditor.PlayModeView");
-        static readonly Type? dockAreaType = typeof(EditorWindow).Assembly.GetType("UnityEditor.DockArea");
         static readonly Type? testRunnerWindowType = typeof(TestRunnerApi).Assembly.GetType(
             "UnityEditor.TestTools.TestRunner.TestRunnerWindow"
         );
@@ -28,28 +27,17 @@ namespace Conduit
             "enterPlayModeBehavior",
             BindingFlags.Instance | BindingFlags.Public
         );
-        static readonly FieldInfo? parentField = typeof(EditorWindow).GetField(
-            "m_Parent",
-            BindingFlags.Instance | BindingFlags.NonPublic
-        );
-        static readonly FieldInfo? panesField = dockAreaType?.GetField(
+        static readonly FieldInfo? panesField = ConduitEditorWindowDocking.DockAreaType?.GetField(
             "m_Panes",
             BindingFlags.Instance | BindingFlags.NonPublic
         );
-        static readonly FieldInfo? lastSelectedField = dockAreaType?.GetField(
+        static readonly FieldInfo? lastSelectedField = ConduitEditorWindowDocking.DockAreaType?.GetField(
             "m_LastSelected",
             BindingFlags.Instance | BindingFlags.NonPublic
         );
-        static readonly PropertyInfo? selectedProperty = dockAreaType?.GetProperty(
+        static readonly PropertyInfo? selectedProperty = ConduitEditorWindowDocking.DockAreaType?.GetProperty(
             "selected",
             BindingFlags.Instance | BindingFlags.Public
-        );
-        static readonly MethodInfo? addTabMethod = dockAreaType?.GetMethod(
-            "AddTab",
-            BindingFlags.Instance | BindingFlags.Public,
-            null,
-            new[] { typeof(EditorWindow), typeof(bool) },
-            null
         );
 
         static ConduitGameViewFocus()
@@ -161,9 +149,7 @@ namespace Conduit
         {
             try
             {
-                if (parentField?.GetValue(gameView) is not { } dockArea
-                    || dockAreaType is null
-                    || !dockAreaType.IsInstanceOfType(dockArea)
+                if (ConduitEditorWindowDocking.GetDockArea(gameView) is not { } dockArea
                     || panesField?.GetValue(dockArea) is not IList panes)
                     return;
 
@@ -190,7 +176,8 @@ namespace Conduit
                 }
 
                 // a one-tab dock cannot be unfocused, and Test Runner remains useful after serving as its cover
-                AddTestRunnerTab(dockArea);
+                if (ConduitEditorWindowDocking.IsMainDockArea(dockArea))
+                    AddTestRunnerTab(dockArea);
             }
             catch (Exception exception)
             {
@@ -220,8 +207,8 @@ namespace Conduit
 
             static void AddTestRunnerTab(object dockArea)
             {
-                if (testRunnerWindowType is not { } windowType || addTabMethod is not { } addTab)
-                    throw new MissingMemberException("Unity Test Runner window docking API");
+                if (testRunnerWindowType is not { } windowType)
+                    throw new TypeLoadException("Unity Test Runner window");
 
                 var testRunner = ScriptableObject.CreateInstance(windowType) as EditorWindow
                                  ?? throw new InvalidOperationException(
@@ -229,7 +216,7 @@ namespace Conduit
                                  );
                 try
                 {
-                    addTab.Invoke(dockArea, new object[] { testRunner, true });
+                    ConduitEditorWindowDocking.AddTab(dockArea, testRunner);
                     testRunner.Focus();
                 }
                 catch

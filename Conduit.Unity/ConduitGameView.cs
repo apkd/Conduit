@@ -8,6 +8,95 @@ using UnityEngine;
 
 namespace Conduit
 {
+    // attaches feature-created tabs to the existing editor layout without creating auxiliary containers
+    static class ConduitEditorWindowDocking
+    {
+        const BindingFlags InstanceMembers =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        internal static readonly Type? DockAreaType = typeof(EditorWindow).Assembly.GetType("UnityEditor.DockArea");
+        static readonly FieldInfo? parentField = typeof(EditorWindow).GetField("m_Parent", InstanceMembers);
+        static readonly PropertyInfo? floatingWindowProperty = DockAreaType?.GetProperty(
+            "floatingWindow",
+            InstanceMembers
+        );
+        static readonly MethodInfo? addTabMethod = DockAreaType?.GetMethod(
+            "AddTab",
+            InstanceMembers,
+            null,
+            new[] { typeof(EditorWindow), typeof(bool) },
+            null
+        );
+
+        internal static object? GetDockArea(EditorWindow window)
+        {
+            var parent = parentField?.GetValue(window);
+            return parent is not null && DockAreaType?.IsInstanceOfType(parent) == true
+                ? parent
+                : null;
+        }
+
+        internal static bool IsMainDockArea(object dockArea)
+            => DockAreaType?.IsInstanceOfType(dockArea) == true
+               && floatingWindowProperty?.GetValue(dockArea) is false;
+
+        internal static bool IsDockedInMainWindow(EditorWindow window)
+            => GetDockArea(window) is { } dockArea && IsMainDockArea(dockArea);
+
+        internal static EditorWindow? FindPreferredMainDockTarget(Type excludedWindowType)
+        {
+            EditorWindow? bestTarget = null;
+            int bestPriority = int.MaxValue;
+            foreach (var candidate in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            {
+                if (candidate == null
+                    || excludedWindowType.IsInstanceOfType(candidate)
+                    || !IsDockedInMainWindow(candidate))
+                    continue;
+
+                int priority = GetTargetPriority(candidate.GetType());
+                if (priority >= bestPriority)
+                    continue;
+
+                bestTarget = candidate;
+                bestPriority = priority;
+            }
+
+            return bestTarget;
+        }
+
+        internal static int GetTargetPriority(Type windowType)
+            => windowType.FullName switch
+            {
+                "UnityEditor.SceneView" => 0,
+                "UnityEditor.PreferenceSettingsWindow" => 1,
+                "UnityEditor.ProjectSettingsWindow" => 2,
+                "UnityEditor.PackageManager.UI.PackageManagerWindow" => 3,
+                "UnityEditor.ProfilerWindow" => 4,
+                "UnityEditor.ConsoleWindow" => 5,
+                "UnityEditor.ProjectBrowser" => 6,
+                "UnityEditor.InspectorWindow" => 7,
+                "UnityEditor.SceneHierarchyWindow" => 8,
+                _ => 9
+            };
+
+        internal static void DockAsTab(EditorWindow window, EditorWindow target)
+        {
+            var dockArea = GetDockArea(target);
+            if (dockArea is null || !IsMainDockArea(dockArea))
+                throw new InvalidOperationException("The target editor window is not docked in the main window.");
+
+            AddTab(dockArea, window);
+        }
+
+        internal static void AddTab(object dockArea, EditorWindow window)
+        {
+            if (!IsMainDockArea(dockArea) || addTabMethod is not { } addTab)
+                throw new MissingMemberException("Unity main-window docking API");
+
+            addTab.Invoke(dockArea, new object[] { window, true });
+        }
+    }
+
     static class ConduitGameView
     {
         const BindingFlags StaticMembers = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
@@ -38,15 +127,42 @@ namespace Conduit
             if (GameViewType is null)
                 throw new TypeLoadException("UnityEditor.GameView");
 
+            EditorWindow? existingGameView = null;
             if (getMainPlayModeViewMethod?.Invoke(null, null) is EditorWindow mainGameView
                 && GameViewType.IsInstanceOfType(mainGameView))
-                return mainGameView;
+                existingGameView = mainGameView;
 
             foreach (var candidate in Resources.FindObjectsOfTypeAll(GameViewType))
                 if (candidate is EditorWindow gameView)
-                    return gameView;
+                {
+                    if (ConduitEditorWindowDocking.IsDockedInMainWindow(gameView))
+                        return gameView;
 
-            return EditorWindow.GetWindow(GameViewType, false, "Game", false);
+                    existingGameView ??= gameView;
+                }
+
+            var target = ConduitEditorWindowDocking.FindPreferredMainDockTarget(GameViewType);
+            if (target is null)
+                return existingGameView
+                       ?? throw new InvalidOperationException(
+                           "Could not find a docked main-editor window for the Game View."
+                       );
+
+            var dockedGameView = existingGameView
+                                 ?? ScriptableObject.CreateInstance(GameViewType) as EditorWindow
+                                 ?? throw new InvalidOperationException("Could not create the Unity Game View.");
+            try
+            {
+                ConduitEditorWindowDocking.DockAsTab(dockedGameView, target);
+                return dockedGameView;
+            }
+            catch
+            {
+                if (existingGameView is null)
+                    dockedGameView.Close();
+
+                throw;
+            }
         }
     }
 
