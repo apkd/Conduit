@@ -26,6 +26,13 @@ namespace Conduit
             new[] { typeof(EditorWindow), typeof(bool) },
             null
         );
+        static readonly MethodInfo? removeTabMethod = DockAreaType?.GetMethod(
+            "RemoveTab",
+            InstanceMembers,
+            null,
+            new[] { typeof(EditorWindow), typeof(bool), typeof(bool) },
+            null
+        );
 
         internal static object? GetDockArea(EditorWindow window)
         {
@@ -81,19 +88,35 @@ namespace Conduit
 
         internal static void DockAsTab(EditorWindow window, EditorWindow target)
         {
-            var dockArea = GetDockArea(target);
-            if (dockArea is null || !IsMainDockArea(dockArea))
+            var targetDockArea = GetDockArea(target);
+            if (targetDockArea is null || !IsMainDockArea(targetDockArea))
                 throw new InvalidOperationException("The target editor window is not docked in the main window.");
 
-            AddTab(dockArea, window);
+            var sourceDockArea = GetDockArea(window);
+            if (ReferenceEquals(sourceDockArea, targetDockArea))
+                return;
+
+            // unity's AddTab does not detach a pane from its current DockArea
+            if (sourceDockArea is not null)
+                RemoveTab(sourceDockArea, window);
+
+            AddTab(targetDockArea, window, sourceDockArea is null);
         }
 
-        internal static void AddTab(object dockArea, EditorWindow window)
+        internal static void AddTab(object dockArea, EditorWindow window, bool sendPaneEvents = true)
         {
             if (!IsMainDockArea(dockArea) || addTabMethod is not { } addTab)
                 throw new MissingMemberException("Unity main-window docking API");
 
-            addTab.Invoke(dockArea, new object[] { window, true });
+            addTab.Invoke(dockArea, new object[] { window, sendPaneEvents });
+        }
+
+        static void RemoveTab(object dockArea, EditorWindow window)
+        {
+            if (removeTabMethod is not { } removeTab)
+                throw new MissingMemberException("Unity tab removal API");
+
+            removeTab.Invoke(dockArea, new object[] { window, true, false });
         }
     }
 
@@ -129,11 +152,12 @@ namespace Conduit
 
             EditorWindow? existingGameView = null;
             if (getMainPlayModeViewMethod?.Invoke(null, null) is EditorWindow mainGameView
+                && mainGameView != null
                 && GameViewType.IsInstanceOfType(mainGameView))
                 existingGameView = mainGameView;
 
             foreach (var candidate in Resources.FindObjectsOfTypeAll(GameViewType))
-                if (candidate is EditorWindow gameView)
+                if (candidate is EditorWindow gameView && gameView != null)
                 {
                     if (ConduitEditorWindowDocking.IsDockedInMainWindow(gameView))
                         return gameView;
@@ -143,14 +167,15 @@ namespace Conduit
 
             var target = ConduitEditorWindowDocking.FindPreferredMainDockTarget(GameViewType);
             if (target is null)
-                return existingGameView
-                       ?? throw new InvalidOperationException(
-                           "Could not find a docked main-editor window for the Game View."
-                       );
+                throw new InvalidOperationException(
+                    "Could not find a docked main-editor window for the Game View."
+                );
 
-            var dockedGameView = existingGameView
-                                 ?? ScriptableObject.CreateInstance(GameViewType) as EditorWindow
-                                 ?? throw new InvalidOperationException("Could not create the Unity Game View.");
+            bool createdGameView = existingGameView == null;
+            var dockedGameView = createdGameView
+                ? ScriptableObject.CreateInstance(GameViewType) as EditorWindow
+                  ?? throw new InvalidOperationException("Could not create the Unity Game View.")
+                : existingGameView;
             try
             {
                 ConduitEditorWindowDocking.DockAsTab(dockedGameView, target);
@@ -158,7 +183,7 @@ namespace Conduit
             }
             catch
             {
-                if (existingGameView is null)
+                if (createdGameView)
                     dockedGameView.Close();
 
                 throw;

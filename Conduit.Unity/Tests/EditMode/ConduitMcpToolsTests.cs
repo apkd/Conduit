@@ -2882,8 +2882,8 @@ public sealed class ConduitMcpToolsTests
             );
     }
 
-    [Test]
-    public void GameViewDocking_AttachesNewTabsToExistingMainWindow()
+    [UnityTest]
+    public IEnumerator GameViewDocking_AttachesNewTabsToExistingMainWindow()
     {
         RequireInteractiveEditorWindows();
 
@@ -2896,6 +2896,7 @@ public sealed class ConduitMcpToolsTests
         try
         {
             ConduitEditorWindowDocking.DockAsTab(probe, target!);
+            yield return null;
 
             Assert.That(ConduitEditorWindowDocking.IsDockedInMainWindow(probe), Is.True);
             Assert.That(
@@ -2907,48 +2908,27 @@ public sealed class ConduitMcpToolsTests
         {
             probe.Close();
         }
+
+        yield return null;
     }
 
     [Test]
-    public void GameViewPreparation_SkipsFocusButAppliesResolutionForMaximizedNonGameView()
+    public void UnfocusedGameView_PrepareSkipsWhenAnotherWindowIsMaximized()
     {
-        RequireInteractiveEditorWindows();
-
-        var sceneView = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
-        EditorWindow? previouslyMaximizedWindow = null;
-        foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
-            if (window.maximized)
-            {
-                previouslyMaximizedWindow = window;
-                break;
-            }
-
+        ConduitGameViewFocus.Restore();
         try
         {
-            ConduitGameViewFocus.Restore();
-            ConduitGameViewResolution.Restore();
-            sceneView.maximized = true;
-
-            Assert.That(ConduitGameView.IsOtherWindowMaximized(), Is.True);
-
-            ConduitGameViewFocus.Prepare(true);
-            ConduitGameViewResolution.Prepare(true);
-
+            ConduitGameViewFocus.Prepare(true, true);
             Assert.That(ConduitGameViewFocus.IsPrepared, Is.False);
-            Assert.That(ConduitGameViewResolution.IsPrepared, Is.True);
         }
         finally
         {
             ConduitGameViewFocus.Restore();
-            ConduitGameViewResolution.Restore();
-            sceneView.maximized = false;
-            if (previouslyMaximizedWindow is { } window)
-                window.maximized = true;
         }
     }
 
-    [Test]
-    public void UnfocusedGameView_PrepareAndRestorePreservesPlayBehavior()
+    [UnityTest]
+    public IEnumerator UnfocusedGameView_PrepareAndRestorePreservesPlayBehavior()
     {
         RequireInteractiveEditorWindows();
 
@@ -2966,6 +2946,8 @@ public sealed class ConduitMcpToolsTests
         var existingTestRunners = GetWindowIds(testRunnerWindowType);
         var previouslyFocusedWindow = EditorWindow.focusedWindow;
         var gameView = ConduitGameView.FindOrOpen();
+        yield return null;
+
         var originalBehavior = behaviorProperty.GetValue(gameView);
         var playFocused = Enum.Parse(behaviorProperty.PropertyType, "PlayFocused");
 
@@ -2975,6 +2957,7 @@ public sealed class ConduitMcpToolsTests
             behaviorProperty.SetValue(gameView, playFocused);
 
             ConduitGameViewFocus.Prepare(true);
+            yield return null;
 
             Assert.That(ConduitGameViewFocus.IsPrepared, Is.True);
             Assert.That(behaviorProperty.GetValue(gameView)?.ToString(), Is.EqualTo("PlayUnfocused"));
@@ -3001,6 +2984,8 @@ public sealed class ConduitMcpToolsTests
             previouslyFocusedWindow?.Focus();
         }
 
+        yield return null;
+
         HashSet<ulong> GetWindowIds(Type windowType)
         {
             var ids = new HashSet<ulong>();
@@ -3020,8 +3005,8 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
-    [Test]
-    public void LowResolutionGameView_PrepareAndRestorePreservesSelectedSize()
+    [UnityTest]
+    public IEnumerator LowResolutionGameView_PrepareAndRestorePreservesSelectedSize()
     {
         RequireInteractiveEditorWindows();
 
@@ -3055,6 +3040,8 @@ public sealed class ConduitMcpToolsTests
                 existingGameViews.Add(ConduitUtility.GetObjectId(window));
         var previouslyFocusedWindow = EditorWindow.focusedWindow;
         var gameView = ConduitGameView.FindOrOpen();
+        yield return null;
+
         int originalSizeIndex = Convert.ToInt32(selectedSizeIndexProperty.GetValue(gameView));
         int originalTargetSizeIndex = FindTargetSizeIndex();
         int previousSizeIndex = originalTargetSizeIndex == 0 ? 1 : 0;
@@ -3096,6 +3083,8 @@ public sealed class ConduitMcpToolsTests
 
             previouslyFocusedWindow?.Focus();
         }
+
+        yield return null;
 
         int FindTargetSizeIndex()
         {

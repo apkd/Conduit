@@ -52,8 +52,11 @@ namespace Conduit
             => Prepare(ConduitSettings.instance.UnfocusedGameView);
 
         internal static void Prepare(bool enabled)
+            => Prepare(enabled, ConduitGameView.IsOtherWindowMaximized());
+
+        internal static void Prepare(bool enabled, bool isOtherWindowMaximized)
         {
-            if (!enabled || IsPrepared || ConduitGameView.IsOtherWindowMaximized())
+            if (!enabled || IsPrepared || isOtherWindowMaximized)
                 return;
 
             try
