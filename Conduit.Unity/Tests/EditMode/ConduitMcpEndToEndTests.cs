@@ -624,11 +624,11 @@ public sealed class ConduitMcpEndToEndTests
                 )
             );
 
-            Assert.That(first.Text, Is.EqualTo($"# {snippetFileName}\n1"));
-            Assert.That(rerun.Text, Is.EqualTo($"# {snippetFileName}\n2"));
+            Assert.That(first.Text, Is.EqualTo($"NAME: `{snippetFileName}`\n1"));
+            Assert.That(rerun.Text, Is.EqualTo($"NAME: `{snippetFileName}`\n2"));
             Assert.That(File.GetLastWriteTimeUtc(assemblyPath), Is.EqualTo(assemblyWriteTime));
             Assert.That(missing.Text, Does.Contain("was not found"));
-            Assert.That(missing.Text, Does.Not.StartWith("# "));
+            Assert.That(missing.Text, Does.Not.StartWith("NAME: `"));
         }
         finally
         {
@@ -709,11 +709,11 @@ public sealed class ConduitMcpEndToEndTests
         AssertSuccessful(mixed, "Public:Main Camera");
         AssertSuccessful(cachedMixed, "Public:Main Camera");
         AssertSuccessful(noResult);
-        Assert.That(noResult.Text, Is.EqualTo($"# {GetSnippetFileName(noResult.Text)}"));
+        Assert.That(noResult.Text, Is.EqualTo($"NAME: `{GetSnippetFileName(noResult.Text)}`"));
         Assert.That(nestedFailure.Text, Does.Contain("CS0126"));
         Assert.That(lambdaFailure.Text, Does.Contain("CS0126"));
-        Assert.That(nestedFailure.Text, Does.Not.StartWith("# "));
-        Assert.That(lambdaFailure.Text, Does.Not.StartWith("# "));
+        Assert.That(nestedFailure.Text, Does.Not.StartWith("NAME: `"));
+        Assert.That(lambdaFailure.Text, Does.Not.StartWith("NAME: `"));
     }
 
     [Test]
@@ -783,7 +783,7 @@ public sealed class ConduitMcpEndToEndTests
             Assert.That(GetSnippetFileName(runtimeFailure.Text), Is.EqualTo(snippetFileName));
             AssertTextContainsAny(runtimeFailure.Text, "FormatException", "Input string");
             AssertTextContainsAny(compileFailure.Text, "Namespace declarations are not supported", "execute_code(");
-            Assert.That(compileFailure.Text, Does.Not.StartWith("# "));
+            Assert.That(compileFailure.Text, Does.Not.StartWith("NAME: `"));
             Assert.That(unsupportedCompileFailure.Text, Does.Contain("bindingFlags"));
             Assert.That(unsupportedCompileFailure.Text, Does.Not.Contain("Retried with inferred namespaces"));
             Assert.That(retryFailure.Text, Does.Contain("Retried with inferred namespaces: System.Reflection."));
@@ -1041,9 +1041,12 @@ public sealed class ConduitMcpEndToEndTests
 
     static string GetSnippetFileName(string text)
     {
-        Assert.That(text, Does.StartWith("# "));
+        const string prefix = "NAME: `";
+        Assert.That(text, Does.StartWith(prefix));
         var lineEnd = text.IndexOf('\n');
-        var fileName = lineEnd < 0 ? text[2..] : text[2..lineEnd];
+        var nameEnd = lineEnd < 0 ? text.Length - 1 : lineEnd - 1;
+        Assert.That(text[nameEnd], Is.EqualTo('`'));
+        var fileName = text[prefix.Length..nameEnd];
         Assert.That(fileName, Does.Match("^[1-9][0-9]*\\.cs$"));
         return fileName;
     }

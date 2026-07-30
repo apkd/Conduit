@@ -20,7 +20,7 @@ public sealed class ToolResponseFormatterTests
     }
 
     [Test]
-    public async Task NamedSuccessPrefixesRawPayload()
+    public async Task NamedSuccessLabelsRawPayload()
     {
         var text = ToolResponseFormatter.Format(
             new()
@@ -31,7 +31,7 @@ public sealed class ToolResponseFormatterTests
             }
         );
 
-        await Assert.That(text).IsEqualTo("# 17.cs\nhello");
+        await Assert.That(text).IsEqualTo("NAME: `17.cs`\nhello");
     }
 
     [Test]
@@ -45,11 +45,11 @@ public sealed class ToolResponseFormatterTests
             }
         );
 
-        await Assert.That(text).IsEqualTo("# 17.cs");
+        await Assert.That(text).IsEqualTo("NAME: `17.cs`");
     }
 
     [Test]
-    public async Task NamedRuntimeFailurePrefixesFormattedException()
+    public async Task NamedRuntimeFailureLabelsFormattedException()
     {
         var text = ToolResponseFormatter.Format(
             new()
@@ -64,7 +64,7 @@ public sealed class ToolResponseFormatterTests
             }
         );
 
-        await Assert.That(text).IsEqualTo("# 17.cs\nInvalidOperationException: boom");
+        await Assert.That(text).IsEqualTo("NAME: `17.cs`\nInvalidOperationException: boom");
     }
 
     [Test]

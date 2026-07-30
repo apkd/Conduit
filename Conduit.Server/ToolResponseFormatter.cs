@@ -47,8 +47,9 @@ static class ToolResponseFormatter
         var builder = ZString.CreateStringBuilder();
         try
         {
-            builder.Append("# ");
+            builder.Append("NAME: `");
             builder.Append(displayName);
+            builder.Append('`');
             if (!string.IsNullOrEmpty(content))
             {
                 builder.Append('\n');
