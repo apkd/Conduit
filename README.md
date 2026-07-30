@@ -21,7 +21,7 @@ A Unity MCP server that stays out of the way of your coding agent.
 
 - Robust: survives crashes, restarts, assembly reloads, and handles multiple agents and Unity instances.
 - Context-efficient: conserves the agent's context window and saves tokens. Small number of versatile tools.
-- Simple setup: one Unity package, one server exe, editor config wizard. No dependencies, no pollution.
+- Simple setup: one Unity package, one server exe, automated setup wizard. No dependencies, no pollution.
 - Supports Linux and Windows.
 
 > [!WARNING]
@@ -31,44 +31,72 @@ A Unity MCP server that stays out of the way of your coding agent.
 
 # Installation
 
-Add the package to your project by Git URL:
+## 1. Install the Unity package
+
+- Window ⟶ Package Manager ⟶ `+` ⟶ *Install package from git URL*
+- Paste this URL (the `release` branch points at the latest commit that passed all tests)
 
 ```text
 https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release
 ```
 
-You can also declare it directly in `Packages/manifest.json`:
+- Or you can also declare it directly in `Packages/manifest.json` instead:
 
 ```json
 "dependencies": {
   "dev.tryfinally.conduit": "https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release",
 ```
 
-## Automatic setup
+## 2a. Just use the setup wizard
 
 > [!TIP]
 > The Unity package includes a wizard for setting up the MCP server.
-> This downloads the server executable and configures your installed code editors.
+> This lets you download the server executable and configure your installed code editors in just a few clicks.
 
-***Preferences → Conduit***
+You can find the setup wizard in Unity here:
 
-## Manual setup
+***Edit → Preferences... → Conduit***
 
-<details>
-  <summary><h4>Build instructions and editor configuration</h4></summary>
+## 2b. Install the MCP server
 
-Install the MCP server first. You can either:
+> [!TIP]
+> If you used the setup wizard, you can skip this step.
 
-- Download the Windows or Linux executable from the [releases page](https://github.com/apkd/Conduit/releases/latest), or
-- Build it with `dotnet publish Conduit.Server/Conduit.Server.csproj -c Release`.
-
-Move the executable to a stable path, then configure your editor:
+First, you need to grab the MCP server executable, and put it in your project (for a project-local installation) or some stable location on your computer (for a user-level setup).
 
 <details>
-  <summary>NixOS</summary>
+  <summary><b>Windows</b></summary>
 
-The `release` tag is updated in place. When upgrading these packages, update `version` and `hash` together.
-Setting `hash = pkgs.lib.fakeHash;` makes Nix print the current SRI hash during the next build.
+Download [`conduit-win-x64.exe`](https://github.com/apkd/Conduit/releases/latest/download/conduit-win-x64.exe) and move it to the location where you want to keep it.
+For example, this PowerShell command installs it as `conduit.exe` in your user profile:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\Conduit"
+Invoke-WebRequest "https://github.com/apkd/Conduit/releases/latest/download/conduit-win-x64.exe" -OutFile "$HOME\Conduit\conduit.exe"
+Unblock-File "$HOME\Conduit\conduit.exe"
+```
+
+</details>
+
+<details>
+  <summary><b>Linux</b></summary>
+
+Download [`conduit-linux-x64`](https://github.com/apkd/Conduit/releases/latest/download/conduit-linux-x64), place it in the location where you want to keep it, and make it executable.
+For example, these commands install it as `conduit` in `~/.local/bin`:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+curl -fL "https://github.com/apkd/Conduit/releases/latest/download/conduit-linux-x64" -o "$HOME/.local/bin/conduit"
+chmod +x "$HOME/.local/bin/conduit"
+```
+
+</details>
+
+<details>
+  <summary><b>NixOS</b></summary>
+
+When upgrading these packages, update `version` and `hash` together.
+Setting `hash = pkgs.lib.fakeHash;` makes Nix print the current hash during the next build.
 
 ##### stdio
 
@@ -207,6 +235,30 @@ url = "http://127.0.0.1:5080"
 ```
 
 </details>
+
+<details>
+  <summary><b>Manual build instructions</b></summary>
+
+Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and the [Native AOT prerequisites](https://learn.microsoft.com/dotnet/core/deploying/native-aot/#prerequisites) for your operating system.
+Then clone this repository and publish the server:
+
+```bash
+dotnet publish Conduit.Server/Conduit.csproj -c Release
+```
+
+The executable is written to `Conduit.Server/publish/win-x64/conduit.exe` on Windows or `Conduit.Server/publish/linux-x64/conduit` on Linux.
+
+</details>
+
+## 3. Configure your code editor
+
+> [!TIP]
+> If you used the setup wizard, you can skip this step.
+
+Replace the executable paths in the examples below with the path where you installed the MCP server.
+
+<details>
+  <summary><h4>Select your editor...</h4></summary>
 
 <details>
   <summary>Codex</summary>
@@ -1328,9 +1380,9 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 #### Object search, reading, and editing:
 Together, these tools enable agents to find, read, and write any asset, GameObject, or component.
 
+- ***`help`***: additional usage instructions for the agent
 - ***`search`***: finds objects and assets
-- ***`help`***: search syntax and examples
-- ***`show`***: displays object properties
+- ***`show`***: displays the object in a readable format
 - ***`to_json`***: read object in JSON format
 - ***`from_json_overwrite`***: overwrite object properties with JSON
 - ***`find_missing_scripts`***: scans objects for invalid/deleted scripts
@@ -1358,13 +1410,15 @@ These inspect runtime performance and Burst output.
 
 ## Agent instructions
 
-The tool descriptions themselves should be enough to get started.
+The tool descriptions themselves should be enough to get started. Your coding agent should be able to use Unity out-of-the-box.
 
-If you really want to, you can include something like this in your agent instructions:
+If you want to add some additional instructions in your `AGENTS.md` file, you can start with this:
 
 ```
 Use the Unity MCP tools to prototype solutions, validate code compilation and run tests.
 Invoke the `restart` tool in case of instability.
 Don't build the Unity solution manually; simply call `refresh_asset_database` after making any code changes.
 When dealing with assets and GameObjects, `search`, `show`, `to_json`, `from_json_overwrite`, `find_missing_scripts`, `get_dependencies`, `find_references_to` and `reimport_assets` are your friends.
+When working with code, you can use `reflect` to browse types and members, and `view_burst_asm` to validate Burst-compiled code.
+Use `help` once to get instructions about the common query format used in `search`, `show`, `Search<T>` calls in `execute_code`, etc.
 ```
