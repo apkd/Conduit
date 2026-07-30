@@ -432,6 +432,113 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    public async Task RememberedEditorLogPathOnlyAppliesToTheEditorThatReportedIt()
+    {
+        var projectPath = CreateProjectPath();
+        var cachedLogPath = Path.Combine(projectPath, "Logs", "Cached.log");
+        var expectedLogPath = Path.GetFullPath(Path.Combine(projectPath, "Logs", "Editor.log"));
+        var inspector = new UnityProjectEnvironmentInspector();
+        inspector.RememberEditorLogPath(projectPath, cachedLogPath, processId: 1234);
+
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            ProjectPathNormalizer.Normalize(projectPath),
+            isUnityProject: true,
+            editorVersion: "6000.5.0f1",
+            lockfileState: UnityProjectLockfileState.Locked,
+            runningUnityProcessCount: 1,
+            matchedProcess: new(
+                processId: 5678,
+                executablePath: null,
+                commandLine: $"-projectPath \"{projectPath}\""
+            )
+        );
+
+        await Assert.That(inspector.ResolveEditorLogPath(snapshot)).IsEqualTo(expectedLogPath);
+        await Assert.That(
+                inspector.ResolveEditorLogPath(
+                    new(
+                        snapshot.ProjectPath,
+                        snapshot.IsUnityProject,
+                        snapshot.EditorVersion,
+                        UnityProjectLockfileState.Missing,
+                        runningUnityProcessCount: 0,
+                        matchedProcess: null
+                    )
+                )
+            )
+            .IsEqualTo(expectedLogPath);
+    }
+
+    [Test]
+    public async Task ConfiguredEditorLogPathOverridesRememberedStatusPath()
+    {
+        var projectPath = CreateProjectPath();
+        var configuredLogPath = Path.Combine(projectPath, "Logs", "Configured.log");
+        var inspector = new UnityProjectEnvironmentInspector();
+        inspector.RememberEditorLogPath(
+            projectPath,
+            Path.Combine(projectPath, "Logs", "Status.log"),
+            processId: 1234
+        );
+
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            ProjectPathNormalizer.Normalize(projectPath),
+            isUnityProject: true,
+            editorVersion: "6000.4.0f1",
+            lockfileState: UnityProjectLockfileState.Locked,
+            runningUnityProcessCount: 1,
+            matchedProcess: new(
+                processId: 1234,
+                executablePath: null,
+                commandLine: $"-projectPath \"{projectPath}\" -logFile \"{configuredLogPath}\""
+            )
+        );
+
+        await Assert.That(inspector.ResolveEditorLogPath(snapshot))
+            .IsEqualTo(Path.GetFullPath(configuredLogPath));
+    }
+
+    [Test]
+    public async Task RememberedEditorLogPathFeedsOfflineStatusDiagnostics()
+    {
+        const string compilationError =
+            "Assets/Broken.cs(4,8): error CS0103: The name 'Missing' does not exist in the current context";
+        var projectPath = CreateProjectPath();
+        var logPath = CreateTempLog(
+            $"""
+             ## Script Compilation Error
+             {compilationError}
+             """
+        );
+
+        try
+        {
+            var inspector = new UnityProjectEnvironmentInspector();
+            inspector.RememberEditorLogPath(projectPath, logPath, processId: 1234);
+            var snapshot = new UnityProjectEnvironmentSnapshot(
+                ProjectPathNormalizer.Normalize(projectPath),
+                isUnityProject: true,
+                editorVersion: "6000.4.0f1",
+                lockfileState: UnityProjectLockfileState.Missing,
+                runningUnityProcessCount: 0,
+                matchedProcess: null
+            );
+
+            var report = inspector.FormatPingFailure(
+                snapshot,
+                ToolExecutionResult.NotConnected(projectPath)
+            );
+
+            await Assert.That(report).Contains($"Editor log: {logPath}");
+            await Assert.That(report).Contains(compilationError);
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
+    [Test]
     public async Task ReadCompilationDiagnosticsDeduplicatesRepeatedErrorsInLatestBlock()
     {
         const string duplicateError = @"Assets\ConduitManagedFieldBurstJob.cs(4,8): error CS1029: #error: 'CONDUIT_INTENTIONAL_SAFE_MODE_TEST'";

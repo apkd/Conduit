@@ -430,10 +430,7 @@ public sealed class UnityProjectOperations(
         if (!TryParsePingSnapshot(execution, out var pingSnapshot))
             return null;
 
-        var fallbackEditorLogPath = string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath)
-            ? environmentInspector.ResolveEditorLogPath(environmentInspector.Inspect(normalizedProjectPath))
-            : null;
-        var report = environmentInspector.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
+        var report = BuildPingReport(normalizedProjectPath, pingSnapshot);
 
         await UpdateProjectRegistryAsync(normalizedProjectPath, execution.Handshake, ct);
         return report;
@@ -937,12 +934,7 @@ public sealed class UnityProjectOperations(
     string BuildStatusResponse(string normalizedProjectPath, BridgeClientResult execution, UnityProjectEnvironmentSnapshot? snapshot = null, TimeSpan? statusTimeout = null)
     {
         if (TryParsePingSnapshot(execution, out var pingSnapshot))
-        {
-            var fallbackEditorLogPath = string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath)
-                ? environmentInspector.ResolveEditorLogPath(snapshot ?? environmentInspector.Inspect(normalizedProjectPath))
-                : null;
-            return environmentInspector.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
-        }
+            return BuildPingReport(normalizedProjectPath, pingSnapshot, snapshot);
 
         var currentSnapshot = snapshot ?? environmentInspector.Inspect(normalizedProjectPath);
         var effectiveHandshake = execution.Handshake;
@@ -1085,6 +1077,27 @@ public sealed class UnityProjectOperations(
 
         pingSnapshot = new();
         return false;
+    }
+
+    string BuildPingReport(
+        string normalizedProjectPath,
+        UnityPingSnapshot pingSnapshot,
+        UnityProjectEnvironmentSnapshot? snapshot = null
+    )
+    {
+        environmentInspector.RememberEditorLogPath(
+            normalizedProjectPath,
+            pingSnapshot.EditorLogPath,
+            pingSnapshot.EditorProcessId
+        );
+
+        var fallbackEditorLogPath = string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath)
+            ? environmentInspector.ResolveEditorLogPath(
+                snapshot ?? environmentInspector.Inspect(normalizedProjectPath)
+            )
+            : null;
+
+        return environmentInspector.FormatPingReport(pingSnapshot, fallbackEditorLogPath);
     }
 
     // one MCP status call may poll Unity repeatedly; only its first delivered command is usage.

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace Conduit;
@@ -5,6 +6,8 @@ namespace Conduit;
 public sealed class UnityProjectEnvironmentInspector
 {
     readonly UnityProjectEnvironmentProbe probe = new();
+    readonly ConcurrentDictionary<string, EditorLogPathObservation> editorLogPaths
+        = new(StringComparer.OrdinalIgnoreCase);
 
     internal UnityProjectEnvironmentSnapshot Inspect(string projectPath) =>
         probe.Inspect(projectPath);
@@ -12,13 +15,14 @@ public sealed class UnityProjectEnvironmentInspector
     internal string FormatPingFailure(UnityProjectEnvironmentSnapshot snapshot, ToolExecutionResult? bridgeResult)
     {
         var processRuntime = probe.TryReadProcessRuntime(snapshot.MatchedProcess?.ProcessId);
-        var compilationDiagnostics = probe.ReadLatestCompilationDiagnostics(snapshot);
+        var editorLogPath = ResolveEditorLogPath(snapshot);
+        var compilationDiagnostics = probe.ReadLatestCompilationDiagnostics(editorLogPath);
         return UnityProjectStatusFormatter.FormatPingFailure(
             snapshot,
             bridgeResult,
             processRuntime,
             compilationDiagnostics,
-            probe.ResolveEditorLogPath(snapshot)
+            editorLogPath
         );
     }
 
@@ -34,7 +38,7 @@ public sealed class UnityProjectEnvironmentInspector
             handshake,
             processRuntime,
             compilationDiagnostics,
-            probe.ResolveEditorLogPath(snapshot),
+            ResolveEditorLogPath(snapshot),
             diagnostic
         );
 
@@ -47,8 +51,37 @@ public sealed class UnityProjectEnvironmentInspector
     internal string GetRestartLogPath(string projectPath) =>
         probe.GetRestartLogPath(projectPath);
 
-    internal string? ResolveEditorLogPath(UnityProjectEnvironmentSnapshot snapshot) =>
-        probe.ResolveEditorLogPath(snapshot);
+    internal void RememberEditorLogPath(string projectPath, string? editorLogPath, int? processId)
+    {
+        if (string.IsNullOrWhiteSpace(editorLogPath))
+            return;
+
+        SetEditorLogPath(projectPath, editorLogPath, processId);
+    }
+
+    internal string? ResolveEditorLogPath(UnityProjectEnvironmentSnapshot snapshot)
+    {
+        var matchedProcess = snapshot.MatchedProcess;
+        if (matchedProcess is not null
+            && UnityProjectEnvironmentProbe.TryExtractLogFilePathFromCommandLine(matchedProcess.CommandLine) is not null)
+        {
+            var configuredPath = probe.ResolveEditorLogPath(snapshot);
+            SetEditorLogPath(snapshot.ProjectPath, configuredPath, matchedProcess.ProcessId);
+            return configuredPath;
+        }
+
+        // observations belong to the editor process that reported them; once offline,
+        // the latest observation remains the best available diagnostic location.
+        if (editorLogPaths.TryGetValue(snapshot.ProjectPath, out var observation)
+            && (matchedProcess is null || observation.ProcessId == matchedProcess.ProcessId))
+            return observation.Path;
+
+        var resolvedPath = probe.ResolveEditorLogPath(snapshot);
+        if (matchedProcess is not null)
+            SetEditorLogPath(snapshot.ProjectPath, resolvedPath, matchedProcess.ProcessId);
+
+        return resolvedPath;
+    }
 
     internal bool HasConduitPackageSignal(string projectPath) =>
         probe.HasConduitPackageSignal(projectPath);
@@ -66,11 +99,22 @@ public sealed class UnityProjectEnvironmentInspector
         probe.ReadLatestCompilationDiagnostics(logPath);
 
     internal CompilationDiagnosticSummary ReadLatestCompilationDiagnostics(UnityProjectEnvironmentSnapshot snapshot) =>
-        probe.ReadLatestCompilationDiagnostics(snapshot);
+        probe.ReadLatestCompilationDiagnostics(ResolveEditorLogPath(snapshot));
 
     internal int? ResolveEditorProcessId(UnityProjectEnvironmentSnapshot snapshot, BridgeProjectHandshake? handshake = null) =>
         probe.ResolveEditorProcessId(snapshot, handshake);
 
     internal UnityEditorProcessRuntimeInfo? TryReadProcessRuntime(int? processId) =>
         probe.TryReadProcessRuntime(processId);
+
+    void SetEditorLogPath(string projectPath, string? editorLogPath, int? processId)
+    {
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        if (normalizedProjectPath.Length == 0)
+            return;
+
+        editorLogPaths[normalizedProjectPath] = new(editorLogPath, processId is > 0 ? processId : null);
+    }
+
+    readonly record struct EditorLogPathObservation(string? Path, int? ProcessId);
 }

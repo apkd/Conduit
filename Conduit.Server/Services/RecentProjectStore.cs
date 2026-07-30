@@ -61,6 +61,7 @@ public sealed class RecentProjectStore(ConduitOptions options, TimeProvider time
                 ProjectPath = normalizedProjectPath,
                 DisplayName = record.DisplayName,
                 UnityVersion = record.UnityVersion,
+                EditorLogPath = record.EditorLogPath,
                 LastSeenUtc = record.LastSeenUtc,
             };
 
@@ -91,6 +92,9 @@ public sealed class RecentProjectRecord
     public string DisplayName { get; set; } = "";
 
     public string UnityVersion { get; set; } = "";
+
+    /// <summary>The last editor log path reported for this project.</summary>
+    public string EditorLogPath { get; set; } = "";
 
     public DateTimeOffset LastSeenUtc { get; set; }
 }

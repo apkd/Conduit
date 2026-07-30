@@ -8,6 +8,7 @@ namespace Conduit;
 public sealed class UnityProjectRegistry
 {
     readonly RecentProjectStore recentProjectStore;
+    readonly UnityProjectEnvironmentInspector environmentInspector;
     readonly ConduitOptions options;
     readonly TimeProvider timeProvider;
     readonly ILogger<UnityProjectRegistry> logger;
@@ -15,12 +16,14 @@ public sealed class UnityProjectRegistry
 
     public UnityProjectRegistry(
         RecentProjectStore recentProjectStore,
+        UnityProjectEnvironmentInspector environmentInspector,
         ConduitOptions options,
         TimeProvider timeProvider,
         ILogger<UnityProjectRegistry> logger
     )
     {
         this.recentProjectStore = recentProjectStore;
+        this.environmentInspector = environmentInspector;
         this.options = options;
         this.timeProvider = timeProvider;
         this.logger = logger;
@@ -29,7 +32,10 @@ public sealed class UnityProjectRegistry
         {
             var session = new ProjectSession(record);
             if (session.ProjectPath.Length > 0)
+            {
                 projects[session.ProjectPath] = session;
+                environmentInspector.RememberEditorLogPath(session.ProjectPath, record.EditorLogPath, processId: null);
+            }
         }
     }
 
@@ -101,6 +107,12 @@ public sealed class UnityProjectRegistry
         if (string.IsNullOrWhiteSpace(handshake.DisplayName))
             handshake.DisplayName = Path.GetFileName(handshake.ProjectPath);
 
+        environmentInspector.RememberEditorLogPath(
+            handshake.ProjectPath,
+            handshake.EditorLogPath,
+            handshake.EditorProcessId
+        );
+
         var project = projects.GetOrAdd(handshake.ProjectPath, static path => new(path));
         if (!project.UpdateMetadata(handshake))
             return;
@@ -110,6 +122,26 @@ public sealed class UnityProjectRegistry
         );
 
         await PersistAsync(ct);
+    }
+
+    internal async Task RememberEditorLogPathAsync(
+        string projectPath,
+        string? editorLogPath,
+        int? processId,
+        CancellationToken ct
+    )
+    {
+        if (string.IsNullOrWhiteSpace(editorLogPath))
+            return;
+
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        if (normalizedProjectPath.Length == 0)
+            return;
+
+        environmentInspector.RememberEditorLogPath(normalizedProjectPath, editorLogPath, processId);
+        var project = projects.GetOrAdd(normalizedProjectPath, static path => new(path));
+        if (project.UpdateEditorLogPath(editorLogPath))
+            await PersistAsync(ct);
     }
 
     internal async Task PersistAsync(CancellationToken ct)

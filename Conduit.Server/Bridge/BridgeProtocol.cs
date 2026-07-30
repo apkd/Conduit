@@ -98,6 +98,9 @@ public sealed class BridgeProjectHandshake
 
     public int EditorProcessId { get; set; }
 
+    /// <summary>The effective editor log path for this Unity process.</summary>
+    public string EditorLogPath { get; set; } = string.Empty;
+
     public string SessionInstanceId { get; set; } = string.Empty;
 
     public DateTimeOffset LastSeenUtc { get; set; }

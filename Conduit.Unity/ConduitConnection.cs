@@ -306,6 +306,7 @@ namespace Conduit
                 display_name = Path.GetFileName(projectPath),
                 unity_version = Application.unityVersion,
                 editor_process_id = Process.GetCurrentProcess().Id,
+                editor_log_path = Application.consoleLogPath,
                 session_instance_id = sessionInstanceId,
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
             };

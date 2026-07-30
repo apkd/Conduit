@@ -170,6 +170,8 @@ namespace Conduit
         public string display_name = string.Empty;
         public string unity_version = string.Empty;
         public int editor_process_id;
+        /// <summary>The effective editor log path for this Unity process.</summary>
+        public string editor_log_path = string.Empty;
         public string session_instance_id = string.Empty;
         public string last_seen_utc = string.Empty;
     }

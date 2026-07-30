@@ -7,7 +7,8 @@ namespace Conduit;
 
 public sealed class UnityEditorProcessController(
     UnityBridgeClient bridgeClient,
-    UnityProjectEnvironmentInspector environmentInspector)
+    UnityProjectEnvironmentInspector environmentInspector,
+    UnityProjectRegistry projectRegistry)
 {
     internal const string RestartedProcessExitedDiagnostic = "The restarted Unity process has shut down or crashed.";
     internal const string RestartStartedUtcTicksEnvironmentVariable =
@@ -103,6 +104,12 @@ public sealed class UnityEditorProcessController(
                 builder.AppendLine($"Preserved {preservedBackupPaths.Length} scene backup(s) in Assets/_Recovery.");
 
             restartLogPath = environmentInspector.GetRestartLogPath(snapshot.ProjectPath);
+            await projectRegistry.RememberEditorLogPathAsync(
+                snapshot.ProjectPath,
+                restartLogPath,
+                processId: null,
+                ct
+            );
             if (Path.GetDirectoryName(restartLogPath) is { Length: > 0 } logDirectoryPath)
                 Directory.CreateDirectory(logDirectoryPath);
             PrepareRestartLogPath(restartLogPath);

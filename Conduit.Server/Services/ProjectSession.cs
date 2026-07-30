@@ -7,6 +7,7 @@ sealed class ProjectSession
     bool isReachable;
     int queuedCount;
     string currentStatus = ProjectStatus.Offline;
+    string editorLogPath = string.Empty;
 
     public ProjectSession(string projectPath)
     {
@@ -22,6 +23,7 @@ sealed class ProjectSession
         DisplayName = record.DisplayName;
         UnityVersion = record.UnityVersion;
         LastSeenUtc = record.LastSeenUtc;
+        editorLogPath = record.EditorLogPath;
     }
 
     public string ProjectPath { get; }
@@ -39,14 +41,19 @@ sealed class ProjectSession
             var normalizedDisplayName = string.IsNullOrWhiteSpace(handshake.DisplayName)
                 ? Path.GetFileName(ProjectPath)
                 : handshake.DisplayName;
+            var normalizedEditorLogPath = string.IsNullOrWhiteSpace(handshake.EditorLogPath)
+                ? editorLogPath
+                : handshake.EditorLogPath;
 
             var changed = DisplayName != normalizedDisplayName
                           || UnityVersion != handshake.UnityVersion
+                          || editorLogPath != normalizedEditorLogPath
                           || LastSeenUtc != handshake.LastSeenUtc
                           || !isReachable;
 
             DisplayName = normalizedDisplayName;
             UnityVersion = handshake.UnityVersion;
+            editorLogPath = normalizedEditorLogPath;
             LastSeenUtc = handshake.LastSeenUtc;
             isReachable = true;
             UpdateStatusUnderLock();
@@ -147,8 +154,21 @@ sealed class ProjectSession
                 ProjectPath = ProjectPath,
                 DisplayName = DisplayName,
                 UnityVersion = UnityVersion,
+                EditorLogPath = editorLogPath,
                 LastSeenUtc = LastSeenUtc,
             };
+        }
+    }
+
+    public bool UpdateEditorLogPath(string editorLogPath)
+    {
+        lock (gate)
+        {
+            if (this.editorLogPath == editorLogPath)
+                return false;
+
+            this.editorLogPath = editorLogPath;
+            return true;
         }
     }
 
