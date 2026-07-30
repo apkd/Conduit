@@ -10,6 +10,8 @@ namespace Conduit
     {
         const string ActiveOperationStateKey = "Conduit.ActiveOperation";
         const string PendingResultStateKey = "Conduit.PendingResult";
+        // test completion can precede the idle window in which the result is safe to send
+        const string PendingTestCompletionStateKey = "Conduit.PendingTestCompletion";
 
         public static void SaveActiveOperation(PendingOperationState operation, BridgeCommandKind commandKind)
         {
@@ -96,8 +98,14 @@ namespace Conduit
                };
 
         public static PersistedPendingResultState? RestorePendingResult()
+            => RestoreResult(PendingResultStateKey);
+
+        public static PersistedPendingResultState? RestorePendingTestCompletion()
+            => RestoreResult(PendingTestCompletionStateKey);
+
+        static PersistedPendingResultState? RestoreResult(string stateKey)
         {
-            if (SessionState.GetString(PendingResultStateKey, string.Empty) is not { Length: > 0 } payload)
+            if (SessionState.GetString(stateKey, string.Empty) is not { Length: > 0 } payload)
                 return null;
 
             PersistedPendingResultState? pendingResult;
@@ -107,13 +115,13 @@ namespace Conduit
             }
             catch (ArgumentException)
             {
-                ClearPendingResult();
+                SessionState.EraseString(stateKey);
                 return null;
             }
 
             if (pendingResult?.Result == null || string.IsNullOrWhiteSpace(pendingResult.RequestID))
             {
-                ClearPendingResult();
+                SessionState.EraseString(stateKey);
                 return null;
             }
 
@@ -123,14 +131,20 @@ namespace Conduit
         public static void SavePendingResult(PersistedPendingResultState pendingResult)
             => SessionState.SetString(PendingResultStateKey, JsonUtility.ToJson(pendingResult));
 
+        public static void SavePendingTestCompletion(PersistedPendingResultState pendingResult)
+            => SessionState.SetString(PendingTestCompletionStateKey, JsonUtility.ToJson(pendingResult));
+
         public static void ClearActiveOperation()
             => SessionState.EraseString(ActiveOperationStateKey);
 
         public static void ClearPendingResult()
             => SessionState.EraseString(PendingResultStateKey);
 
+        public static void ClearPendingTestCompletion()
+            => SessionState.EraseString(PendingTestCompletionStateKey);
+
         // editor-owned asynchronous work can survive connection loss or domain reloads
-        static bool CanRestore(BridgeCommandKind commandKind)
+        internal static bool CanRestore(BridgeCommandKind commandKind)
             => BridgeCommandKinds.IsEditorMode(commandKind)
                || BridgeCommandKinds.IsAssetImport(commandKind)
                || BridgeCommandKinds.IsTest(commandKind);

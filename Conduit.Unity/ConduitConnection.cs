@@ -276,7 +276,21 @@ namespace Conduit
             ConduitToolRunner.PumpQueuedCommands();
         }
 
-        static void OnBeforeAssemblyReload() => Stop("Assembly reload starting");
+        static void OnBeforeAssemblyReload()
+        {
+            try
+            {
+                ConduitToolRunner.PrepareForAssemblyReload();
+            }
+            catch (Exception exception)
+            {
+                ConduitDiagnostics.Error("Failed to checkpoint the active MCP command before assembly reload.", exception);
+            }
+            finally
+            {
+                Stop("Assembly reload starting");
+            }
+        }
 
         static void OnEditorQuitting() => Stop("Editor quitting");
 

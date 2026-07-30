@@ -16,6 +16,7 @@ namespace Conduit
     {
         readonly ToolLogCapture logCapture;
         readonly Func<BridgeCommandResult, Task> complete;
+        readonly Action<BridgeCommandResult> checkpointCompletion;
         readonly TestRunCallbacks callbacks;
         TestRunnerApi? testRunnerApi;
         BridgeCommandKind activeCommandKind;
@@ -24,6 +25,7 @@ namespace Conduit
         bool callbacksRegistered;
         bool completionHooksInstalled;
         bool asyncStartupPending;
+        bool pendingCompletionRestored;
 
         static readonly MethodInfo? testRunnerIsRunActiveMethod = typeof(TestRunnerApi).GetMethod(
             "IsRunActive",
@@ -52,10 +54,15 @@ namespace Conduit
         static readonly FieldInfo? executionSettingsHasTargetPlatformField = typeof(ExecutionSettings)
             .GetField("m_HasTargetPlatform", BindingFlags.Instance | BindingFlags.NonPublic);
 
-        public UnityTestRunMonitor(ToolLogCapture logCapture, Func<BridgeCommandResult, Task> complete)
+        public UnityTestRunMonitor(
+            ToolLogCapture logCapture,
+            Func<BridgeCommandResult, Task> complete,
+            Action<BridgeCommandResult> checkpointCompletion
+        )
         {
             this.logCapture = logCapture;
             this.complete = complete;
+            this.checkpointCompletion = checkpointCompletion;
             callbacks = new(this);
         }
 
@@ -73,6 +80,7 @@ namespace Conduit
             EnsureCallbacksRegistered();
             activeCommandKind = commandKind;
             asyncStartupPending = operation.@async;
+            pendingCompletionRestored = false;
 
             if (TryCompleteDirtySceneBlock(operation.command_type)
                 || TryCompleteBusyStartBlock(operation.command_type)
@@ -101,13 +109,20 @@ namespace Conduit
             }
         }
 
-        public void ResumeRestored(BridgeCommandKind commandKind)
+        public void ResumeRestored(BridgeCommandKind commandKind, BridgeCommandResult? restoredPendingResult)
         {
             EnsureCallbacksRegistered();
             activeCommandKind = commandKind;
             activeRunGuid = null;
-            pendingResult = null;
+            pendingResult = restoredPendingResult;
             asyncStartupPending = false;
+            pendingCompletionRestored = restoredPendingResult != null;
+
+            if (pendingResult == null)
+                return;
+
+            InstallCompletionHooks();
+            TryCompletePendingRun();
         }
 
         public void Stop()
@@ -117,6 +132,7 @@ namespace Conduit
             activeRunGuid = null;
             pendingResult = null;
             asyncStartupPending = false;
+            pendingCompletionRestored = false;
         }
 
         public bool Cancel()
@@ -242,6 +258,8 @@ namespace Conduit
             // cancellation and runner errors take precedence over a normal completion callback
             // callbacks can fire before play mode exits and before all log messages are delivered
             pendingResult = result;
+            pendingCompletionRestored = false;
+            checkpointCompletion(result);
             if (discardLogs)
                 logCapture.DiscardOnCompletion();
 
@@ -268,12 +286,13 @@ namespace Conduit
                     isUpdating,
                     isPlaying,
                     isPlayingOrWillChangePlaymode,
-                    CanCompleteDespiteStuckTestRunner(pendingResult)
+                    pendingCompletionRestored || CanCompleteDespiteStuckTestRunner(pendingResult)
                 ))
                 return;
 
             var result = pendingResult;
             pendingResult = null;
+            pendingCompletionRestored = false;
             RemoveCompletionHooks();
             _ = complete(result);
         }

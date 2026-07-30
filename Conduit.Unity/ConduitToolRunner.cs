@@ -63,8 +63,15 @@ namespace Conduit
         internal static void HandleClientDisconnected(int clientId)
             => scheduler.EnqueueClientDisconnected(clientId);
 
+        internal static void PrepareForAssemblyReload()
+            => scheduler.PrepareForAssemblyReload();
+
         internal static BridgeCommandKind ParseIncomingCommand(string commandType)
             => BridgeCommandKinds.Parse(commandType);
+
+        internal static string BuildAssemblyReloadInterruptionDiagnostic(string commandType)
+            => $"'{commandType}' was interrupted by a Unity domain reload; side effects may have occurred. "
+               + "The command was not re-executed.";
 
         static Task CompleteCurrentAsync(BridgeCommandResult result)
             => scheduler.CompleteCurrentAsync(result);
@@ -175,7 +182,7 @@ namespace Conduit
             {
                 editorModeTransition = new(CompleteCurrentAsync);
                 assetImportMonitor = new(CompleteCurrentAsync);
-                testRunMonitor = new(logCapture, CompleteCurrentAsync);
+                testRunMonitor = new(logCapture, CompleteCurrentAsync, CheckpointTestCompletion);
                 UpdateSnapshot();
             }
 
@@ -216,30 +223,35 @@ namespace Conduit
                 if (operation == null)
                     return;
 
-                var commandKind = operation.kind;
-                activeOperation = null;
-                UpdateSnapshot();
-
-                result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
-                var logs = logCapture.Drain(commandKind, result.outcome, result.diagnostic, out var discardLogs);
-                result.logs = discardLogs ? string.Empty : logs;
-
-                StopOperationHooks();
-                OperationPersistence.ClearActiveOperation();
-                ConduitToolUsage.CompleteCall(
-                    operation.command_type,
-                    operation.tool_usage_started_utc_ticks
-                );
-
-                if (await ConduitConnection.TrySendResultAsync(operation.client_id, operation.request_id, result, operation.command_type))
-                {
-                    ClearPendingResult();
-                    PumpQueuedCommands();
-                    return;
-                }
-
+                FinishOperation(operation, result);
+                // persist before yielding to IPC so a reload cannot erase a completed result
                 PersistPendingResult(operation.request_id, operation.command_type, result);
+                if (await ConduitConnection.TrySendResultAsync(
+                        operation.client_id,
+                        operation.request_id,
+                        result,
+                        operation.command_type
+                    ))
+                    ClearPendingResult(operation.request_id, operation.command_type);
+
                 PumpQueuedCommands();
+            }
+
+            public void PrepareForAssemblyReload()
+            {
+                var operation = activeOperation;
+                if (operation == null || OperationPersistence.CanRestore(operation.kind))
+                    return;
+
+                var diagnostic = BuildAssemblyReloadInterruptionDiagnostic(operation.command_type);
+                var result = new BridgeCommandResult
+                {
+                    outcome = ToolOutcome.Exception,
+                    diagnostic = diagnostic,
+                };
+                FinishOperation(operation, result);
+                PersistPendingResult(operation.request_id, operation.command_type, result);
+                ConduitDiagnostics.Warn(diagnostic);
             }
 
             void ProcessEvent(SchedulerEvent schedulerEvent)
@@ -269,8 +281,17 @@ namespace Conduit
                     return;
                 }
 
+                if (pendingResult != null)
+                {
+                    OperationPersistence.ClearActiveOperation();
+                    OperationPersistence.ClearPendingTestCompletion();
+                    UpdateSnapshot();
+                    return;
+                }
+
                 if (OperationPersistence.RestoreActiveOperation() is not { } restoredOperation)
                 {
+                    OperationPersistence.ClearPendingTestCompletion();
                     UpdateSnapshot();
                     return;
                 }
@@ -586,6 +607,9 @@ namespace Conduit
                 if (activeOperation is not { is_restored: true } operation)
                     return;
 
+                if (!BridgeCommandKinds.IsTest(operation.kind))
+                    OperationPersistence.ClearPendingTestCompletion();
+
                 // recovery observes editor-owned work already in progress instead of re-running side effects
                 switch (operation.kind)
                 {
@@ -603,9 +627,23 @@ namespace Conduit
                     case BridgeCommandKind.RunTestsPlayMode:
                     case BridgeCommandKind.RunTestsPlayer:
                         logCapture.Start(operation.kind);
-                        testRunMonitor.ResumeRestored(operation.kind);
+                        testRunMonitor.ResumeRestored(
+                            operation.kind,
+                            RestorePendingTestCompletion(operation)
+                        );
                         break;
                 }
+            }
+
+            BridgeCommandResult? RestorePendingTestCompletion(PendingOperationState operation)
+            {
+                var checkpoint = OperationPersistence.RestorePendingTestCompletion();
+                if (checkpoint?.RequestID == operation.request_id
+                    && checkpoint.CommandType == operation.command_type)
+                    return checkpoint.Result;
+
+                OperationPersistence.ClearPendingTestCompletion();
+                return null;
             }
 
             void RemoveQueuedOperation(PendingOperationState operation)
@@ -686,13 +724,46 @@ namespace Conduit
                 PumpQueuedCommands();
             }
 
+            void FinishOperation(PendingOperationState operation, BridgeCommandResult result)
+            {
+                activeOperation = null;
+                UpdateSnapshot();
+
+                result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
+                var logs = logCapture.Drain(operation.kind, result.outcome, result.diagnostic, out var discardLogs);
+                result.logs = discardLogs ? string.Empty : logs;
+
+                StopOperationHooks();
+                OperationPersistence.ClearActiveOperation();
+                ConduitToolUsage.CompleteCall(
+                    operation.command_type,
+                    operation.tool_usage_started_utc_ticks
+                );
+            }
+
             void StopOperationHooks()
             {
                 editorModeTransition.Stop();
                 assetImportMonitor.Stop();
                 testRunMonitor.Stop();
+                OperationPersistence.ClearPendingTestCompletion();
                 ConduitGameViewFocus.Restore();
                 ConduitGameViewResolution.RestoreIfInEditMode();
+            }
+
+            void CheckpointTestCompletion(BridgeCommandResult result)
+            {
+                if (activeOperation is not { } operation || !BridgeCommandKinds.IsTest(operation.kind))
+                    return;
+
+                OperationPersistence.SavePendingTestCompletion(
+                    new()
+                    {
+                        RequestID = operation.request_id,
+                        CommandType = operation.command_type,
+                        Result = result,
+                    }
+                );
             }
 
             BridgeExceptionInfo SafeToExceptionInfo(Exception exception)
@@ -729,6 +800,14 @@ namespace Conduit
                 pendingResult = null;
                 OperationPersistence.ClearPendingResult();
                 UpdateSnapshot();
+            }
+
+            void ClearPendingResult(string requestId, string commandType)
+            {
+                if (pendingResult?.RequestID != requestId || pendingResult.CommandType != commandType)
+                    return;
+
+                ClearPendingResult();
             }
 
             static async Task ReplayPendingResultAsync(int clientId, PersistedPendingResultState pendingResult)

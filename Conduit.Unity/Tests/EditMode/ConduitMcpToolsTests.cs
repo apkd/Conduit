@@ -3162,6 +3162,65 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void PendingTestCompletionPersistence_RestoresRunFinishedResult()
+    {
+        var pendingResult = new PersistedPendingResultState
+        {
+            RequestID = "test-run-restore",
+            CommandType = BridgeCommandTypes.RunTestsEditMode,
+            Result = new()
+            {
+                outcome = ToolOutcome.Success,
+                diagnostic = "Passed 1 test.",
+            },
+        };
+
+        try
+        {
+            OperationPersistence.ClearPendingTestCompletion();
+            OperationPersistence.SavePendingTestCompletion(pendingResult);
+
+            var restoredResult = OperationPersistence.RestorePendingTestCompletion();
+            Assert.That(restoredResult, Is.Not.Null);
+            Assert.That(restoredResult!.RequestID, Is.EqualTo("test-run-restore"));
+            Assert.That(restoredResult.CommandType, Is.EqualTo(BridgeCommandTypes.RunTestsEditMode));
+            Assert.That(restoredResult.Result.outcome, Is.EqualTo(ToolOutcome.Success));
+            Assert.That(restoredResult.Result.diagnostic, Is.EqualTo("Passed 1 test."));
+        }
+        finally
+        {
+            OperationPersistence.ClearPendingTestCompletion();
+        }
+    }
+
+    [TestCase(BridgeCommandTypes.PlayMode, true)]
+    [TestCase(BridgeCommandTypes.RefreshAssetDatabase, true)]
+    [TestCase(BridgeCommandTypes.RunTestsEditMode, true)]
+    [TestCase(BridgeCommandTypes.ExecuteCode, false)]
+    [TestCase(BridgeCommandTypes.Show, false)]
+    public void AssemblyReloadRecovery_OnlyRestoresExplicitEditorWork(
+        string commandType,
+        bool expected
+    )
+        => Assert.That(
+            OperationPersistence.CanRestore(ConduitToolRunner.ParseIncomingCommand(commandType)),
+            Is.EqualTo(expected)
+        );
+
+    [Test]
+    public void AssemblyReloadInterruptionDiagnostic_WarnsAboutUnknownSideEffects()
+    {
+        var diagnostic = ConduitToolRunner.BuildAssemblyReloadInterruptionDiagnostic(
+            BridgeCommandTypes.ExecuteCode
+        );
+
+        Assert.That(diagnostic, Does.Contain(BridgeCommandTypes.ExecuteCode));
+        Assert.That(diagnostic, Does.Contain("domain reload"));
+        Assert.That(diagnostic, Does.Contain("side effects may have occurred"));
+        Assert.That(diagnostic, Does.Contain("not re-executed"));
+    }
+
+    [Test]
     public void RestoredRefreshCompileErrorDiagnostic_IsStable()
     {
         Assert.That(
