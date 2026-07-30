@@ -16,6 +16,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
     static readonly TimeSpan initialConnectWindow = TimeSpan.FromSeconds(15);
     static readonly TimeSpan connectRetryDelay = TimeSpan.FromMilliseconds(250);
     static readonly TimeSpan commandStartTimeout = TimeSpan.FromSeconds(5);
+    static readonly TimeSpan commandCancellationSendTimeout = TimeSpan.FromSeconds(2);
     static readonly UTF8Encoding utf8NoBom = new(false);
     static readonly byte[] newline = [(byte)'\n'];
     readonly ConcurrentDictionary<string, CachedConnectionEntry> connectionCache = new(StringComparer.OrdinalIgnoreCase);
@@ -75,7 +76,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         BridgeCommand command,
         TimeSpan timeout,
         int? processIdHint,
-        CancellationToken ct
+        CancellationToken ct,
+        CancellationToken commandCancellation = default
     )
     {
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
@@ -117,7 +119,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 command.CommandType,
                 timeout,
                 ct,
-                command
+                command,
+                commandCancellation
             );
 
             if (result.FailureKind is null && connection!.IsConnected)
@@ -152,13 +155,16 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         string commandType,
         TimeSpan timeout,
         CancellationToken ct,
-        BridgeCommand? commandToSend
+        BridgeCommand? commandToSend,
+        CancellationToken commandCancellation
     )
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
+        using var cancellationMonitorCts = new CancellationTokenSource();
         var effectiveToken = timeoutCts.Token;
         var commandSent = commandToSend is null;
+        var cancellationTask = Task.CompletedTask;
 
         try
         {
@@ -168,6 +174,13 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     return sendFailure;
 
                 commandSent = true;
+                cancellationTask = SendCancellationWhenRequestedAsync(
+                    connection,
+                    requestId,
+                    commandType,
+                    commandCancellation,
+                    cancellationMonitorCts.Token
+                );
 
                 var startWaitTask = connection.WaitForCommandStartedAsync(requestId, commandType, commandSent, commandStartTimeout, effectiveToken, ct);
                 if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
@@ -210,6 +223,45 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     $"Timed out while trying to send '{commandType}' to Unity.",
                     commandSent
                 );
+        }
+        finally
+        {
+            if (!commandCancellation.IsCancellationRequested)
+                cancellationMonitorCts.Cancel();
+
+            await cancellationTask;
+        }
+
+        static async Task SendCancellationWhenRequestedAsync(
+            BridgeClientConnection connection,
+            string requestId,
+            string commandType,
+            CancellationToken commandCancellation,
+            CancellationToken stopMonitoring
+        )
+        {
+            if (!commandCancellation.CanBeCanceled)
+                return;
+
+            if (!commandCancellation.IsCancellationRequested)
+            {
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    commandCancellation,
+                    stopMonitoring
+                );
+
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, waitCts.Token);
+                }
+                catch (OperationCanceledException) { }
+            }
+
+            if (!commandCancellation.IsCancellationRequested)
+                return;
+
+            using var sendCts = new CancellationTokenSource(commandCancellationSendTimeout);
+            await connection.SendCancelCommandAsync(requestId, commandType, sendCts.Token);
         }
     }
 
@@ -763,6 +815,21 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     $"The Unity connection closed while sending '{command.CommandType}'.",
                     commandSent: false
                 );
+            }
+        }
+
+        public async Task SendCancelCommandAsync(string requestId, string commandType, CancellationToken ct)
+        {
+            try
+            {
+                await transport.WritePayloadAsync(
+                    BridgeProtocol.Serialize(BridgeMessage.CreateCancelCommand(requestId)),
+                    ct
+                );
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                logger.ZLogDebug($"Could not send cancellation for {DescribeRequest(requestId, commandType, BridgeMessageTypes.CancelCommand)}.", exception);
             }
         }
 

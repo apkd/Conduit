@@ -101,6 +101,13 @@ namespace Conduit
                 diagnostic = BuildFilteredTestRunDiagnostic(BuildCancelledTestRunDiagnostic(result)),
             };
 
+        internal static BridgeCommandResult CreateRequestCancelledResult()
+            => new()
+            {
+                outcome = ToolOutcome.Cancelled,
+                diagnostic = "The Unity test run was cancelled because its MCP request ended.",
+            };
+
         internal static string BuildFailureSummary(ITestResultAdaptor result)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);

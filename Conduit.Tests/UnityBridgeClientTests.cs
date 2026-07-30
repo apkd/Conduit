@@ -150,6 +150,39 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task CancellingATestRequestSendsCancellationAndWaitsForUnityToFinish()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-cancel-test-{Guid.NewGuid():N}";
+        await using var bridge = await FakeUnixBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            waitForCancellation: true
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        using var cancellation = new CancellationTokenSource();
+
+        var execution = client.ExecuteCommandAsync(
+            projectPath,
+            "cancel-test-request",
+            new() { CommandType = BridgeCommandTypes.RunTestsEditMode },
+            TimeSpan.FromSeconds(2),
+            processIdHint: null,
+            CancellationToken.None,
+            cancellation.Token
+        );
+
+        cancellation.Cancel();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await Assert.That(await bridge.CancelledRequestId).IsEqualTo("cancel-test-request");
+        await Assert.That(result.FailureKind).IsNull();
+        await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Cancelled);
+    }
+
+    [Test]
     public async Task CommandStartWaitReadsPayloadWhenTransportLivenessProbeIsFalse()
     {
         var requestId = ConduitUtility.CreateRequestId();
@@ -188,21 +221,36 @@ public sealed class UnityBridgeClientTests
         readonly string projectPath;
         readonly int editorProcessId;
         readonly bool coalesceCommandResponses;
+        readonly bool waitForCancellation;
         readonly string socketPath;
         readonly Socket listener;
         readonly Task serverTask;
+        readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        FakeUnixBridge(string projectPath, int editorProcessId, bool coalesceCommandResponses, string socketPath, Socket listener)
+        FakeUnixBridge(
+            string projectPath,
+            int editorProcessId,
+            bool coalesceCommandResponses,
+            bool waitForCancellation,
+            string socketPath,
+            Socket listener)
         {
             this.projectPath = projectPath;
             this.editorProcessId = editorProcessId;
             this.coalesceCommandResponses = coalesceCommandResponses;
+            this.waitForCancellation = waitForCancellation;
             this.socketPath = socketPath;
             this.listener = listener;
             serverTask = Task.Run(RunAsync);
         }
 
-        public static Task<FakeUnixBridge> StartAsync(string projectPath, int editorProcessId, bool coalesceCommandResponses = false)
+        public Task<string?> CancelledRequestId => cancelledRequestId.Task;
+
+        public static Task<FakeUnixBridge> StartAsync(
+            string projectPath,
+            int editorProcessId,
+            bool coalesceCommandResponses = false,
+            bool waitForCancellation = false)
         {
             var socketPath = UnityBridgeClient.BridgeTransport.GetDotNetUnixPipePath(ConduitUtility.GetPipeName(projectPath));
             try
@@ -214,7 +262,16 @@ public sealed class UnityBridgeClientTests
             var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             listener.Bind(new UnixDomainSocketEndPoint(socketPath));
             listener.Listen(16);
-            return Task.FromResult(new FakeUnixBridge(projectPath, editorProcessId, coalesceCommandResponses, socketPath, listener));
+            return Task.FromResult(
+                new FakeUnixBridge(
+                    projectPath,
+                    editorProcessId,
+                    coalesceCommandResponses,
+                    waitForCancellation,
+                    socketPath,
+                    listener
+                )
+            );
         }
 
         async Task RunAsync()
@@ -272,7 +329,20 @@ public sealed class UnityBridgeClientTests
                 },
             };
 
-            if (coalesceCommandResponses)
+            if (waitForCancellation)
+            {
+                await WritePayloadAsync(stream, commandStarted, cts.Token);
+                var cancellationPayload = await reader.ReadLineAsync(cts.Token);
+                var cancellation = JsonNode.Parse(cancellationPayload!);
+                cancelledRequestId.TrySetResult(
+                    cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
+                        ? cancellation["request_id"]?.GetValue<string>()
+                        : null
+                );
+                commandResult["result"]!["outcome"] = ToolOutcome.Cancelled;
+                await WritePayloadAsync(stream, commandResult, cts.Token);
+            }
+            else if (coalesceCommandResponses)
                 await WritePayloadsAsync(stream, cts.Token, commandStarted, commandResult);
             else
             {

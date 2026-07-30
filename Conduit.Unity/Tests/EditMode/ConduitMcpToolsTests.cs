@@ -3202,6 +3202,21 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void RequestCancellation_UsesBridgeEnvelopeAndCancelledResult()
+    {
+        var message = BridgeProtocol.Deserialize(
+            BridgeProtocol.Serialize(BridgeMessage.CreateCancelCommand("cancel-request"))
+        );
+        var result = run_tests.CreateRequestCancelledResult();
+
+        Assert.That(message, Is.Not.Null);
+        Assert.That(message!.message_type, Is.EqualTo(BridgeMessageTypes.CancelCommand));
+        Assert.That(message.request_id, Is.EqualTo("cancel-request"));
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Cancelled));
+        Assert.That(result.diagnostic, Does.Contain("MCP request ended"));
+    }
+
+    [Test]
     public void ReimportSettlement_WaitsForIdleSettleWindow()
     {
         Assert.That(ConduitToolRunner.ReimportIdleSettleUpdates, Is.EqualTo(8));

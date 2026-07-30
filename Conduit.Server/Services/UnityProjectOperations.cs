@@ -541,6 +541,10 @@ public sealed class UnityProjectOperations(
         var context = queuedCommand.Session.StartCommand(queuedCommand.Command);
         var commandKind = BridgeCommandKinds.Parse(queuedCommand.Command.CommandType);
         var commandTimeout = UnityToolTimeouts.ForCommand(commandKind);
+        // tests have a real cancellation API; other editor side effects retain reconnect-and-replay semantics.
+        var commandCancellation = BridgeCommandKinds.IsTest(commandKind)
+            ? queuedCommand.RequestCancellation
+            : default;
         var reachable = false;
         int? monitoredProcessId = null;
 
@@ -594,7 +598,8 @@ public sealed class UnityProjectOperations(
                 queuedCommand.Command,
                 timeout,
                 monitoredProcessId,
-                ct
+                ct,
+                commandCancellation
             );
 
             await ApplyHandshakeAsync(execution);
@@ -614,7 +619,8 @@ public sealed class UnityProjectOperations(
                 queuedCommand.Command,
                 timeout,
                 monitoredProcessId,
-                ct
+                ct,
+                commandCancellation
             );
 
             await ApplyHandshakeAsync(retriedExecution);

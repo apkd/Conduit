@@ -188,7 +188,9 @@ namespace Conduit
                     break;
 
                 var message = BridgeProtocol.Deserialize(payload);
-                if (message?.message_type == BridgeMessageTypes.Command && message.command != null && message.request_id is { Length: > 0 })
+                if (message?.request_id is { Length: > 0 }
+                    && (message.message_type == BridgeMessageTypes.CancelCommand
+                        || message.message_type == BridgeMessageTypes.Command && message.command != null))
                 {
                     inboundMessages.Enqueue(new() { client_id = session.id, message = message });
                     continue;

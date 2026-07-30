@@ -119,6 +119,20 @@ namespace Conduit
             asyncStartupPending = false;
         }
 
+        public bool Cancel()
+        {
+            if (!BridgeCommandKinds.IsTest(activeCommandKind)
+                || string.IsNullOrEmpty(activeRunGuid)
+                || !TestRunnerApi.CancelTestRun(activeRunGuid))
+                return false;
+
+            QueueCompletion(
+                run_tests.CreateRequestCancelledResult(),
+                discardLogs: true
+            );
+            return true;
+        }
+
         public bool IsAnyTestRunActive()
             => TryInvokeTestRunnerBoolMethod(testRunnerIsRunActiveMethod, out var isRunActive) && isRunActive;
 

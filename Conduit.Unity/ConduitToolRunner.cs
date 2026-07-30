@@ -282,7 +282,16 @@ namespace Conduit
 
             void HandleCommand(int clientId, BridgeMessage message)
             {
-                if (message.command == null || message.request_id is not { Length: > 0 })
+                if (message.request_id is not { Length: > 0 } requestId)
+                    return;
+
+                if (message.message_type == BridgeMessageTypes.CancelCommand)
+                {
+                    HandleCommandCancellation(clientId, requestId);
+                    return;
+                }
+
+                if (message.command == null)
                     return;
 
                 var commandType = message.command.command_type;
@@ -308,6 +317,42 @@ namespace Conduit
                 var pendingOperation = FindOrCreateOperation(clientId, message, incomingCommandKind);
                 _ = AcknowledgeQueuedCommandAsync(pendingOperation);
                 UpdateSnapshot();
+            }
+
+            void HandleCommandCancellation(int clientId, string requestId)
+            {
+                if (activeOperation is { } active
+                    && active.request_id == requestId
+                    && BridgeCommandKinds.IsTest(active.kind))
+                {
+                    active.client_id = clientId;
+                    if (!testRunMonitor.Cancel())
+                        ConduitDiagnostics.Warn($"Could not cancel Unity test request '{requestId}'.");
+
+                    UpdateSnapshot();
+                    return;
+                }
+
+                var queuedOperation = queuedOperations.Find(
+                    operation => operation.request_id == requestId
+                                 && BridgeCommandKinds.IsTest(operation.kind)
+                );
+                if (queuedOperation == null)
+                    return;
+
+                queuedOperations.Remove(queuedOperation);
+                ConduitToolUsage.CompleteCall(
+                    queuedOperation.command_type,
+                    queuedOperation.tool_usage_started_utc_ticks
+                );
+                UpdateSnapshot();
+                _ = ConduitConnection.TrySendResultAsync(
+                    clientId,
+                    requestId,
+                    run_tests.CreateRequestCancelledResult(),
+                    queuedOperation.command_type
+                );
+                PumpQueuedCommands();
             }
 
             void ClearStaleRestoredOperation()

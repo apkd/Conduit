@@ -113,6 +113,7 @@ namespace Conduit
     {
         public const string Hello = "hello";
         public const string Command = "command";
+        public const string CancelCommand = "cancel_command";
         public const string CommandStarted = "command_started";
         public const string CommandResult = "command_result";
     }
@@ -151,6 +152,13 @@ namespace Conduit
             => new()
             {
                 message_type = BridgeMessageTypes.CommandStarted,
+                request_id = requestId,
+            };
+
+        public static BridgeMessage CreateCancelCommand(string requestId)
+            => new()
+            {
+                message_type = BridgeMessageTypes.CancelCommand,
                 request_id = requestId,
             };
 
@@ -362,6 +370,7 @@ namespace Conduit
             {
                 BridgeMessageTypes.Hello          => JsonUtility.ToJson(new BridgeHelloEnvelope(message)),
                 BridgeMessageTypes.Command        => JsonUtility.ToJson(new BridgeCommandEnvelope(message)),
+                BridgeMessageTypes.CancelCommand  => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
                 BridgeMessageTypes.CommandStarted => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
                 BridgeMessageTypes.CommandResult  => JsonUtility.ToJson(new BridgeCommandResultEnvelope(message)),
                 _                                 => JsonUtility.ToJson(new BridgeMessageHeader { message_type = message.message_type }),
@@ -379,6 +388,7 @@ namespace Conduit
                 {
                     BridgeMessageTypes.Hello          => JsonUtility.FromJson<BridgeHelloEnvelope>(payload)?.ToMessage(),
                     BridgeMessageTypes.Command        => JsonUtility.FromJson<BridgeCommandEnvelope>(payload)?.ToMessage(),
+                    BridgeMessageTypes.CancelCommand  => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
                     BridgeMessageTypes.CommandStarted => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
                     BridgeMessageTypes.CommandResult  => JsonUtility.FromJson<BridgeCommandResultEnvelope>(payload)?.ToMessage(),
                     _                                 => null,
