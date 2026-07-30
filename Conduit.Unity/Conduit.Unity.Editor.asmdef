@@ -1,5 +1,5 @@
 {
-  "name": "Conduit",
+  "name": "Conduit.Unity.Editor",
   "references": [
     "UnityEditor.TestRunner",
     "UnityEngine.TestRunner"

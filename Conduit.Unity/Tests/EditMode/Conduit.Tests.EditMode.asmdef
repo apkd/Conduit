@@ -2,7 +2,7 @@
     "name": "Conduit.Tests.EditMode",
     "rootNamespace": "",
     "references": [
-        "Conduit",
+        "Conduit.Unity.Editor",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],
