@@ -1,0 +1,251 @@
+name: Publish prerelease
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-prerelease
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: prerelease
+      SOURCE_BRANCH: ${{ github.ref_name }}
+      SOURCE_REF_TYPE: ${{ github.ref_type }}
+      SOURCE_SHA: ${{ github.sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      SOURCE_WORKFLOW: build-test-release.yml
+
+    steps:
+      - name: Validate source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$SOURCE_REF_TYPE" != "branch" ]]; then
+            echo "::error::Select a branch in the Run workflow dialog."
+            exit 1
+          fi
+
+          if [[ "$SOURCE_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+            echo "::error::The default branch '$DEFAULT_BRANCH' is reserved for stable releases."
+            exit 1
+          fi
+
+      - name: Find tested artifact run
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t candidates < <(
+            gh api -X GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$SOURCE_WORKFLOW/runs" \
+              -f branch="$SOURCE_BRANCH" \
+              -f head_sha="$SOURCE_SHA" \
+              -f status=success \
+              -F per_page=100 \
+              --jq '.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | [.id, .head_sha, .html_url] | @tsv'
+          )
+
+          for candidate in "${candidates[@]}"; do
+            IFS=$'\t' read -r run_id run_sha run_url <<< "$candidate"
+            [[ "$run_sha" == "$SOURCE_SHA" ]] || continue
+
+            artifact_count="$(
+              gh api -X GET \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+                -F per_page=100 \
+                --jq '[.artifacts[] | select(.expired == false and (.name == "conduit-linux-x64" or .name == "conduit-linux-musl-x64" or .name == "conduit-win-x64")) | .name] | unique | length'
+            )"
+            [[ "$artifact_count" == "3" ]] || continue
+
+            {
+              echo "run_id=$run_id"
+              echo "run_url=$run_url"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          done
+
+          echo "::error::No successful '$SOURCE_WORKFLOW' run with all three live server artifacts exists for $SOURCE_BRANCH@$SOURCE_SHA."
+          echo "Run that workflow for the selected branch tip, wait for it to pass, then dispatch this workflow again."
+          exit 1
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Read built version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(jq -er '.version | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' Conduit.Unity/package.json)"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-x64
+          path: ${{ runner.temp }}/release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-musl-x64
+          path: ${{ runner.temp }}/release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-win-x64
+          path: ${{ runner.temp }}/release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for asset in conduit-linux-x64 conduit-linux-musl-x64 conduit-win-x64.exe; do
+            path="$RUNNER_TEMP/release-assets/$asset"
+            if [[ ! -s "$path" ]]; then
+              echo "::error::Expected non-empty release asset '$asset'."
+              exit 1
+            fi
+          done
+
+      - name: Prepare release notes
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.run_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_url="https://github.com/$GITHUB_REPOSITORY"
+          short_sha="${SOURCE_SHA:0:12}"
+          notes="$RUNNER_TEMP/release-notes.md"
+
+          cat > "$notes" <<MD
+          This is a rolling prerelease for testing feature branches. It may be replaced at any time by a prerelease from another branch.
+
+          Source
+          ------
+          - Branch: \`$SOURCE_BRANCH\`
+          - Built version: \`$PACKAGE_VERSION\`
+          - Commit: [$short_sha]($repo_url/commit/$SOURCE_SHA)
+          - CI: [Build, test and release]($SOURCE_RUN_URL)
+
+          Installation
+          ------------
+          - Window ⟶ Package Manager ⟶ \`+\` ⟶ "Install package from git URL"
+          - Paste the URL:
+
+          \`\`\`md
+          $repo_url.git?path=/Conduit.Unity#$RELEASE_TAG
+          \`\`\`
+
+          [Compare with the current stable release]($repo_url/compare/release...$RELEASE_TAG)
+          MD
+
+          cat "$notes" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish rolling prerelease
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.run_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encoded_ref="$(jq -rn --arg ref "heads/$SOURCE_BRANCH" '$ref | @uri')"
+          if ! remote_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/$encoded_ref" --jq '.object.sha')"; then
+            echo "::error::Could not resolve branch '$SOURCE_BRANCH'."
+            exit 1
+          fi
+
+          if [[ "$remote_sha" != "$SOURCE_SHA" ]]; then
+            echo "::error::Branch '$SOURCE_BRANCH' advanced from $SOURCE_SHA to $remote_sha; refusing to publish stale artifacts."
+            exit 1
+          fi
+
+          release_exists=false
+          if release_info="$(gh release view "$RELEASE_TAG" --json isPrerelease 2>/dev/null)"; then
+            if [[ "$(jq -r '.isPrerelease' <<< "$release_info")" != "true" ]]; then
+              echo "::error::Existing '$RELEASE_TAG' release is not a prerelease."
+              exit 1
+            fi
+            release_exists=true
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa "$RELEASE_TAG" "$SOURCE_SHA" -m "Rolling prerelease from $SOURCE_BRANCH"
+          git push --force origin "refs/tags/$RELEASE_TAG"
+
+          title="v$PACKAGE_VERSION prerelease ($SOURCE_BRANCH)"
+          notes="$RUNNER_TEMP/release-notes.md"
+          assets=(
+            "$RUNNER_TEMP/release-assets/conduit-linux-x64"
+            "$RUNNER_TEMP/release-assets/conduit-linux-musl-x64"
+            "$RUNNER_TEMP/release-assets/conduit-win-x64.exe"
+          )
+
+          if [[ "$release_exists" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file "$notes" \
+              --prerelease \
+              --draft=false \
+              --latest=false
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$title" \
+              --notes-file "$notes" \
+              --prerelease \
+              --latest=false \
+              --verify-tag
+          fi
+
+          mapfile -t published_assets < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          for asset in "${published_assets[@]}"; do
+            case "$asset" in
+              conduit-linux-x64|conduit-linux-musl-x64|conduit-win-x64.exe) ;;
+              *) gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
+            esac
+          done
+
+          release_info="$(gh release view "$RELEASE_TAG" --json assets,isDraft,isPrerelease,url)"
+          if ! jq -e '
+            .isDraft == false and
+            .isPrerelease == true and
+            ([.assets[].name] | sort) == ["conduit-linux-musl-x64", "conduit-linux-x64", "conduit-win-x64.exe"]
+          ' <<< "$release_info" >/dev/null; then
+            echo "::error::Published prerelease state does not match the requested release."
+            exit 1
+          fi
+
+          {
+            echo
+            echo "### Published prerelease"
+            echo
+            echo "- Release: $(jq -r '.url' <<< "$release_info")"
+            echo "- Branch: \`$SOURCE_BRANCH\`"
+            echo "- Commit: \`$SOURCE_SHA\`"
+            echo "- Version: \`$PACKAGE_VERSION\`"
+            echo "- Source run: $SOURCE_RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
