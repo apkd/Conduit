@@ -494,30 +494,17 @@ namespace Conduit
 
         static IReadOnlyList<Type> BuildIndex(out string warning)
         {
-            var types = new List<Type>();
-            var loaderExceptionCount = 0;
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (assembly.IsDynamic)
-                    continue;
+            // Unity's native index avoids Assembly.GetTypes(), which can stall the editor for minutes
+            // in projects with many packages. Interfaces are recovered from the indexed concrete types.
+            var uniqueTypes = new HashSet<Type>(UnityEditor.TypeCache.GetTypesDerivedFrom<object>());
+            var indexedTypes = new List<Type>(uniqueTypes);
+            foreach (var type in indexedTypes)
+                foreach (var interfaceType in type.GetInterfaces())
+                    uniqueTypes.Add(interfaceType);
 
-                try
-                {
-                    types.AddRange(assembly.GetTypes());
-                }
-                catch (ReflectionTypeLoadException exception)
-                {
-                    loaderExceptionCount += exception.LoaderExceptions?.Length ?? 1;
-                    foreach (var type in exception.Types)
-                        if (type != null)
-                            types.Add(type);
-                }
-            }
-
+            var types = new List<Type>(uniqueTypes);
             SortTypes(types);
-            warning = loaderExceptionCount == 0
-                ? string.Empty
-                : $"Warning: {loaderExceptionCount} loader exception{Plural(loaderExceptionCount)} occurred while scanning assemblies; partially loaded types were included.";
+            warning = string.Empty;
             return types;
         }
 

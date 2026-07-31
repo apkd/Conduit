@@ -17,12 +17,12 @@ public sealed class StackTraceSimplificationTests
             HK.Analytics:Bootstrap ()
             """;
 
-        const string expected = """
+        var expected = """
             UnityEngine.Logger:Log
             HK.Analytics:EnsureInitialized.InitializeAsync
             HK.Analytics:EnsureInitialized
             HK.Analytics:Bootstrap
-            """;
+            """.ReplaceLineEndings("\n");
 
         await Assert.That(ConduitUtility.SimplifyStackTrace(stackTrace)).IsEqualTo(expected);
     }
@@ -39,12 +39,12 @@ public sealed class StackTraceSimplificationTests
             Game.Loader/<>c/<<Load>b__4_0>d:MoveNext ()
             """;
 
-        const string expected = """
+        var expected = """
             Game.Loader:Load (Loader.cs:42)
             Game.Loader:Load
             Game.Loader:Load.Validate
             Game.Loader/<>c/<<Load>b__4_0>d:MoveNext
-            """;
+            """.ReplaceLineEndings("\n");
 
         await Assert.That(ConduitUtility.SimplifyStackTrace(stackTrace)).IsEqualTo(expected);
     }

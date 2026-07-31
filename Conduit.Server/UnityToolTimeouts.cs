@@ -21,6 +21,8 @@ static class UnityToolTimeouts
     public static TimeSpan ForCommand(BridgeCommandKind commandKind) =>
         commandKind switch
         {
+            Help                 => TimeSpan.FromSeconds(15),
+            Restart              => TimeSpan.FromSeconds(30),
             PlayMode             => TimeSpan.FromSeconds(60),
             EditMode             => TimeSpan.FromSeconds(60),
             Screenshot           => TimeSpan.FromSeconds(90),

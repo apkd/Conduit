@@ -6,11 +6,28 @@
   "allowUnsafeCode": false,
   "overrideReferences": false,
   "precompiledReferences": [],
-  "autoReferenced": false,
+  "autoReferenced": true,
   "defineConstraints": [
     "DEBUG",
-    "CONDUIT_INCLUDE_IN_DEBUG_BUILDS"
+    "CONDUIT_INCLUDE_IN_DEBUG_BUILDS",
+    "ENABLE_MONO"
   ],
-  "versionDefines": [],
+  "versionDefines": [
+    {
+      "name": "com.unity.modules.animation",
+      "expression": "",
+      "define": "MODULE_ANIMATION"
+    },
+    {
+      "name": "com.unity.modules.imageconversion",
+      "expression": "",
+      "define": "MODULE_IMAGECONVERSION"
+    },
+    {
+      "name": "com.unity.modules.screencapture",
+      "expression": "",
+      "define": "MODULE_SCREENCAPTURE"
+    }
+  ],
   "noEngineReferences": false
 }

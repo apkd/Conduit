@@ -7,6 +7,8 @@ using System.IO;
 using System.Threading.Tasks;
 using JetBrains.Annotations;
 using UnityEditor;
+using UnityEditor.Build;
+using UnityEditor.Build.Reporting;
 using UnityEditor.TestTools.TestRunner.Api;
 using UnityEngine;
 using static UnityEditor.EnterPlayModeOptions;
@@ -18,6 +20,8 @@ namespace Conduit
     {
         const string CommandLineFilterArgument = "-conduitTestFilter";
         const string CommandLineResultsArgument = "-conduitTestResults";
+        const string CommandLinePlayerTargetArgument = "-conduitPlayerTarget";
+        const string CommandLinePlayerOutputArgument = "-conduitPlayerOutput";
         const string TestResultsDirectory = "test-results";
         const string EditModeResultsFilename = "Edit mode tests.xml";
         const string PlayModeResultsFilename = "Play mode tests.xml";
@@ -74,6 +78,84 @@ namespace Conduit
 
         public static void RunFilteredEditModeTestsFromCommandLine()
             => RunFilteredEditModeTests();
+
+        /// <summary>Builds the development Mono player used by transport E2E jobs.</summary>
+        public static void BuildPlayer()
+        {
+            var exitCode = 1;
+            var previousBackend = PlayerSettings.GetScriptingBackend(
+                NamedBuildTarget.Standalone
+            );
+            var previousSplash = PlayerSettings.SplashScreen.show;
+            try
+            {
+                var targetName = ResolveCommandLineValue(
+                    CommandLinePlayerTargetArgument
+                ) ?? throw new ArgumentException(
+                    $"{CommandLinePlayerTargetArgument} is required."
+                );
+                var output = ResolveCommandLineValue(
+                    CommandLinePlayerOutputArgument
+                ) ?? throw new ArgumentException(
+                    $"{CommandLinePlayerOutputArgument} is required."
+                );
+                var target = targetName switch
+                {
+                    "linux" => BuildTarget.StandaloneLinux64,
+                    "windows" => BuildTarget.StandaloneWindows64,
+                    _ => throw new ArgumentException(
+                        $"Unsupported player target '{targetName}'."
+                    ),
+                };
+
+                if (Path.GetDirectoryName(output) is { Length: > 0 } directory)
+                    Directory.CreateDirectory(directory);
+
+                PlayerSettings.SetScriptingBackend(
+                    NamedBuildTarget.Standalone,
+                    ScriptingImplementation.Mono2x
+                );
+                PlayerSettings.SplashScreen.show = false;
+                var report = BuildPipeline.BuildPlayer(
+                    new BuildPlayerOptions
+                    {
+                        scenes = new[]
+                        {
+                            "Packages/dev.tryfinally.conduit/Tests/EditMode/TestAssets/Scenes/BridgeFixtureScene.unity",
+                        },
+                        locationPathName = output,
+                        target = target,
+                        options = BuildOptions.Development,
+                        extraScriptingDefines = new[]
+                        {
+                            "CONDUIT_INCLUDE_IN_DEBUG_BUILDS",
+                        },
+                    }
+                );
+                if (report.summary.result != BuildResult.Succeeded)
+                    throw new BuildFailedException(
+                        $"Player build failed with {report.summary.totalErrors} error(s)."
+                    );
+
+                Console.WriteLine(
+                    $"Built {targetName} player: {Path.GetFullPath(output)}"
+                );
+                exitCode = 0;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+            finally
+            {
+                PlayerSettings.SetScriptingBackend(
+                    NamedBuildTarget.Standalone,
+                    previousBackend
+                );
+                PlayerSettings.SplashScreen.show = previousSplash;
+                EditorApplication.Exit(exitCode);
+            }
+        }
 
         [SuppressMessage("ReSharper", "AsyncVoidMethod")]
         static async void RunFilteredEditModeTests()

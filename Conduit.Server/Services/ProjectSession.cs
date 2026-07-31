@@ -11,7 +11,7 @@ sealed class ProjectSession
 
     public ProjectSession(string projectPath)
     {
-        ProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        ProjectPath = BridgeTarget.Normalize(projectPath);
         DisplayName = Path.GetFileName(ProjectPath);
         UnityVersion = string.Empty;
         LastSeenUtc = DateTimeOffset.MinValue;

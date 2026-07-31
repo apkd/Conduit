@@ -33,6 +33,9 @@ namespace Conduit
         public const string ProfilerRecord = "profiler_record";
         public const string ProfilerOverview = "profiler_overview";
         public const string ProfilerBrowse = "profiler_browse";
+        internal const string ProfilerHasMarker = "profiler_has_marker";
+        internal const string CompilationReferences = "compilation_references";
+        internal const string AssemblyBlob = "assembly_blob";
 
     }
 
@@ -63,6 +66,7 @@ namespace Conduit
         ProfilerRecord,
         ProfilerOverview,
         ProfilerBrowse,
+        ProfilerHasMarker,
     }
 
     static class BridgeCommandKinds
@@ -94,6 +98,7 @@ namespace Conduit
                 BridgeCommandTypes.ProfilerRecord       => BridgeCommandKind.ProfilerRecord,
                 BridgeCommandTypes.ProfilerOverview     => BridgeCommandKind.ProfilerOverview,
                 BridgeCommandTypes.ProfilerBrowse       => BridgeCommandKind.ProfilerBrowse,
+                BridgeCommandTypes.ProfilerHasMarker    => BridgeCommandKind.ProfilerHasMarker,
                 _                                       => BridgeCommandKind.Unknown,
             };
 
@@ -134,7 +139,7 @@ namespace Conduit
     [Serializable]
     sealed class BridgeMessage
     {
-        public int protocol_version = 2;
+        public int protocol_version = BridgeProtocol.Version;
         public string message_type = string.Empty;
         public string? request_id;
         public BridgeProjectHandshake? project;
@@ -178,9 +183,19 @@ namespace Conduit
         public string display_name = string.Empty;
         public string unity_version = string.Empty;
         public int editor_process_id;
+        public int process_id;
+        public string endpoint_kind = "editor";
+        public string platform = string.Empty;
+        public string build_guid = string.Empty;
+        public string cloud_project_id = string.Empty;
+        public string company_name = string.Empty;
+        public string product_name = string.Empty;
+        public bool can_monitor_process = true;
+        public string[] capabilities = Array.Empty<string>();
         /// <summary>The effective editor log path for this Unity process.</summary>
         public string editor_log_path = string.Empty;
         public string session_instance_id = string.Empty;
+        public string handoff_token = string.Empty;
         public string last_seen_utc = string.Empty;
     }
 
@@ -190,12 +205,14 @@ namespace Conduit
         public string command_type = string.Empty;
         public string? target;
         public string? snippet;
+        public string? display_name;
         public string? test_filter;
         public bool @async;
         public bool rebuild_cache;
         public bool track_usage;
         public bool is_restored;
         public string[] args = Array.Empty<string>();
+        public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
     }
 
     [Serializable]
@@ -207,6 +224,17 @@ namespace Conduit
         public string? return_value;
         public BridgeExceptionInfo? exception;
         public string? diagnostic;
+        public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
+    }
+
+    [Serializable]
+    sealed class BridgeArtifact
+    {
+        public string name = string.Empty;
+        public string media_type = "application/octet-stream";
+        public string sha256 = string.Empty;
+        public string? relative_path;
+        public string[] chunks = Array.Empty<string>();
     }
 
     [Serializable]
@@ -260,7 +288,7 @@ namespace Conduit
     [Serializable]
     sealed class BridgeHelloEnvelope
     {
-        public int protocol_version = 2;
+        public int protocol_version = BridgeProtocol.Version;
         public string message_type = string.Empty;
         public BridgeProjectHandshake? project;
 
@@ -285,7 +313,7 @@ namespace Conduit
     [Serializable]
     sealed class BridgeCommandEnvelope
     {
-        public int protocol_version = 2;
+        public int protocol_version = BridgeProtocol.Version;
         public string message_type = string.Empty;
         public string request_id = string.Empty;
         public BridgeCommand? command;
@@ -313,7 +341,7 @@ namespace Conduit
     [Serializable]
     sealed class BridgeCommandStartedEnvelope
     {
-        public int protocol_version = 2;
+        public int protocol_version = BridgeProtocol.Version;
         public string message_type = string.Empty;
         public string request_id = string.Empty;
 
@@ -338,7 +366,7 @@ namespace Conduit
     [Serializable]
     sealed class BridgeCommandResultEnvelope
     {
-        public int protocol_version = 2;
+        public int protocol_version = BridgeProtocol.Version;
         public string message_type = string.Empty;
         public string request_id = string.Empty;
         public BridgeCommandResult? result;
@@ -365,6 +393,8 @@ namespace Conduit
 
     static class BridgeProtocol
     {
+        public const int Version = 4;
+
         public static string Serialize(BridgeMessage message)
             => message.message_type switch
             {

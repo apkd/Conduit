@@ -26,28 +26,22 @@
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
-        <PublishAot>true</PublishAot>
         <PublishSingleFile>true</PublishSingleFile>
         <SelfContained>true</SelfContained>
         <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">win-x64</RuntimeIdentifier>
         <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('Linux'))">linux-x64</RuntimeIdentifier>
         <PublishDir>$(MSBuildProjectDirectory)/publish/$(RuntimeIdentifier)/</PublishDir>
 
-        <PublishTrimmed>true</PublishTrimmed>
-        <TrimMode>full</TrimMode>
+        <PublishTrimmed>false</PublishTrimmed>
         <DebugType>none</DebugType>
         <DebugSymbols>false</DebugSymbols>
         <InvariantGlobalization>true</InvariantGlobalization>
         <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
-        <EnableDynamicLoading>false</EnableDynamicLoading>
         <EnableUnsafeUTF7Encoding>false</EnableUnsafeUTF7Encoding>
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' == 'linux-musl-x64' ">
         <DefineConstants>$(DefineConstants);CONDUIT_LINUX_MUSL</DefineConstants>
-        <StaticExecutable>true</StaticExecutable>
-        <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == ''">clang</CppCompilerAndLinker>
-        <LinkerFlavor Condition="'$(LinkerFlavor)' == ''">lld</LinkerFlavor>
     </PropertyGroup>
 
     <ItemGroup>
@@ -56,6 +50,7 @@
 
     <ItemGroup>
         <PackageReference Include="JetBrains.Annotations" Version="2025.2.4"/>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0"/>
         <PackageReference Include="ModelContextProtocol" Version="1.1.0"/>
         <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.1.0"/>
         <PackageReference Include="System.CommandLine" Version="2.0.5"/>

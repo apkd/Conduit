@@ -1,7 +1,6 @@
 using System.Diagnostics;
-using System.Net.Sockets;
+using System.IO.Pipes;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 if (args.Length != 1)
@@ -9,6 +8,11 @@ if (args.Length != 1)
 
 var conduitExecutable = Path.GetFullPath(args[0]);
 var projectPath = Path.Combine(Path.GetTempPath(), $"conduit-smoke-{Environment.ProcessId}");
+var previousIpcRoot = Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT");
+Environment.SetEnvironmentVariable(
+    "CONDUIT_IPC_ROOT",
+    Path.Combine(projectPath, "ipc")
+);
 
 try
 {
@@ -32,6 +36,7 @@ try
 }
 finally
 {
+    Environment.SetEnvironmentVariable("CONDUIT_IPC_ROOT", previousIpcRoot);
     try
     {
         if (Directory.Exists(projectPath))
@@ -162,51 +167,138 @@ sealed class FakeBridge : IAsyncDisposable
     static readonly byte[] Newline = [(byte)'\n'];
     readonly CancellationTokenSource cts = new();
     readonly string projectPath;
-    readonly string socketPath;
-    readonly Socket listener;
+    readonly string? endpointDirectory;
     readonly Task task;
 
-    FakeBridge(string projectPath, string socketPath, Socket listener)
+    FakeBridge(string projectPath, string? endpointDirectory)
     {
         this.projectPath = projectPath;
-        this.socketPath = socketPath;
-        this.listener = listener;
-        task = Task.Run(RunAsync);
+        this.endpointDirectory = endpointDirectory;
+        task = Task.Run(
+            OperatingSystem.IsWindows()
+                ? RunNamedPipeAsync
+                : RunFifoAsync
+        );
     }
 
     public static Task<FakeBridge> StartAsync(string projectPath)
     {
-        var socketPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + PipeName(projectPath));
-        try { File.Delete(socketPath); } catch { }
+        if (OperatingSystem.IsWindows())
+            return Task.FromResult(new FakeBridge(projectPath, null));
 
-        var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-        listener.Bind(new UnixDomainSocketEndPoint(socketPath));
-        listener.Listen(64);
-        return Task.FromResult(new FakeBridge(projectPath, socketPath, listener));
+        var root = Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT")
+                   ?? throw new InvalidOperationException("The smoke IPC root was not configured.");
+        var endpointDirectory = Path.Combine(
+            root,
+            "endpoints",
+            "editor-" + PipeName(projectPath)
+        );
+        Directory.CreateDirectory(Path.Combine(endpointDirectory, "clients"));
+        return Task.FromResult(new FakeBridge(projectPath, endpointDirectory));
     }
 
-    async Task RunAsync()
+    async Task RunNamedPipeAsync()
     {
         try
         {
             while (!cts.IsCancellationRequested)
-                _ = Task.Run(() => HandleAsync(listener.AcceptAsync(cts.Token).AsTask()));
+            {
+                var pipe = new NamedPipeServerStream(
+                    PipeName(projectPath),
+                    PipeDirection.InOut,
+                    16,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous
+                );
+                await pipe.WaitForConnectionAsync(cts.Token);
+                _ = Task.Run(() => HandleNamedPipeAsync(pipe));
+            }
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
     }
 
-    async Task HandleAsync(Task<Socket> socketTask)
+    async Task HandleNamedPipeAsync(NamedPipeServerStream pipe)
+    {
+        await using (pipe)
+            await HandleAsync(pipe, pipe);
+    }
+
+    async Task RunFifoAsync()
+    {
+        var clientsDirectory = Path.Combine(endpointDirectory!, "clients");
+        try
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                foreach (var clientDirectory in Directory.GetDirectories(clientsDirectory))
+                {
+                    var requestPath = Path.Combine(clientDirectory, "request.json");
+                    if (!File.Exists(requestPath))
+                        continue;
+
+                    try
+                    {
+                        File.Move(
+                            requestPath,
+                            Path.Combine(clientDirectory, "accepted.json")
+                        );
+                    }
+                    catch (Exception exception) when (
+                        exception is IOException or UnauthorizedAccessException)
+                    {
+                        continue;
+                    }
+
+                    _ = Task.Run(() => HandleFifoAsync(clientDirectory));
+                }
+
+                await Task.Delay(10, cts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+    }
+
+    async Task HandleFifoAsync(string clientDirectory)
+    {
+        await using var input = new FileStream(
+            Path.Combine(clientDirectory, "to-unity.fifo"),
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            4096,
+            FileOptions.Asynchronous
+        );
+        await using var output = new FileStream(
+            Path.Combine(clientDirectory, "from-unity.fifo"),
+            FileMode.Open,
+            FileAccess.Write,
+            FileShare.ReadWrite,
+            4096,
+            FileOptions.Asynchronous
+        );
+        await File.WriteAllTextAsync(
+            Path.Combine(clientDirectory, "connected"),
+            string.Empty,
+            cts.Token
+        );
+        await HandleAsync(input, output);
+    }
+
+    async Task HandleAsync(Stream input, Stream output)
     {
         try
         {
-            using var socket = await socketTask;
-            await using var stream = new NetworkStream(socket, ownsSocket: false);
-            using var reader = new StreamReader(stream, Utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+            using var reader = new StreamReader(
+                input,
+                Utf8NoBom,
+                detectEncodingFromByteOrderMarks: false,
+                leaveOpen: true
+            );
 
             await reader.ReadLineAsync(cts.Token);
-            await WriteAsync(stream, new JsonObject
+            await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 2,
+                ["protocol_version"] = 3,
                 ["message_type"] = "hello",
                 ["project"] = new JsonObject
                 {
@@ -223,15 +315,15 @@ sealed class FakeBridge : IAsyncDisposable
                           ?? throw new IOException("Conduit closed before sending a command.");
             var requestId = JsonNode.Parse(command)?["request_id"]?.GetValue<string>() ?? "";
 
-            await WriteAsync(stream, new JsonObject
+            await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 2,
+                ["protocol_version"] = 3,
                 ["message_type"] = "command_started",
                 ["request_id"] = requestId,
             });
-            await WriteAsync(stream, new JsonObject
+            await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 2,
+                ["protocol_version"] = 3,
                 ["message_type"] = "command_result",
                 ["request_id"] = requestId,
                 ["result"] = new JsonObject
@@ -260,36 +352,90 @@ sealed class FakeBridge : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         cts.Cancel();
-        listener.Dispose();
         try { await task.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
-        try { File.Delete(socketPath); } catch { }
+        try
+        {
+            if (endpointDirectory != null)
+                Directory.Delete(endpointDirectory, recursive: true);
+        }
+        catch { }
         cts.Dispose();
     }
 
     static string PipeName(string projectPath)
     {
-        var builder = new StringBuilder("unity-conduit-");
-        var previousWasSeparator = false;
-        foreach (var character in projectPath.Replace('\\', '/'))
-        {
-            if (builder.Length >= 64)
-                break;
+        // keep the standalone fake bridge aligned with the endpoint identity implemented by the binary under test
+        const string prefix = "unity-conduit-";
+        const int legacySlugMaxLength = 50;
+        const int slugMaxLength = 32;
+        const ulong hashOffset = 14695981039346656037UL;
+        const ulong hashPrime = 1099511628211UL;
 
-            if (char.IsAsciiLetterOrDigit(character))
-            {
-                builder.Append(char.ToLowerInvariant(character));
-                previousWasSeparator = false;
-            }
-            else if (!previousWasSeparator && builder.Length > "unity-conduit-".Length)
-            {
-                builder.Append('_');
-                previousWasSeparator = true;
-            }
+        var normalizedPath = NormalizeProjectPath(projectPath);
+        var slug = CreateSlug(normalizedPath, legacySlugMaxLength + 1);
+        if (slug.Length is > 0 and <= legacySlugMaxLength)
+            return prefix + slug;
+
+        if (slug.Length > slugMaxLength)
+            slug = slug[..slugMaxLength].TrimEnd('_');
+
+        var hash = hashOffset;
+        foreach (var character in normalizedPath)
+        {
+            hash ^= ToLowerAscii(character);
+            hash *= hashPrime;
         }
 
-        if (builder[^1] == '_')
-            builder.Length--;
+        return slug.Length == 0
+            ? $"{prefix}{hash:x16}"
+            : $"{prefix}{slug}-{hash:x16}";
 
-        return builder.ToString();
+        static string NormalizeProjectPath(string path)
+        {
+            var normalized = path.Replace('\\', '/').TrimEnd('/');
+            if (normalized.Length < 2 || normalized[1] != ':' || !char.IsAsciiLetter(normalized[0]))
+                return normalized;
+
+            var remainder = normalized.AsSpan(2).TrimStart('/');
+            if (remainder.StartsWith("mnt", StringComparison.OrdinalIgnoreCase)
+                && (remainder.Length == 3 || remainder[3] == '/'))
+                return "/" + remainder.ToString();
+
+            return remainder.IsEmpty
+                ? $"/mnt/{char.ToLowerInvariant(normalized[0])}"
+                : $"/mnt/{char.ToLowerInvariant(normalized[0])}/{remainder}";
+        }
+
+        static string CreateSlug(string normalizedPath, int maxLength)
+        {
+            var builder = new StringBuilder(Math.Min(normalizedPath.Length, maxLength));
+            var previousWasSeparator = false;
+            foreach (var character in normalizedPath)
+            {
+                if (builder.Length >= maxLength)
+                    break;
+
+                if (char.IsAsciiLetterOrDigit(character))
+                {
+                    builder.Append(ToLowerAscii(character));
+                    previousWasSeparator = false;
+                }
+                else if (!previousWasSeparator && builder.Length > 0)
+                {
+                    builder.Append('_');
+                    previousWasSeparator = true;
+                }
+            }
+
+            if (builder.Length > 0 && builder[^1] == '_')
+                builder.Length--;
+
+            return builder.ToString();
+        }
+
+        static char ToLowerAscii(char character) =>
+            character is >= 'A' and <= 'Z'
+                ? (char)(character + ('a' - 'A'))
+                : character;
     }
 }

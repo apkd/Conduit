@@ -9,13 +9,10 @@ static class UnityProjectOfflinePreflight
         = "No Unity editor process is running for this project. Use 'restart' to bring it online.";
 
     public const string MissingPackageDiagnostic =
-        """
-        The target Unity project does not have the Conduit package installed.
-        The manifest.json file should contain:
-
-        "dependencies": {
-          "dev.tryfinally.conduit": "https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release",
-        """;
+        "The target Unity project does not have the Conduit package installed.\n"
+        + "The manifest.json file should contain:\n\n"
+        + "\"dependencies\": {\n"
+        + "  \"dev.tryfinally.conduit\": \"https://github.com/apkd/Conduit.git?path=/Conduit.Unity#release\",";
 
     public const string UnresponsiveBridgeDiagnostic
         = "A Unity editor process is running for this project, but the Unity connection is not responding.";

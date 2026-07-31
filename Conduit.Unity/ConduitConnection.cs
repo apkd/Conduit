@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,7 @@ namespace Conduit
         static readonly TimeSpan recentAttachmentCooldown = TimeSpan.FromHours(1);
         static readonly object gate = new();
         static CancellationTokenSource? serverLoopCts;
+        static string? fifoEndpointDirectory;
         static bool started;
         static bool shuttingDown;
         static bool toolbarRefreshRequested;
@@ -73,6 +75,12 @@ namespace Conduit
 
         static async Task RunServerLoopAsync(CancellationToken cancellationToken)
         {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+            {
+                await RunFifoServerLoopAsync(cancellationToken);
+                return;
+            }
+
             while (!cancellationToken.IsCancellationRequested)
             {
                 NamedPipeServerStream? pipe = null;
@@ -81,7 +89,14 @@ namespace Conduit
                 {
                     pipe = CreatePipeServer(ConduitProjectIdentity.GetPipeName());
                     await pipe.WaitForConnectionAsync(cancellationToken);
-                    _ = RunClientLoopAsync(pipe, cancellationToken);
+                    var connectedPipe = pipe;
+                    _ = RunClientLoopAsync(
+                        EditorBridgeConnection.FromSingleStream(
+                            connectedPipe,
+                            () => connectedPipe.IsConnected
+                        ),
+                        cancellationToken
+                    );
                     pipe = null;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -105,21 +120,156 @@ namespace Conduit
             }
         }
 
-        static async Task RunClientLoopAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+        static async Task RunFifoServerLoopAsync(CancellationToken cancellationToken)
+        {
+            var root = GetFifoRoot();
+            var endpointDirectory = Path.Combine(
+                root,
+                "endpoints",
+                "editor-" + ConduitProjectIdentity.GetPipeName()
+            );
+            fifoEndpointDirectory = endpointDirectory;
+            TryDeleteDirectory(endpointDirectory);
+            var clientsDirectory = Path.Combine(endpointDirectory, "clients");
+            Directory.CreateDirectory(clientsDirectory);
+            TryRestrictDirectory(endpointDirectory);
+            WriteEditorEndpointDescriptor(endpointDirectory);
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    foreach (var clientDirectory in Directory.GetDirectories(clientsDirectory))
+                    {
+                        var requestPath = Path.Combine(clientDirectory, "request.json");
+                        if (!File.Exists(requestPath))
+                            continue;
+
+                        try
+                        {
+                            File.Move(
+                                requestPath,
+                                Path.Combine(clientDirectory, "accepted.json")
+                            );
+                        }
+                        catch (Exception exception) when (
+                            exception is IOException or UnauthorizedAccessException)
+                        {
+                            continue;
+                        }
+
+                        var input = new FileStream(
+                            Path.Combine(clientDirectory, "to-unity.fifo"),
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.ReadWrite,
+                            4096,
+                            FileOptions.Asynchronous
+                        );
+                        var output = new FileStream(
+                            Path.Combine(clientDirectory, "from-unity.fifo"),
+                            FileMode.Open,
+                            FileAccess.Write,
+                            FileShare.ReadWrite,
+                            4096,
+                            FileOptions.Asynchronous
+                        );
+                        File.WriteAllText(
+                            Path.Combine(clientDirectory, "connected"),
+                            string.Empty
+                        );
+                        _ = RunClientLoopAsync(
+                            new(input, output, static () => true),
+                            cancellationToken
+                        );
+                    }
+
+                    await Task.Delay(50, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception exception) when (!IsShuttingDown())
+                {
+                    ConduitDiagnostics.Error(
+                        "Unity MCP FIFO server hit an exception.",
+                        exception
+                    );
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                }
+            }
+        }
+
+        static string GetFifoRoot()
+        {
+            if (Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT") is { Length: > 0 } configured)
+                return configured;
+
+            if (Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") is { Length: > 0 } runtimeDirectory)
+                return Path.Combine(runtimeDirectory, "conduit", "v1");
+
+            return Path.Combine(Path.GetTempPath(), $"conduit-{getuid()}", "v1");
+        }
+
+        static void WriteEditorEndpointDescriptor(string endpointDirectory)
+        {
+            var descriptor = new EditorEndpointDescriptor
+            {
+                endpoint_id = Path.GetFileName(endpointDirectory),
+                project_path = ConduitProjectIdentity.GetProjectPath(),
+                process_id = Process.GetCurrentProcess().Id,
+                session_instance_id = sessionInstanceId,
+                unity_version = Application.unityVersion,
+                platform = Application.platform.ToString(),
+                last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
+            };
+            var path = Path.Combine(endpointDirectory, "endpoint.json");
+            File.WriteAllText(path, JsonUtility.ToJson(descriptor), utf8NoBom);
+        }
+
+        static void TryRestrictDirectory(string path)
+        {
+            try
+            {
+                chmod(path, 0x1c0); // 0700
+            }
+            catch (Exception) { }
+        }
+
+        static void TryDeleteDirectory(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+            }
+            catch (Exception) { }
+        }
+
+        [DllImport("libc")]
+        static extern uint getuid();
+
+        [DllImport("libc")]
+        static extern int chmod(string path, uint mode);
+
+        static async Task RunClientLoopAsync(
+            EditorBridgeConnection connection,
+            CancellationToken cancellationToken)
         {
             StreamReader? reader = null;
             ClientSession? session = null;
 
             try
             {
-                reader = new(pipe, utf8NoBom, false, 1024, true);
-                if (!await TryHandshakeAsync(pipe, reader, cancellationToken))
+                reader = new(connection.Input, utf8NoBom, false, 1024, true);
+                if (!await TryHandshakeAsync(connection, reader, cancellationToken))
                     return;
 
                 session = new()
                 {
                     id = CreateClientId(),
-                    pipe = pipe,
+                    connection = connection,
                     reader = reader,
                 };
                 _ = RunWriteLoopAsync(session);
@@ -148,7 +298,7 @@ namespace Conduit
                     }
                     catch (Exception) { }
 
-                    DisposePipe(pipe);
+                    connection.Dispose();
                 }
             }
         }
@@ -156,11 +306,16 @@ namespace Conduit
         static NamedPipeServerStream CreatePipeServer(string pipeName)
             => new(pipeName, PipeDirection.InOut, MaxConcurrentClients, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
-        static async Task<bool> TryHandshakeAsync(NamedPipeServerStream pipe, StreamReader reader, CancellationToken cancellationToken)
+        static async Task<bool> TryHandshakeAsync(
+            EditorBridgeConnection connection,
+            StreamReader reader,
+            CancellationToken cancellationToken)
         {
             var payload = await ReadLineAsync(reader, cancellationToken);
             var message = BridgeProtocol.Deserialize(payload ?? string.Empty);
-            if (message?.message_type != BridgeMessageTypes.Hello || message.project == null)
+            if (message?.protocol_version != BridgeProtocol.Version
+                || message.message_type != BridgeMessageTypes.Hello
+                || message.project == null)
             {
                 ConduitDiagnostics.Warn("Rejected MCP client because the first message was not a valid hello envelope.");
                 return false;
@@ -175,13 +330,18 @@ namespace Conduit
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            WritePayload(pipe, BridgeProtocol.Serialize(BridgeMessage.CreateHello(CreateHandshake(expectedProjectPath))));
+            WritePayload(
+                connection.Output,
+                BridgeProtocol.Serialize(
+                    BridgeMessage.CreateHello(CreateHandshake(expectedProjectPath))
+                )
+            );
             return true;
         }
 
         static async Task ReadLoopAsync(ClientSession session, CancellationToken cancellationToken)
         {
-            while (!cancellationToken.IsCancellationRequested && session.pipe.IsConnected)
+            while (!cancellationToken.IsCancellationRequested && session.connection.IsConnected)
             {
                 var payload = await ReadIncomingPayloadAsync(session, cancellationToken);
                 if (payload is null)
@@ -249,7 +409,7 @@ namespace Conduit
 
         static void OnEditorUpdate()
         {
-#if UNITY_6000_3_OR_NEWER
+#if UNITY_6000_3_OR_NEWER && MODULE_IMGUI && MODULE_UIELEMENTS
             bool refreshToolbar;
             lock (gate)
             {
@@ -322,6 +482,12 @@ namespace Conduit
                 display_name = Path.GetFileName(projectPath),
                 unity_version = Application.unityVersion,
                 editor_process_id = Process.GetCurrentProcess().Id,
+                process_id = Process.GetCurrentProcess().Id,
+                endpoint_kind = "editor",
+                platform = Application.platform.ToString(),
+                cloud_project_id = CloudProjectSettings.projectId,
+                company_name = Application.companyName,
+                product_name = Application.productName,
                 editor_log_path = Application.consoleLogPath,
                 session_instance_id = sessionInstanceId,
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
@@ -359,7 +525,7 @@ namespace Conduit
             }
             catch (Exception) { }
 
-            DisposePipe(session.pipe);
+            session.connection.Dispose();
 
             try
             {
@@ -420,6 +586,12 @@ namespace Conduit
             }
             catch (Exception) { }
 
+            if (fifoEndpointDirectory is { } endpointDirectory)
+            {
+                fifoEndpointDirectory = null;
+                TryDeleteDirectory(endpointDirectory);
+            }
+
             if (sessions == null)
                 return;
 
@@ -444,7 +616,7 @@ namespace Conduit
             }
             catch (Exception) { }
 
-            DisposePipe(session.pipe);
+            session.connection.Dispose();
 
             try
             {
@@ -535,7 +707,11 @@ namespace Conduit
                     {
                         try
                         {
-                            await WritePayloadAsync(session.pipe, outboundMessage.Payload, session.writer_cts.Token);
+                            await WritePayloadAsync(
+                                session.connection.Output,
+                                outboundMessage.Payload,
+                                session.writer_cts.Token
+                            );
                             outboundMessage.TrySetResult(true);
                         }
                         catch (OperationCanceledException) when (session.writer_cts.IsCancellationRequested) { }
@@ -586,7 +762,7 @@ namespace Conduit
         sealed class ClientSession
         {
             public int id;
-            public NamedPipeServerStream pipe = null!;
+            public EditorBridgeConnection connection = null!;
             public StreamReader reader = null!;
             public readonly ConcurrentQueue<OutboundClientMessage> outbound_messages = new();
             public readonly SemaphoreSlim outbound_signal = new(0);
@@ -613,6 +789,59 @@ namespace Conduit
             public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
             public void TrySetResult(bool delivered) => Completion.TrySetResult(delivered);
+        }
+
+        [Serializable]
+        sealed class EditorEndpointDescriptor
+        {
+            public int protocol_version = BridgeProtocol.Version;
+            public string endpoint_kind = "editor";
+            public string transport = "fifo";
+            public string endpoint_id = string.Empty;
+            public string project_path = string.Empty;
+            public int process_id;
+            public string session_instance_id = string.Empty;
+            public string unity_version = string.Empty;
+            public string platform = string.Empty;
+            public string last_seen_utc = string.Empty;
+        }
+    }
+
+    sealed class EditorBridgeConnection : IDisposable
+    {
+        readonly Func<bool> isConnected;
+        bool disposed;
+
+        public EditorBridgeConnection(
+            Stream input,
+            Stream output,
+            Func<bool> isConnected)
+        {
+            Input = input;
+            Output = output;
+            this.isConnected = isConnected;
+        }
+
+        public Stream Input { get; }
+
+        public Stream Output { get; }
+
+        public bool IsConnected => !disposed && isConnected();
+
+        public static EditorBridgeConnection FromSingleStream(
+            Stream stream,
+            Func<bool> isConnected) =>
+            new(stream, stream, isConnected);
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            if (!ReferenceEquals(Input, Output))
+                Input.Dispose();
+            Output.Dispose();
         }
     }
 

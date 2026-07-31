@@ -1,10 +1,10 @@
 #nullable enable
 
+#if MODULE_IMGUI
 using System;
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
-using UnityEngine.UIElements;
 
 namespace Conduit
 {
@@ -55,6 +55,7 @@ namespace Conduit
         GUIStyle? groupHeaderStyle;
         GUIStyle? groupContentStyle;
         GUIStyle? hintStyle;
+        bool active;
         // reused Preferences providers need an activation generation to reject stale async results
         int activationVersion;
 
@@ -86,8 +87,12 @@ namespace Conduit
         static SettingsProvider Create()
             => new ConduitSettingsProvider();
 
-        public override void OnActivate(string searchContext, VisualElement rootElement)
+        void Activate()
         {
+            if (active)
+                return;
+
+            active = true;
             var settings = ConduitSettings.instance;
             var specs = ConduitSetupWizardUtility.GetEditorSpecs();
             RefreshInstalledEditors(specs);
@@ -117,10 +122,14 @@ namespace Conduit
         }
 
         public override void OnDeactivate()
-            => activationVersion++;
+        {
+            active = false;
+            activationVersion++;
+        }
 
         public override void OnGUI(string searchContext)
         {
+            Activate();
             var settings = ConduitSettings.instance;
             var specs = ConduitSetupWizardUtility.GetEditorSpecs();
             var location = GetConfigurationLocation(specs, settings);
@@ -707,3 +716,4 @@ namespace Conduit
 
     }
 }
+#endif

@@ -7,6 +7,7 @@
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UNITY_VERSION
 ARG PROJECT
+ARG PROJECT_MANIFEST=test
 
 ENV INSTALL_ROOT=/opt/unity \
     UNITY_HOME=/opt/unity \
@@ -19,13 +20,16 @@ ENV INSTALL_ROOT=/opt/unity \
 RUN \
 --mount=type=cache,target=/var/cache/apt,id=apt-cache-builder,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists,id=apt-lists-builder,sharing=locked \
---mount=type=bind,source=.github/workflows/test-manifest.json,target=/tmp/manifest.json,readonly \
+--mount=type=bind,source=.github/workflows/test-manifest.json,target=/tmp/test-manifest.json,readonly \
+--mount=type=bind,source=.github/workflows/player-manifest.json,target=/tmp/player-manifest.json,readonly \
 \
 #========================
 <<'BUILDER_SETUP_SCRIPT'
 #========================
 
 set -eux
+
+cp "/tmp/${PROJECT_MANIFEST}-manifest.json" /tmp/manifest.json
 
 # debian nodoc
 echo 'path-exclude /usr/share/man/*'               >  /etc/dpkg/dpkg.cfg.d/01_nodoc
@@ -101,6 +105,13 @@ echo "Downloading: $EDITOR_URL (revision: $REV)"
 
 download_and_extract "$EDITOR_URL" "/tmp/unity_editor.tar.xz"
 
+# seed the generated project with settings from this exact editor version
+PROJECT_TEMPLATE="$(find "$DEST/Editor/Data/Resources/PackageManager/ProjectTemplates" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+test -n "$PROJECT_TEMPLATE"
+tar -xOzf "$PROJECT_TEMPLATE" 'package/ProjectData~/ProjectSettings/ProjectSettings.asset' > /tmp/ProjectSettings.asset
+grep -q '^  scriptingDefineSymbols: {}$' /tmp/ProjectSettings.asset
+sed -i 's/^  scriptingDefineSymbols: {}$/  scriptingDefineSymbols:\n    Standalone: CONDUIT_INCLUDE_IN_DEBUG_BUILDS/' /tmp/ProjectSettings.asset
+
 # strip editor
 rm -f "$TMPHTML"
 rm -rf "$DEST/Editor/libumbraoptimizer64.*" || true
@@ -151,6 +162,7 @@ test -x "${DEST}/Editor/Unity"
 # copy manifest.json
 mkdir -p "${PROJECT}/Packages" "${PROJECT}/ProjectSettings" "${PROJECT}/Assets"
 cp /tmp/manifest.json "${PROJECT}/Packages/manifest.json"
+cp /tmp/ProjectSettings.asset "${PROJECT}/ProjectSettings/ProjectSettings.asset"
 
 # create project.json
 printf '%s\n' \

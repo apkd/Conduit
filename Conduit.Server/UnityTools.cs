@@ -77,8 +77,18 @@ public sealed class UnityTools
          Run this command once to find out how to efficiently search for objects.
          """
     )]
-    public static string Help(UnityProjectRegistry projectRegistry)
-        => HelpTool.GetHelpString(projectRegistry.GetLatestUnityVersion());
+    public static Task<string> Help(
+        UnityProjectRegistry projectRegistry,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Optional project path or player selector")]
+        string? projectPath = null)
+    {
+        if (PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _))
+            return ToPlainTextToolResponseAsync(operations.HelpAsync(projectPath!, ct));
+
+        return Task.FromResult(HelpTool.GetHelpString(projectRegistry.GetLatestUnityVersion()));
+    }
 
     [McpServerTool(Name = CMD.GetDependencies, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(

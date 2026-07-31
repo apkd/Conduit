@@ -3,6 +3,8 @@ namespace Conduit;
 enum BridgeCommandKind : byte
 {
     Unknown,
+    Help,
+    Restart,
     Status,
     PlayMode,
     EditMode,
@@ -27,6 +29,7 @@ enum BridgeCommandKind : byte
     ProfilerRecord,
     ProfilerOverview,
     ProfilerBrowse,
+    ProfilerHasMarker,
 }
 
 static class BridgeCommandKinds
@@ -34,6 +37,8 @@ static class BridgeCommandKinds
     public static BridgeCommandKind Parse(string? commandType) =>
         commandType switch
         {
+            BridgeCommandTypes.Help                 => BridgeCommandKind.Help,
+            BridgeCommandTypes.Restart              => BridgeCommandKind.Restart,
             BridgeCommandTypes.Status               => BridgeCommandKind.Status,
             BridgeCommandTypes.PlayMode             => BridgeCommandKind.PlayMode,
             BridgeCommandTypes.EditMode             => BridgeCommandKind.EditMode,
@@ -58,6 +63,7 @@ static class BridgeCommandKinds
             BridgeCommandTypes.ProfilerRecord       => BridgeCommandKind.ProfilerRecord,
             BridgeCommandTypes.ProfilerOverview     => BridgeCommandKind.ProfilerOverview,
             BridgeCommandTypes.ProfilerBrowse       => BridgeCommandKind.ProfilerBrowse,
+            BridgeCommandTypes.ProfilerHasMarker    => BridgeCommandKind.ProfilerHasMarker,
             _                                       => BridgeCommandKind.Unknown,
         };
 
@@ -66,4 +72,9 @@ static class BridgeCommandKinds
 
     public static bool IsAssetImport(BridgeCommandKind commandKind) =>
         commandKind is BridgeCommandKind.RefreshAssetDatabase or BridgeCommandKind.ReimportAssets;
+
+    public static bool IsProfiler(BridgeCommandKind commandKind) =>
+        commandKind is BridgeCommandKind.ProfilerRecord
+            or BridgeCommandKind.ProfilerOverview
+            or BridgeCommandKind.ProfilerBrowse;
 }

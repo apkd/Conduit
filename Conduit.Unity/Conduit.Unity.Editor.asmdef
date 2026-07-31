@@ -15,6 +15,31 @@
   "defineConstraints": [],
   "versionDefines": [
     {
+      "name": "com.unity.modules.imgui",
+      "expression": "",
+      "define": "MODULE_IMGUI"
+    },
+    {
+      "name": "com.unity.modules.uielements",
+      "expression": "",
+      "define": "MODULE_UIELEMENTS"
+    },
+    {
+      "name": "com.unity.modules.unitywebrequest",
+      "expression": "",
+      "define": "MODULE_UNITYWEBREQUEST"
+    },
+    {
+      "name": "com.unity.modules.imageconversion",
+      "expression": "",
+      "define": "MODULE_IMAGECONVERSION"
+    },
+    {
+      "name": "com.unity.modules.screencapture",
+      "expression": "",
+      "define": "MODULE_SCREENCAPTURE"
+    },
+    {
       "name": "com.unity.burst",
       "expression": "",
       "define": "MODULE_BURST"

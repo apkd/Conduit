@@ -1,27 +1,58 @@
 namespace Conduit;
 
-public sealed class BridgeClientResult(
-    BridgeProjectHandshake? handshake,
-    ToolExecutionResult? result,
-    BridgeRuntimeFailureKind? failureKind,
-    string? failureDiagnostic,
-    bool commandSent)
+public sealed class BridgeClientResult
 {
-    public BridgeProjectHandshake? Handshake { get; } = handshake;
+    public BridgeClientResult(
+        BridgeProjectHandshake? handshake,
+        ToolExecutionResult? result,
+        BridgeRuntimeFailureKind? failureKind,
+        string? failureDiagnostic,
+        bool commandSent)
+        : this(handshake, result, failureKind, failureDiagnostic, commandSent, null) { }
 
-    public ToolExecutionResult? Result { get; } = result;
+    internal BridgeClientResult(
+        BridgeProjectHandshake? handshake,
+        ToolExecutionResult? result,
+        BridgeRuntimeFailureKind? failureKind,
+        string? failureDiagnostic,
+        bool commandSent,
+        BridgeArtifact[]? artifacts)
+    {
+        Handshake = handshake;
+        Result = result;
+        FailureKind = failureKind;
+        FailureDiagnostic = failureDiagnostic;
+        CommandSent = commandSent;
+        Artifacts = artifacts ?? [];
+    }
 
-    public BridgeRuntimeFailureKind? FailureKind { get; } = failureKind;
+    public BridgeProjectHandshake? Handshake { get; }
 
-    public string? FailureDiagnostic { get; } = failureDiagnostic;
+    public ToolExecutionResult? Result { get; }
 
-    public bool CommandSent { get; } = commandSent;
+    public BridgeRuntimeFailureKind? FailureKind { get; }
+
+    public string? FailureDiagnostic { get; }
+
+    public bool CommandSent { get; }
+
+    internal BridgeArtifact[] Artifacts { get; }
 
     public static BridgeClientResult Connected(BridgeProjectHandshake handshake)
         => new(handshake, null, null, null, false);
 
-    public static BridgeClientResult Success(BridgeProjectHandshake? handshake, ToolExecutionResult result, bool commandSent = true)
+    public static BridgeClientResult Success(
+        BridgeProjectHandshake? handshake,
+        ToolExecutionResult result,
+        bool commandSent = true)
         => new(handshake, result, null, null, commandSent);
+
+    internal static BridgeClientResult Success(
+        BridgeProjectHandshake? handshake,
+        ToolExecutionResult result,
+        bool commandSent,
+        BridgeArtifact[] artifacts)
+        => new(handshake, result, null, null, commandSent, artifacts);
 
     public static BridgeClientResult Failure(
         BridgeProjectHandshake? handshake,
@@ -33,7 +64,7 @@ public sealed class BridgeClientResult(
     public BridgeClientResult WithHandshake(BridgeProjectHandshake handshake)
         => ReferenceEquals(Handshake, handshake)
             ? this
-            : new(handshake, Result, FailureKind, FailureDiagnostic, CommandSent);
+            : new(handshake, Result, FailureKind, FailureDiagnostic, CommandSent, Artifacts);
 }
 
 public enum BridgeRuntimeFailureKind
@@ -49,4 +80,5 @@ public enum BridgeRuntimeFailureKind
     ResultDisconnected,
     ResultTimedOut,
     ProcessExited,
+    AmbiguousTarget,
 }

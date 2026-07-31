@@ -11,7 +11,9 @@ namespace Conduit;
 
 public sealed class UnityProjectOperations(
     UnityProjectRegistry projectRegistry,
+    UnityPlayerDiscovery playerDiscovery,
     UnityBridgeClient bridgeClient,
+    PlayerSnippetCompiler playerSnippetCompiler,
     UnityProjectEnvironmentInspector environmentInspector,
     UnityEditorProcessController processController,
     UnitySceneReloadPromptRecovery sceneReloadPromptRecovery,
@@ -39,6 +41,9 @@ public sealed class UnityProjectOperations(
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
         = new(StringComparer.OrdinalIgnoreCase);
 
+    readonly ConcurrentDictionary<string, ProjectSession> playerSessions
+        = new(StringComparer.Ordinal);
+
     readonly ProjectSingleFlight<ToolExecutionResult> restartOperations = new();
 
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
@@ -46,7 +51,13 @@ public sealed class UnityProjectOperations(
 
     public async Task<string> StatusAsync(string projectPath, CT ct)
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
+        if (PlayerSelector.TryParse(normalizedProjectPath, out var playerSelector))
+            return await StatusPlayerAsync(playerSelector, ct);
+
+        string AppendPlayers(string report) =>
+            AppendLivePlayers(report, playerDiscovery.FindForProject(normalizedProjectPath));
+
         var usage = new StatusUsageState();
         try
         {
@@ -58,24 +69,90 @@ public sealed class UnityProjectOperations(
                 ct
             );
             if (optimisticReport is { } report)
-                return report;
+                return AppendPlayers(report);
 
-            return await ExecuteStatusWithPreflightAsync(normalizedProjectPath, usage, ct);
+            return AppendPlayers(
+                await ExecuteStatusWithPreflightAsync(normalizedProjectPath, usage, ct)
+            );
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning("Status failed for project '{ProjectPath}' because an internal timeout or cancellation escaped the normal fallback path.", normalizedProjectPath);
-            return BuildSafeUnexpectedStatusResponse(normalizedProjectPath, "Status probing was cancelled before a response could be formatted.");
+            return AppendPlayers(
+                BuildSafeUnexpectedStatusResponse(
+                    normalizedProjectPath,
+                    "Status probing was cancelled before a response could be formatted."
+                )
+            );
         }
         catch (Exception exception) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(exception, "Status failed unexpectedly for project '{ProjectPath}'. Falling back to environment diagnostics.", normalizedProjectPath);
-            return BuildSafeUnexpectedStatusResponse(normalizedProjectPath, $"Status probing failed unexpectedly: {exception.Message}");
+            return AppendPlayers(
+                BuildSafeUnexpectedStatusResponse(
+                    normalizedProjectPath,
+                    $"Status probing failed unexpectedly: {exception.Message}"
+                )
+            );
         }
     }
 
+    async Task<string> StatusPlayerAsync(PlayerSelector selector, CT ct)
+    {
+        var target = selector.ToString();
+        var execution = await bridgeClient.ExecuteCommandAsync(
+            target,
+            ConduitUtility.CreateRequestId(),
+            new()
+            {
+                CommandType = BridgeCommandTypes.Status,
+                TrackUsage = true,
+            },
+            UnityToolTimeouts.StatusCommand,
+            processIdHint: null,
+            ct
+        );
+        if (TryParsePingSnapshot(execution, out var snapshot))
+            return AppendLivePlayers(
+                UnityProjectStatusFormatter.FormatPingReport(snapshot),
+                execution.Handshake is { IsPlayer: true } handshake
+                    ?
+                    [
+                        new()
+                        {
+                            ProcessId = handshake.EffectiveProcessId,
+                            SessionInstanceId = handshake.SessionInstanceId,
+                        },
+                    ]
+                    : []
+            );
+
+        return ToolResponseFormatter.Format(
+            execution.Result
+            ?? ToToolExecutionResult(
+                target,
+                BridgeCommandTypes.Status,
+                execution,
+                UnityToolTimeouts.StatusCommand
+            )
+        );
+    }
+
     public Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
-        => RestartAsync(projectPath, trackUsage: true, ct);
+        => PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _)
+            ? EnqueueAsync(
+                projectPath,
+                new() { CommandType = BridgeCommandTypes.Restart },
+                ct
+            )
+            : RestartAsync(projectPath, trackUsage: true, ct);
+
+    public Task<ToolExecutionResult> HelpAsync(string projectPath, CT ct)
+        => EnqueueAsync(
+            projectPath,
+            new() { CommandType = BridgeCommandTypes.Help },
+            ct
+        );
 
     Task<ToolExecutionResult> RestartAsync(string projectPath, bool trackUsage, CT ct)
         => restartOperations.RunAsync(
@@ -180,7 +257,7 @@ public sealed class UnityProjectOperations(
 
     public async Task<ToolExecutionResult> RefreshAssetDatabaseAsync(string projectPath, CT ct)
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         return await EnqueueAsync(
             projectPath: normalizedProjectPath,
             command: new() { CommandType = BridgeCommandTypes.RefreshAssetDatabase },
@@ -190,7 +267,7 @@ public sealed class UnityProjectOperations(
 
     public async Task<ToolExecutionResult> ReimportAssetsAsync(string projectPath, string query, CT ct)
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         return await EnqueueAsync(
             projectPath: normalizedProjectPath,
             command: new() { CommandType = BridgeCommandTypes.ReimportAssets, Target = query },
@@ -211,11 +288,68 @@ public sealed class UnityProjectOperations(
             );
         }
 
+        if (PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _))
+            return ExecutePlayerCodeAsync(BridgeTarget.Normalize(projectPath), snippet, ct);
+
         return EnqueueAsync(
             projectPath: projectPath,
             command: new() { CommandType = BridgeCommandTypes.ExecuteCode, Snippet = snippet },
             ct: ct
         );
+    }
+
+    async Task<ToolExecutionResult> ExecutePlayerCodeAsync(
+        string playerTarget,
+        string snippet,
+        CT ct)
+    {
+        var prepared = await playerSnippetCompiler.CompileAsync(playerTarget, snippet, ct);
+        if (prepared.Failure is { } failure)
+            return failure;
+
+        var compilation = prepared.Compilation!;
+        var command = compilation.ToCommand();
+        if (!PlayerSelector.TryParse(playerTarget, out var selector))
+            throw new InvalidOperationException($"Invalid Unity player selector '{playerTarget}'.");
+
+        var resolution = playerDiscovery.Resolve(selector);
+        if (resolution.Endpoint is not { } endpoint)
+            return new()
+            {
+                Outcome = ToolOutcome.NotConnected,
+                Diagnostic = resolution.Diagnostic,
+            };
+
+        try
+        {
+            command.Artifacts = PlayerArtifactStore.Materialize(
+                endpoint,
+                command.Artifacts
+            );
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ToolExecutionResult.FromException(
+                exception,
+                string.Empty,
+                "The MCP server could not stage the compiled player snippet."
+            );
+        }
+
+        var result = await EnqueuePlayerAsync(playerTarget, command, ct);
+        if (string.IsNullOrWhiteSpace(compilation.Warning)
+            || result.Outcome != ToolOutcome.Success)
+            return result;
+
+        return new()
+        {
+            Outcome = result.Outcome,
+            DisplayName = result.DisplayName,
+            Logs = result.Logs,
+            ReturnValue = result.ReturnValue,
+            Exception = result.Exception,
+            Diagnostic = compilation.Warning,
+        };
     }
 
     internal static bool CallsAssetDatabaseRefresh(string? snippet) =>
@@ -372,7 +506,21 @@ public sealed class UnityProjectOperations(
     async Task<ToolExecutionResult> EnqueueAsync(string projectPath, BridgeCommand command, CT ct)
     {
         command.TrackUsage = true;
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
+        if (PlayerSelector.TryParse(normalizedProjectPath, out _))
+        {
+            if (BridgeCommandKinds.IsProfiler(
+                    BridgeCommandKinds.Parse(command.CommandType)
+                ))
+                return await ExecutePlayerProfilerAsync(
+                    normalizedProjectPath,
+                    command,
+                    ct
+                );
+
+            return await EnqueuePlayerAsync(normalizedProjectPath, command, ct);
+        }
+
         var session = projectRegistry.GetOrAddProject(normalizedProjectPath);
         var blockedResult = await TryPrepareProjectAsync(normalizedProjectPath, session, command.CommandType, ct);
         if (blockedResult is { } preparationResult)
@@ -402,6 +550,189 @@ public sealed class UnityProjectOperations(
             );
 
         return result;
+    }
+
+    async Task<ToolExecutionResult> ExecutePlayerProfilerAsync(
+        string playerTarget,
+        BridgeCommand command,
+        CT ct)
+    {
+        var selector = PlayerSelector.TryParse(playerTarget, out var parsed)
+            ? parsed
+            : default;
+        var resolution = playerDiscovery.Resolve(selector);
+        if (resolution.Endpoint is not { } endpoint)
+            return ToolExecutionResult.NotConnected(
+                playerTarget,
+                resolution.Diagnostic
+            );
+
+        var markerName = "Conduit.Player." + endpoint.SessionInstanceId;
+        foreach (var project in projectRegistry.SnapshotProjects())
+        {
+            if (!Directory.Exists(
+                    ProjectPathNormalizer.ToPlatformPath(project.ProjectPath)
+                )
+                || !UnityProjectIdentity.Read(project.ProjectPath).Matches(endpoint))
+                continue;
+
+            var probe = await bridgeClient.ExecuteCommandAsync(
+                project.ProjectPath,
+                ConduitUtility.CreateRequestId(),
+                new()
+                {
+                    CommandType = BridgeCommandTypes.ProfilerHasMarker,
+                    Args = [markerName],
+                    TrackUsage = false,
+                },
+                UnityToolTimeouts.StatusCommand,
+                processIdHint: null,
+                ct
+            );
+            if (probe.Handshake is not { } handshake
+                || !string.Equals(
+                    handshake.UnityVersion,
+                    endpoint.UnityVersion,
+                    StringComparison.Ordinal
+                )
+                || probe.Result?.Outcome != ToolOutcome.Success
+                || !string.Equals(
+                    probe.Result.ReturnValue,
+                    "true",
+                    StringComparison.OrdinalIgnoreCase
+                ))
+                continue;
+
+            return await EnqueueAsync(project.ProjectPath, command, ct);
+        }
+
+        return new()
+        {
+            Outcome = ToolOutcome.NotConnected,
+            Diagnostic =
+                $"No matching Unity Editor is currently profiling {playerTarget}.",
+        };
+    }
+
+    async Task<ToolExecutionResult> EnqueuePlayerAsync(
+        string playerTarget,
+        BridgeCommand command,
+        CT ct)
+    {
+        var session = playerSessions.GetOrAdd(playerTarget, static target => new(target));
+        var queue = queues.GetOrAdd(
+            playerTarget,
+            _ => new(
+                loggerFactory.CreateLogger<ProjectCommandQueue>(),
+                ExecuteQueuedPlayerCommandAsync,
+                applicationLifetime.ApplicationStopping
+            )
+        );
+        var commandTimeout = UnityToolTimeouts.ForCommand(
+            BridgeCommandKinds.Parse(command.CommandType)
+        );
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(commandTimeout);
+        var result = await queue.EnqueueAsync(
+            new(session, command, timeoutCts.Token),
+            timeoutCts.Token
+        );
+        return !ct.IsCancellationRequested
+               && timeoutCts.IsCancellationRequested
+               && result.Outcome == ToolOutcome.Cancelled
+            ? ToolExecutionResult.Timeout(
+                commandTimeout,
+                $"Unity did not start or finish '{command.CommandType}' within {commandTimeout}."
+            )
+            : result;
+    }
+
+    async Task<ToolExecutionResult> ExecuteQueuedPlayerCommandAsync(
+        QueuedProjectCommand queuedCommand,
+        CT ct)
+    {
+        var context = queuedCommand.Session.StartCommand(queuedCommand.Command);
+        var timeout = UnityToolTimeouts.ForCommand(
+            BridgeCommandKinds.Parse(queuedCommand.Command.CommandType)
+        );
+        var reachable = false;
+        try
+        {
+            var execution = await bridgeClient.ExecuteCommandAsync(
+                queuedCommand.Session.ProjectPath,
+                context.RequestId,
+                queuedCommand.Command,
+                timeout,
+                processIdHint: null,
+                ct,
+                queuedCommand.RequestCancellation
+            );
+            reachable = execution.Handshake is { IsPlayer: true }
+                        && execution.FailureKind != BridgeRuntimeFailureKind.ProcessExited;
+            var result = execution.Result
+                         ?? ToToolExecutionResult(
+                             queuedCommand.Session.ProjectPath,
+                             queuedCommand.Command.CommandType,
+                             execution,
+                             timeout
+                         );
+            result = MaterializePlayerArtifacts(
+                queuedCommand.Command.CommandType,
+                result,
+                execution.Artifacts
+            );
+            return queuedCommand.Command.CommandType == BridgeCommandTypes.Restart
+                ? await CompletePlayerRestartAsync(result, ct)
+                : result;
+        }
+        finally
+        {
+            queuedCommand.Session.FinishCommand(context.RequestId, reachable);
+        }
+    }
+
+    async Task<ToolExecutionResult> CompletePlayerRestartAsync(
+        ToolExecutionResult result,
+        CT ct)
+    {
+        if (result.Outcome != ToolOutcome.Success
+            || string.IsNullOrWhiteSpace(result.ReturnValue))
+            return result;
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(result.ReturnValue);
+            var root = document.RootElement;
+            var processId = root.GetProperty("process_id").GetInt32();
+            var handoffToken = root.GetProperty("handoff_token").GetString();
+            if (processId <= 0 || string.IsNullOrWhiteSpace(handoffToken))
+                throw new InvalidDataException("The player restart response omitted its handoff identity.");
+
+            var endpoint = await playerDiscovery.WaitForHandoffAsync(
+                handoffToken,
+                processId,
+                TimeSpan.FromSeconds(20),
+                ct
+            );
+            if (endpoint is null)
+                return ToolExecutionResult.Timeout(
+                    TimeSpan.FromSeconds(20),
+                    $"The replacement player process {processId} did not advertise its bridge endpoint."
+                );
+
+            return ToolExecutionResult.Success(
+                string.Empty,
+                $"Player restarted.\nLIVE PLAYER PROCESS ID: `{endpoint.Selector}`"
+            );
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ToolExecutionResult.FromException(
+                exception,
+                result.Logs ?? string.Empty,
+                "The player restarted but returned an invalid handoff response."
+            );
+        }
     }
 
     /*
@@ -1061,6 +1392,70 @@ public sealed class UnityProjectOperations(
 
     static string BuildMinimalUnexpectedStatusResponse(string normalizedProjectPath, string diagnostic) =>
         $"Project: {normalizedProjectPath}\nBridge: unreachable\nDiagnostic: {diagnostic}";
+
+    static string AppendLivePlayers(
+        string report,
+        IReadOnlyCollection<BridgeEndpointDescriptor> players)
+    {
+        if (players.Count == 0)
+            return report;
+
+        var builder = new System.Text.StringBuilder(report.TrimEnd());
+        foreach (var player in players
+                     .OrderBy(static value => value.ProcessId)
+                     .ThenBy(static value => value.SessionInstanceId, StringComparer.Ordinal))
+        {
+            builder.Append("\nLIVE PLAYER PROCESS ID: `")
+                .Append(PlayerSelector.Format(player.ProcessId))
+                .Append('`');
+        }
+
+        return builder.ToString();
+    }
+
+    static ToolExecutionResult MaterializePlayerArtifacts(
+        string commandType,
+        ToolExecutionResult result,
+        BridgeArtifact[] artifacts)
+    {
+        if (artifacts.Length == 0 || commandType != BridgeCommandTypes.Screenshot)
+            return result;
+
+        try
+        {
+            var artifact = artifacts[0];
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "conduit",
+                "player-artifacts"
+            );
+            Directory.CreateDirectory(directory);
+            var extension = Path.GetExtension(artifact.Name);
+            var fileName = artifact.Sha256[..Math.Min(16, artifact.Sha256.Length)]
+                           + (string.IsNullOrWhiteSpace(extension) ? ".bin" : extension);
+            var path = Path.Combine(directory, fileName);
+            if (!File.Exists(path))
+                File.WriteAllBytes(path, artifact.Decode());
+
+            return new()
+            {
+                Outcome = result.Outcome,
+                DisplayName = result.DisplayName,
+                Logs = result.Logs,
+                ReturnValue = $"Player image captured: {path}",
+                Exception = result.Exception,
+                Diagnostic = result.Diagnostic,
+            };
+        }
+        catch (Exception exception)
+        {
+            return ToolExecutionResult.FromException(
+                exception,
+                result.Logs ?? string.Empty,
+                "The player screenshot was received but could not be stored by the MCP server."
+            );
+        }
+    }
 
     bool TrySkipOfflinePreflight(ProjectSession session, string normalizedProjectPath, out BridgeProjectHandshake? cachedHandshake)
     {

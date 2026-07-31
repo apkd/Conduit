@@ -583,6 +583,9 @@ namespace Conduit
                         case BridgeCommandKind.ProfilerBrowse:
                             await ExecuteProfilerBrowseAsync(operation);
                             break;
+                        case BridgeCommandKind.ProfilerHasMarker:
+                            await ExecuteProfilerHasMarkerAsync(operation);
+                            break;
                         default:
                             await CompleteCurrentAsync(
                                 new()

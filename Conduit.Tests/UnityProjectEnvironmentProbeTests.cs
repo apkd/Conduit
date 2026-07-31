@@ -626,7 +626,7 @@ public sealed class UnityProjectEnvironmentProbeTests
     [Test]
     public async Task FindMatchingProjectProcessRecognizesCreateProjectEditorAndIgnoresImportWorker()
     {
-        var projectPath = CreateProjectPath();
+        const string projectPath = @"C:\Users\runneradmin\AppData\Local\Temp\conduit-project";
         UnityProjectProcessInfo[] processes =
         [
             new(

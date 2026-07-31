@@ -1,7 +1,6 @@
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.IO.Pipes;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -78,6 +77,9 @@ public sealed class UnityBridgeClientTests
     [Test]
     public async Task BridgeTransportConnectsToDotNetNamedPipeServer()
     {
+        if (!OperatingSystem.IsWindows())
+            return;
+
         var pipeName = $"unity-conduit-test-{Guid.NewGuid():N}";
         await using var server = new NamedPipeServerStream(
             pipeName,
@@ -110,7 +112,7 @@ public sealed class UnityBridgeClientTests
             return;
 
         var projectPath = $"/tmp/conduit-invisible-pid-{Guid.NewGuid():N}";
-        await using var bridge = await FakeUnixBridge.StartAsync(projectPath, int.MaxValue);
+        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
 
         var result = await client.ExecuteCommandAsync(
@@ -133,7 +135,11 @@ public sealed class UnityBridgeClientTests
             return;
 
         var projectPath = $"/tmp/conduit-coalesced-response-{Guid.NewGuid():N}";
-        await using var bridge = await FakeUnixBridge.StartAsync(projectPath, int.MaxValue, coalesceCommandResponses: true);
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            coalesceCommandResponses: true
+        );
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
 
         var result = await client.ExecuteCommandAsync(
@@ -156,7 +162,7 @@ public sealed class UnityBridgeClientTests
             return;
 
         var projectPath = $"/tmp/conduit-cancel-test-{Guid.NewGuid():N}";
-        await using var bridge = await FakeUnixBridge.StartAsync(
+        await using var bridge = await FakeFifoBridge.StartAsync(
             projectPath,
             int.MaxValue,
             waitForCancellation: true
@@ -175,9 +181,11 @@ public sealed class UnityBridgeClientTests
         );
 
         cancellation.Cancel();
-        var result = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
 
-        await Assert.That(await bridge.CancelledRequestId).IsEqualTo("cancel-test-request");
+        await Assert.That(
+            await bridge.CancelledRequestId.WaitAsync(TimeSpan.FromSeconds(5))
+        ).IsEqualTo("cancel-test-request");
         await Assert.That(result.FailureKind).IsNull();
         await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Cancelled);
     }
@@ -213,7 +221,7 @@ public sealed class UnityBridgeClientTests
         await Assert.That(outcome.FinalResult).IsNull();
     }
 
-    sealed class FakeUnixBridge : IAsyncDisposable
+    sealed class FakeFifoBridge : IAsyncDisposable
     {
         static readonly UTF8Encoding Utf8NoBom = new(false);
         static readonly byte[] Newline = [(byte)'\n'];
@@ -222,54 +230,51 @@ public sealed class UnityBridgeClientTests
         readonly int editorProcessId;
         readonly bool coalesceCommandResponses;
         readonly bool waitForCancellation;
-        readonly string socketPath;
-        readonly Socket listener;
+        readonly string endpointDirectory;
         readonly Task serverTask;
         readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        FakeUnixBridge(
+        FakeFifoBridge(
             string projectPath,
             int editorProcessId,
             bool coalesceCommandResponses,
             bool waitForCancellation,
-            string socketPath,
-            Socket listener)
+            string endpointDirectory)
         {
             this.projectPath = projectPath;
             this.editorProcessId = editorProcessId;
             this.coalesceCommandResponses = coalesceCommandResponses;
             this.waitForCancellation = waitForCancellation;
-            this.socketPath = socketPath;
-            this.listener = listener;
+            this.endpointDirectory = endpointDirectory;
             serverTask = Task.Run(RunAsync);
         }
 
         public Task<string?> CancelledRequestId => cancelledRequestId.Task;
 
-        public static Task<FakeUnixBridge> StartAsync(
+        public static Task<FakeFifoBridge> StartAsync(
             string projectPath,
             int editorProcessId,
             bool coalesceCommandResponses = false,
             bool waitForCancellation = false)
         {
-            var socketPath = UnityBridgeClient.BridgeTransport.GetDotNetUnixPipePath(ConduitUtility.GetPipeName(projectPath));
+            var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
+                ConduitIpcPaths.GetDiscoveryRoots()[0],
+                "editor-" + ConduitUtility.GetPipeName(projectPath)
+            );
             try
             {
-                File.Delete(socketPath);
+                Directory.Delete(endpointDirectory, recursive: true);
             }
             catch { }
 
-            var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-            listener.Bind(new UnixDomainSocketEndPoint(socketPath));
-            listener.Listen(16);
+            Directory.CreateDirectory(Path.Combine(endpointDirectory, "clients"));
             return Task.FromResult(
-                new FakeUnixBridge(
+                new FakeFifoBridge(
                     projectPath,
                     editorProcessId,
                     coalesceCommandResponses,
                     waitForCancellation,
-                    socketPath,
-                    listener
+                    endpointDirectory
                 )
             );
         }
@@ -280,74 +285,129 @@ public sealed class UnityBridgeClientTests
             {
                 while (!cts.IsCancellationRequested)
                 {
-                    var socket = await listener.AcceptAsync(cts.Token);
-                    _ = Task.Run(() => HandleClientAsync(socket));
+                    foreach (var clientDirectory in Directory.GetDirectories(
+                                 Path.Combine(endpointDirectory, "clients")
+                             ))
+                    {
+                        var publicationPath = Path.Combine(clientDirectory, "request.json");
+                        if (!File.Exists(publicationPath))
+                            continue;
+
+                        try
+                        {
+                            File.Move(
+                                publicationPath,
+                                Path.Combine(clientDirectory, "accepted.json")
+                            );
+                        }
+                        catch (Exception exception) when (
+                            exception is IOException or UnauthorizedAccessException)
+                        {
+                            continue;
+                        }
+
+                        _ = Task.Run(() => HandleClientAsync(clientDirectory));
+                    }
+
+                    await Task.Delay(10, cts.Token);
                 }
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
         }
 
-        async Task HandleClientAsync(Socket socket)
+        async Task HandleClientAsync(string clientDirectory)
         {
-            await using var stream = new NetworkStream(socket, ownsSocket: true);
-            using var reader = new StreamReader(stream, Utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
-
-            await reader.ReadLineAsync(cts.Token);
-            await WritePayloadAsync(stream, new JsonObject
+            try
             {
-                ["protocol_version"] = 2,
-                ["message_type"] = "hello",
-                ["project"] = new JsonObject
-                {
-                    ["project_path"] = projectPath,
-                    ["display_name"] = Path.GetFileName(projectPath),
-                    ["unity_version"] = "6000.3.10f1",
-                    ["editor_process_id"] = editorProcessId,
-                    ["session_instance_id"] = "fake-bridge",
-                    ["last_seen_utc"] = DateTimeOffset.UtcNow,
-                },
-            }, cts.Token);
-
-            var commandPayload = await reader.ReadLineAsync(cts.Token);
-            var requestId = JsonNode.Parse(commandPayload!)?["request_id"]?.GetValue<string>() ?? "";
-            var commandStarted = new JsonObject
-            {
-                ["protocol_version"] = 2,
-                ["message_type"] = "command_started",
-                ["request_id"] = requestId,
-            };
-            var commandResult = new JsonObject
-            {
-                ["protocol_version"] = 2,
-                ["message_type"] = "command_result",
-                ["request_id"] = requestId,
-                ["result"] = new JsonObject
-                {
-                    ["outcome"] = ToolOutcome.Success,
-                    ["logs"] = "",
-                    ["return_value"] = "",
-                },
-            };
-
-            if (waitForCancellation)
-            {
-                await WritePayloadAsync(stream, commandStarted, cts.Token);
-                var cancellationPayload = await reader.ReadLineAsync(cts.Token);
-                var cancellation = JsonNode.Parse(cancellationPayload!);
-                cancelledRequestId.TrySetResult(
-                    cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
-                        ? cancellation["request_id"]?.GetValue<string>()
-                        : null
+                await using var input = new FileStream(
+                    Path.Combine(clientDirectory, "to-unity.fifo"),
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite,
+                    4096,
+                    FileOptions.Asynchronous
                 );
-                commandResult["result"]!["outcome"] = ToolOutcome.Cancelled;
-                await WritePayloadAsync(stream, commandResult, cts.Token);
+                await using var output = new FileStream(
+                    Path.Combine(clientDirectory, "from-unity.fifo"),
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.ReadWrite,
+                    4096,
+                    FileOptions.Asynchronous
+                );
+                await File.WriteAllTextAsync(
+                    Path.Combine(clientDirectory, "connected"),
+                    string.Empty,
+                    cts.Token
+                );
+                using var reader = new StreamReader(
+                    input,
+                    Utf8NoBom,
+                    detectEncodingFromByteOrderMarks: false,
+                    leaveOpen: true
+                );
+
+                await reader.ReadLineAsync(cts.Token);
+                await WritePayloadAsync(output, new JsonObject
+                {
+                    ["protocol_version"] = BridgeProtocol.Version,
+                    ["message_type"] = "hello",
+                    ["project"] = new JsonObject
+                    {
+                        ["project_path"] = projectPath,
+                        ["display_name"] = Path.GetFileName(projectPath),
+                        ["unity_version"] = "6000.3.10f1",
+                        ["editor_process_id"] = editorProcessId,
+                        ["session_instance_id"] = "fake-bridge",
+                        ["last_seen_utc"] = DateTimeOffset.UtcNow,
+                    },
+                }, cts.Token);
+
+                var commandPayload = await reader.ReadLineAsync(cts.Token);
+                var requestId = JsonNode.Parse(commandPayload!)?["request_id"]?.GetValue<string>() ?? "";
+                var commandStarted = new JsonObject
+                {
+                    ["protocol_version"] = BridgeProtocol.Version,
+                    ["message_type"] = "command_started",
+                    ["request_id"] = requestId,
+                };
+                var commandResult = new JsonObject
+                {
+                    ["protocol_version"] = BridgeProtocol.Version,
+                    ["message_type"] = "command_result",
+                    ["request_id"] = requestId,
+                    ["result"] = new JsonObject
+                    {
+                        ["outcome"] = ToolOutcome.Success,
+                        ["logs"] = "",
+                        ["return_value"] = "",
+                    },
+                };
+
+                if (waitForCancellation)
+                {
+                    await WritePayloadAsync(output, commandStarted, cts.Token);
+                    var cancellationPayload = await reader.ReadLineAsync(cts.Token);
+                    var cancellation = JsonNode.Parse(cancellationPayload!);
+                    cancelledRequestId.TrySetResult(
+                        cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
+                            ? cancellation["request_id"]?.GetValue<string>()
+                            : null
+                    );
+                    commandResult["result"]!["outcome"] = ToolOutcome.Cancelled;
+                    await WritePayloadAsync(output, commandResult, cts.Token);
+                }
+                else if (coalesceCommandResponses)
+                    await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
+                else
+                {
+                    await WritePayloadAsync(output, commandStarted, cts.Token);
+                    await WritePayloadAsync(output, commandResult, cts.Token);
+                }
             }
-            else if (coalesceCommandResponses)
-                await WritePayloadsAsync(stream, cts.Token, commandStarted, commandResult);
-            else
+            catch (Exception exception) when (!cts.IsCancellationRequested)
             {
-                await WritePayloadAsync(stream, commandStarted, cts.Token);
-                await WritePayloadAsync(stream, commandResult, cts.Token);
+                Console.Error.WriteLine($"Fake FIFO bridge client failed: {exception}");
             }
         }
 
@@ -368,7 +428,6 @@ public sealed class UnityBridgeClientTests
         public async ValueTask DisposeAsync()
         {
             cts.Cancel();
-            listener.Dispose();
             try
             {
                 await serverTask.WaitAsync(TimeSpan.FromSeconds(1));
@@ -377,7 +436,7 @@ public sealed class UnityBridgeClientTests
 
             try
             {
-                File.Delete(socketPath);
+                Directory.Delete(endpointDirectory, recursive: true);
             }
             catch { }
 

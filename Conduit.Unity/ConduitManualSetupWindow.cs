@@ -1,12 +1,15 @@
 #nullable enable
 
+#if MODULE_IMGUI
 using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
+#if MODULE_UNITYWEBREQUEST
 using UnityEngine.Networking;
+#endif
 
 namespace Conduit
 {
@@ -441,6 +444,7 @@ namespace Conduit
                     : value.Replace("\r\n", "\n").Split('\n');
         }
 
+#if MODULE_UNITYWEBREQUEST
         static async Task<string> DownloadReadmeAsync()
         {
             using var request = UnityWebRequest.Get(ReadmeUrl);
@@ -457,6 +461,12 @@ namespace Conduit
 
             return request.downloadHandler.text;
         }
+#else
+        static Task<string> DownloadReadmeAsync()
+            => Task.FromException<string>(
+                new NotSupportedException("The Unity Web Request module is unavailable.")
+            );
+#endif
 
         void DrawMarkdown(string[] markdownLines)
         {
@@ -626,3 +636,4 @@ namespace Conduit
         }
     }
 }
+#endif

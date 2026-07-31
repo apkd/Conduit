@@ -9,7 +9,9 @@ using System.Threading.Tasks;
 using UnityEditor;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 using UnityEngine;
+#if MODULE_UNITYWEBREQUEST
 using UnityEngine.Networking;
+#endif
 
 namespace Conduit
 {
@@ -385,6 +387,10 @@ namespace Conduit
 
         static bool CanDownloadServer(out string reason)
         {
+#if !MODULE_UNITYWEBREQUEST
+            reason = "The Unity Web Request module is unavailable.";
+            return false;
+#else
             switch (Application.platform)
             {
                 case RuntimePlatform.WindowsEditor:
@@ -395,6 +401,7 @@ namespace Conduit
                     reason = "The setup wizard can currently download server binaries only on Windows and Linux.";
                     return false;
             }
+#endif
         }
 
         static bool CanAutomaticallyUpdateServer(string executablePath, out string reason)
@@ -647,6 +654,7 @@ namespace Conduit
             catch { }
         }
 
+#if MODULE_UNITYWEBREQUEST
         static async Task DownloadTargetAsync(
             DownloadTarget target,
             int progressId,
@@ -708,6 +716,17 @@ namespace Conduit
                 TryDeleteFile(stagedPath);
             }
         }
+#else
+        static Task DownloadTargetAsync(
+            DownloadTarget target,
+            int progressId,
+            Func<bool> wasCancelled,
+            int index,
+            int total
+        ) => Task.FromException(
+            new NotSupportedException("The Unity Web Request module is unavailable.")
+        );
+#endif
 
         internal static void ReplaceDownloadedFile(string stagedPath, string destinationPath)
         {

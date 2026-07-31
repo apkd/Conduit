@@ -1,6 +1,14 @@
 {
-    "name": "Conduit.Tests.PlayMode",
-    "optionalUnityReferences": [
-        "TestAssemblies"
-    ]
+  "name": "Conduit.Tests.PlayMode",
+  "references": [
+    "Conduit.Unity.Runtime"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "defineConstraints": [
+    "DEBUG",
+    "CONDUIT_INCLUDE_IN_DEBUG_BUILDS",
+    "ENABLE_MONO"
+  ]
 }

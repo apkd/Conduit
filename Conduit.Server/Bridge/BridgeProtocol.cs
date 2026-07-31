@@ -5,6 +5,8 @@ namespace Conduit;
 
 public static class BridgeCommandTypes
 {
+    public const string Help = "help";
+    public const string Restart = "restart";
     public const string Status = "status";
     public const string PlayMode = "playmode";
     public const string EditMode = "editmode";
@@ -29,6 +31,9 @@ public static class BridgeCommandTypes
     public const string ProfilerRecord = "profiler_record";
     public const string ProfilerOverview = "profiler_overview";
     public const string ProfilerBrowse = "profiler_browse";
+    internal const string ProfilerHasMarker = "profiler_has_marker";
+    internal const string CompilationReferences = "compilation_references";
+    internal const string AssemblyBlob = "assembly_blob";
 }
 
 static class BridgeMessageTypes
@@ -42,7 +47,7 @@ static class BridgeMessageTypes
 
 sealed class BridgeMessage
 {
-    public int ProtocolVersion { get; set; } = 2;
+    public int ProtocolVersion { get; set; } = BridgeProtocol.Version;
 
     public string MessageType { get; set; } = string.Empty;
 
@@ -106,12 +111,38 @@ public sealed class BridgeProjectHandshake
 
     public int EditorProcessId { get; set; }
 
+    public int ProcessId { get; set; }
+
+    public string EndpointKind { get; set; } = BridgeEndpointKinds.Editor;
+
+    public string Platform { get; set; } = string.Empty;
+
+    public string BuildGuid { get; set; } = string.Empty;
+
+    public string CloudProjectId { get; set; } = string.Empty;
+
+    public string CompanyName { get; set; } = string.Empty;
+
+    public string ProductName { get; set; } = string.Empty;
+
+    public bool CanMonitorProcess { get; set; } = true;
+
+    public string[] Capabilities { get; set; } = [];
+
     /// <summary>The effective editor log path for this Unity process.</summary>
     public string EditorLogPath { get; set; } = string.Empty;
 
     public string SessionInstanceId { get; set; } = string.Empty;
 
+    public string HandoffToken { get; set; } = string.Empty;
+
     public DateTimeOffset LastSeenUtc { get; set; }
+
+    [JsonIgnore]
+    public int EffectiveProcessId => ProcessId > 0 ? ProcessId : EditorProcessId;
+
+    [JsonIgnore]
+    public bool IsPlayer => EndpointKind == BridgeEndpointKinds.Player;
 }
 
 sealed class BridgeCommand
@@ -123,6 +154,9 @@ sealed class BridgeCommand
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Snippet { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayName { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TestFilter { get; set; }
@@ -138,6 +172,8 @@ sealed class BridgeCommand
     public bool TrackUsage { get; set; }
 
     public string[] Args { get; set; } = [];
+
+    public BridgeArtifact[] Artifacts { get; set; } = [];
 }
 
 sealed class BridgeCommandResult
@@ -157,6 +193,8 @@ sealed class BridgeCommandResult
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Diagnostic { get; set; }
+
+    public BridgeArtifact[] Artifacts { get; set; } = [];
 
     public ToolExecutionResult ToToolExecutionResult() =>
         new()
@@ -180,6 +218,53 @@ sealed class BridgeCommandResult
     }
 }
 
+sealed class BridgeArtifact
+{
+    const int EncodedChunkSize = 48 * 1024;
+
+    public string Name { get; set; } = string.Empty;
+
+    public string MediaType { get; set; } = "application/octet-stream";
+
+    public string Sha256 { get; set; } = string.Empty;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RelativePath { get; set; }
+
+    public string[] Chunks { get; set; } = [];
+
+    public static BridgeArtifact FromBytes(string name, string mediaType, ReadOnlySpan<byte> bytes)
+    {
+        var encoded = Convert.ToBase64String(bytes);
+        var chunkCount = Math.Max(1, (encoded.Length + EncodedChunkSize - 1) / EncodedChunkSize);
+        var chunks = new string[chunkCount];
+        for (var index = 0; index < chunkCount; index++)
+        {
+            var start = index * EncodedChunkSize;
+            chunks[index] = encoded.Substring(start, Math.Min(EncodedChunkSize, encoded.Length - start));
+        }
+
+        return new()
+        {
+            Name = name,
+            MediaType = mediaType,
+            Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),
+            Chunks = chunks,
+        };
+    }
+
+    public byte[] Decode()
+    {
+        var encoded = string.Concat(Chunks);
+        var bytes = Convert.FromBase64String(encoded);
+        var actualHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        if (!string.Equals(actualHash, Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Artifact '{Name}' failed SHA-256 verification.");
+
+        return bytes;
+    }
+}
+
 sealed class BridgeExceptionInfo
 {
     public string Type { get; set; } = string.Empty;
@@ -192,6 +277,8 @@ sealed class BridgeExceptionInfo
 
 static class BridgeProtocol
 {
+    public const int Version = 4;
+
     public static string Serialize(BridgeMessage message) =>
         JsonSerializer.Serialize(message, ConduitJsonContext.Default.BridgeMessage);
 

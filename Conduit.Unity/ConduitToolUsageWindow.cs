@@ -1,5 +1,6 @@
 #nullable enable
 
+#if MODULE_IMGUI
 using System.Globalization;
 using UnityEditor;
 using UnityEngine;
@@ -180,3 +181,4 @@ namespace Conduit
         }
     }
 }
+#endif

@@ -134,7 +134,9 @@ static void ConfigureCommon(
     services.AddSingleton(TimeProvider.System);
     services.AddSingleton<RecentProjectStore>();
     services.AddSingleton<UnityProjectRegistry>();
+    services.AddSingleton<UnityPlayerDiscovery>();
     services.AddSingleton<UnityBridgeClient>();
+    services.AddSingleton<PlayerSnippetCompiler>();
     services.AddSingleton<UnityProjectEnvironmentInspector>();
     services.AddSingleton<UnityEditorProcessController>();
     services.AddSingleton<UnitySceneReloadPromptRecovery>();

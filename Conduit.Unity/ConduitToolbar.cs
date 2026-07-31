@@ -1,6 +1,6 @@
 #nullable enable
 
-#if UNITY_6000_3_OR_NEWER
+#if UNITY_6000_3_OR_NEWER && MODULE_IMGUI && MODULE_UIELEMENTS
 using JetBrains.Annotations;
 using UnityEditor;
 using UnityEditor.Toolbars;

@@ -613,17 +613,21 @@ sealed partial class UnityProjectEnvironmentProbe
 
     internal static UnityProjectProcessInfo? FindMatchingProjectProcess(
         IReadOnlyList<UnityProjectProcessInfo> runningUnityProcesses,
-        string normalizedProjectPath
+        string projectPath
     )
     {
+        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         foreach (var processInfo in runningUnityProcesses)
         {
             // import workers use the editor executable and repeat their parent's project path
             if (AuxiliaryUnityProcessArgumentRegex().IsMatch(processInfo.CommandLine ?? ""))
                 continue;
 
-            var projectPath = ConduitUtility.TryExtractProjectPathFromCommandLine(processInfo.CommandLine, EditorProjectPathArgumentRegex());
-            if (string.Equals(projectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+            var processProjectPath = ConduitUtility.TryExtractProjectPathFromCommandLine(
+                processInfo.CommandLine,
+                EditorProjectPathArgumentRegex()
+            );
+            if (string.Equals(processProjectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
                 return processInfo;
         }
 

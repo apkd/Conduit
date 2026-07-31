@@ -319,10 +319,10 @@ public sealed class UnityRestartAndPreflightPolicyTests
 
         UnityEditorProcessController.ApplyXdgBaseDirectoryDefaults(startInfo);
 
-        await Assert.That(startInfo.Environment["XDG_CONFIG_HOME"]).IsEqualTo("/home/sample/.config");
-        await Assert.That(startInfo.Environment["XDG_DATA_HOME"]).IsEqualTo("/home/sample/.local/share");
-        await Assert.That(startInfo.Environment["XDG_CACHE_HOME"]).IsEqualTo("/home/sample/.cache");
-        await Assert.That(startInfo.Environment["XDG_STATE_HOME"]).IsEqualTo("/home/sample/.local/state");
+        await Assert.That(startInfo.Environment["XDG_CONFIG_HOME"]).IsEqualTo(Path.Combine("/home/sample", ".config"));
+        await Assert.That(startInfo.Environment["XDG_DATA_HOME"]).IsEqualTo(Path.Combine("/home/sample", ".local", "share"));
+        await Assert.That(startInfo.Environment["XDG_CACHE_HOME"]).IsEqualTo(Path.Combine("/home/sample", ".cache"));
+        await Assert.That(startInfo.Environment["XDG_STATE_HOME"]).IsEqualTo(Path.Combine("/home/sample", ".local", "state"));
         await Assert.That(startInfo.Environment["XDG_CONFIG_DIRS"]).IsEqualTo("/etc/xdg");
         await Assert.That(startInfo.Environment["XDG_DATA_DIRS"]).IsEqualTo("/usr/local/share:/usr/share");
     }
@@ -507,7 +507,7 @@ public sealed class UnityRestartAndPreflightPolicyTests
         startInfo.Environment.Clear();
         startInfo.Environment["HOME"] = homePath;
         startInfo.Environment["USER"] = "sample";
-        startInfo.Environment["XDG_DATA_DIRS"] = "/usr/local/share:/usr/share";
+        startInfo.Environment["XDG_DATA_DIRS"] = string.Join(Path.PathSeparator, "/usr/local/share", "/usr/share");
         startInfo.Environment["XDG_CONFIG_DIRS"] = "/etc/xdg";
         try
         {

@@ -221,15 +221,15 @@ public sealed class UnityProjectOperationsPolicyTests
             fileName: "capture"
         );
 
-        await Assert.That(string.Join("\n", args)).IsEqualTo(
-            """
+        var expected = """
             action=capture
             frames=120
             delay_seconds=1.5
             target=play_mode
             file_name=capture
-            """
-        );
+            """.ReplaceLineEndings("\n");
+
+        await Assert.That(string.Join("\n", args)).IsEqualTo(expected);
     }
 
     [Test]

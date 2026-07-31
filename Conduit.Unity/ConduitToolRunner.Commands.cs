@@ -40,7 +40,17 @@ namespace Conduit
             => ExecuteCommandAsync(() => find_references_to.GetDependencies(operation.target ?? string.Empty));
 
         static Task ExecuteScreenshotAsync(PendingOperationState operation)
+#if MODULE_IMAGECONVERSION && MODULE_SCREENCAPTURE
             => ExecuteCommandAsync(() => screenshot.CaptureAsync(operation.target ?? string.Empty));
+#else
+            => CompleteCurrentAsync(
+                new()
+                {
+                    outcome = ToolOutcome.Exception,
+                    diagnostic = screenshot.ModuleUnavailableDiagnostic,
+                }
+            );
+#endif
 
         static Task ExecuteFindReferencesToAsync(PendingOperationState operation)
             => ExecuteCommandAsync(() => find_references_to.FindReferencesTo(operation.target ?? string.Empty, operation.rebuild_cache));
@@ -122,6 +132,25 @@ namespace Conduit
             try
             {
                 await CompleteCurrentAsync(profiler.Browse(operation.args));
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
+        static async Task ExecuteProfilerHasMarkerAsync(PendingOperationState operation)
+        {
+            try
+            {
+                var markerName = operation.args.Length > 0
+                    ? operation.args[0]
+                    : string.Empty;
+                await CompleteCurrentAsync(
+                    CreateSuccessResult(
+                        profiler.HasMarker(markerName) ? "true" : "false"
+                    )
+                );
             }
             catch (Exception exception)
             {

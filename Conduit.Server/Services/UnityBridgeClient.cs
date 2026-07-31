@@ -10,7 +10,7 @@ using ZLogger;
 
 namespace Conduit;
 
-public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
+public sealed class UnityBridgeClient
 {
     static readonly TimeSpan connectAttemptTimeout = TimeSpan.FromMilliseconds(750);
     static readonly TimeSpan initialConnectWindow = TimeSpan.FromSeconds(15);
@@ -20,6 +20,17 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
     static readonly UTF8Encoding utf8NoBom = new(false);
     static readonly byte[] newline = [(byte)'\n'];
     readonly ConcurrentDictionary<string, CachedConnectionEntry> connectionCache = new(StringComparer.OrdinalIgnoreCase);
+    readonly UnityPlayerDiscovery playerDiscovery;
+    readonly ILogger<UnityBridgeClient> logger;
+
+    public UnityBridgeClient(ILogger<UnityBridgeClient> logger)
+        : this(new(), logger) { }
+
+    public UnityBridgeClient(UnityPlayerDiscovery playerDiscovery, ILogger<UnityBridgeClient> logger)
+    {
+        this.playerDiscovery = playerDiscovery;
+        this.logger = logger;
+    }
 
     internal async Task<BridgeClientResult> ProbeAsync(string projectPath, int? processIdHint, CancellationToken ct)
         => await ProbeAsync(projectPath, processIdHint, initialConnectWindow, ct);
@@ -28,7 +39,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         var cacheEntry = connectionCache.GetOrAdd(normalizedProjectPath, static _ => new());
         var gateAcquired = false;
 
@@ -80,7 +91,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         CancellationToken commandCancellation = default
     )
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         var cacheEntry = connectionCache.GetOrAdd(normalizedProjectPath, static _ => new());
 
         await cacheEntry.Gate.WaitAsync(ct);
@@ -138,7 +149,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
     internal bool TryGetLiveHandshake(string projectPath, out BridgeProjectHandshake? handshake)
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         if (!connectionCache.TryGetValue(normalizedProjectPath, out var cacheEntry))
         {
             handshake = null;
@@ -283,6 +294,8 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     return connectResult;
 
                 lastFailure = connectResult.Result;
+                if (lastFailure.FailureKind == BridgeRuntimeFailureKind.AmbiguousTarget)
+                    break;
                 var remaining = deadline - DateTimeOffset.UtcNow;
                 if (remaining <= TimeSpan.Zero)
                     break;
@@ -303,17 +316,46 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
 
     async Task<(BridgeClientConnection? Connection, BridgeClientResult Result)> TryConnectAsync(string projectPath, CancellationToken ct)
     {
-        var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
-        var pipeName = ConduitUtility.GetPipeName(normalizedProjectPath);
+        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         BridgeTransport? transport = null;
 
         try
         {
-            transport = await BridgeTransport.ConnectAsync(pipeName, connectAttemptTimeout, ct);
+            BridgeEndpointDescriptor? endpoint = null;
+            if (PlayerSelector.TryParse(normalizedProjectPath, out var playerSelector))
+            {
+                var resolution = playerDiscovery.Resolve(playerSelector);
+                if (resolution.Endpoint is null)
+                    return (null, BridgeClientResult.Failure(
+                        handshake: null,
+                        resolution.IsAmbiguous
+                            ? BridgeRuntimeFailureKind.AmbiguousTarget
+                            : BridgeRuntimeFailureKind.ConnectTimedOut,
+                        resolution.Diagnostic!,
+                        commandSent: false
+                    ));
+
+                endpoint = resolution.Endpoint;
+                transport = await BridgeTransport.ConnectAsync(endpoint, connectAttemptTimeout, ct);
+            }
+            else
+            {
+                var pipeName = ConduitUtility.GetPipeName(normalizedProjectPath);
+                transport = await BridgeTransport.ConnectAsync(pipeName, connectAttemptTimeout, ct);
+            }
 
             try
             {
-                var hello = BridgeMessage.CreateHello(new() { ProjectPath = normalizedProjectPath });
+                var hello = BridgeMessage.CreateHello(
+                    endpoint is null
+                        ? new() { ProjectPath = normalizedProjectPath }
+                        : new()
+                        {
+                            EndpointKind = BridgeEndpointKinds.Player,
+                            ProcessId = endpoint.ProcessId,
+                            SessionInstanceId = endpoint.SessionInstanceId,
+                        }
+                );
 
                 await transport.WritePayloadAsync(BridgeProtocol.Serialize(hello), ct);
             }
@@ -365,13 +407,32 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
             }
 
             response.Project.ProjectPath = ProjectPathNormalizer.Normalize(response.Project.ProjectPath);
-            if (!string.Equals(response.Project.ProjectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+            if (endpoint is null
+                && !string.Equals(response.Project.ProjectPath, normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
             {
                 await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(
                     handshake: null,
                     BridgeRuntimeFailureKind.ProjectMismatch,
                     $"Unity connection responded for '{response.Project.ProjectPath}' while '{normalizedProjectPath}' was requested.",
+                    commandSent: false
+                ));
+            }
+
+            if (endpoint is not null
+                && (response.Project.EndpointKind != BridgeEndpointKinds.Player
+                    || response.Project.EffectiveProcessId != endpoint.ProcessId
+                    || !string.Equals(
+                        response.Project.SessionInstanceId,
+                        endpoint.SessionInstanceId,
+                        StringComparison.Ordinal
+                    )))
+            {
+                await DisposeConnectionAsync(transport);
+                return (null, BridgeClientResult.Failure(
+                    handshake: null,
+                    BridgeRuntimeFailureKind.ProjectMismatch,
+                    $"The endpoint for '{normalizedProjectPath}' changed during its bridge handshake.",
                     commandSent: false
                 ));
             }
@@ -435,10 +496,10 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         CancellationToken ct
     )
     {
-        if (handshake.EditorProcessId is not > 0)
+        if (!handshake.CanMonitorProcess || handshake.EffectiveProcessId is not > 0)
             return null;
 
-        var process = ConduitUtility.TryGetProcess(handshake.EditorProcessId);
+        var process = ConduitUtility.TryGetProcess(handshake.EffectiveProcessId);
         return process is null
             ? null
             : WaitForProcessExitAsync(handshake, process, commandType, commandSent, ct);
@@ -471,7 +532,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         BridgeClientResult.Failure(
             handshake,
             BridgeRuntimeFailureKind.ProcessExited,
-            $"Unity editor process {handshake.EditorProcessId} exited while '{context}' was running.",
+            $"Unity {handshake.EndpointKind} process {handshake.EffectiveProcessId} exited while '{context}' was running.",
             commandSent
         );
 
@@ -516,8 +577,27 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         {
             return OperatingSystem.IsWindows()
                 ? await ConnectNamedPipeAsync(pipeName, timeout, ct)
-                : await ConnectUnixSocketAsync(pipeName, timeout, ct);
+                : await ConnectFifoAsync(
+                    ResolveEditorFifoEndpoint(pipeName),
+                    timeout,
+                    ct
+                );
         }
+
+        public static Task<BridgeTransport> ConnectAsync(
+            BridgeEndpointDescriptor endpoint,
+            TimeSpan timeout,
+            CancellationToken ct) =>
+            endpoint.Transport switch
+            {
+                BridgeTransportKinds.NamedPipe when endpoint.PipeName.Length > 0
+                    => ConnectNamedPipeAsync(endpoint.PipeName, timeout, ct),
+                BridgeTransportKinds.Fifo when endpoint.EndpointDirectoryPath.Length > 0
+                    => ConnectFifoAsync(endpoint.EndpointDirectoryPath, timeout, ct),
+                _ => throw new IOException(
+                    $"Unity endpoint '{endpoint.EndpointId}' advertises unsupported transport '{endpoint.Transport}'."
+                ),
+            };
 
         public ValueTask<string?> ReadLineAsync(CancellationToken ct) => readLineAsync(ct);
 
@@ -533,11 +613,18 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         }
 
         internal static BridgeTransport FromStream(Stream stream, Func<bool> isConnected, Func<ValueTask> disposeAsync)
+            => FromStreams(stream, stream, isConnected, disposeAsync);
+
+        internal static BridgeTransport FromStreams(
+            Stream input,
+            Stream output,
+            Func<bool> isConnected,
+            Func<ValueTask> disposeAsync)
         {
-            var reader = new StreamReader(stream, utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+            var reader = new StreamReader(input, utf8NoBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
             return new(
                 reader.ReadLineAsync,
-                (payload, ct) => WriteStreamPayloadAsync(stream, payload, ct),
+                (payload, ct) => WriteStreamPayloadAsync(output, payload, ct),
                 isConnected,
                 () => DisposeStreamAsync(reader, disposeAsync)
             );
@@ -566,6 +653,191 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                 throw;
             }
         }
+
+        static async Task<BridgeTransport> ConnectFifoAsync(
+            string endpointDirectory,
+            TimeSpan timeout,
+            CancellationToken ct)
+        {
+            if (OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("POSIX FIFOs require a Linux MCP server.");
+            if (!Directory.Exists(endpointDirectory))
+                throw new IOException(
+                    $"Unity FIFO endpoint '{endpointDirectory}' is unavailable."
+                );
+
+            var clientsDirectory = Path.Combine(endpointDirectory, "clients");
+            Directory.CreateDirectory(clientsDirectory);
+            var clientDirectory = Path.Combine(clientsDirectory, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(clientDirectory);
+            TrySetDirectoryMode(clientDirectory);
+
+            var requestPath = Path.Combine(clientDirectory, "to-unity.fifo");
+            var responsePath = Path.Combine(clientDirectory, "from-unity.fifo");
+            CreateFifo(requestPath);
+            CreateFifo(responsePath);
+
+            var requestKeeper = OpenFifoKeeper(requestPath);
+            var responseKeeper = OpenFifoKeeper(responsePath);
+            FileStream? request = null;
+            FileStream? response = null;
+
+            try
+            {
+                var publicationPath = Path.Combine(clientDirectory, "request.json");
+                await File.WriteAllTextAsync(
+                    publicationPath + ".tmp",
+                    $$"""{"protocol_version":{{BridgeProtocol.Version}}}""",
+                    utf8NoBom,
+                    ct
+                );
+                File.Move(publicationPath + ".tmp", publicationPath);
+
+                request = new(
+                    requestPath,
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.ReadWrite,
+                    bufferSize: 4096,
+                    FileOptions.Asynchronous
+                );
+                response = new(
+                    responsePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite,
+                    bufferSize: 4096,
+                    FileOptions.Asynchronous
+                );
+
+                var connectedPath = Path.Combine(clientDirectory, "connected");
+                var deadline = DateTime.UtcNow + timeout;
+                while (!File.Exists(connectedPath))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (DateTime.UtcNow >= deadline)
+                        throw new TimeoutException(
+                            $"Unity did not accept FIFO client '{clientDirectory}' in time."
+                        );
+
+                    await Task.Delay(10, ct);
+                }
+
+                CloseFifoKeeper(ref requestKeeper);
+                CloseFifoKeeper(ref responseKeeper);
+                var connected = true;
+                return FromStreams(
+                    response,
+                    request,
+                    () => connected,
+                    async () =>
+                    {
+                        connected = false;
+                        await request.DisposeAsync();
+                        await response.DisposeAsync();
+                        TryDeleteClientDirectory(clientDirectory);
+                    }
+                );
+            }
+            catch
+            {
+                CloseFifoKeeper(ref requestKeeper);
+                CloseFifoKeeper(ref responseKeeper);
+                if (request is not null)
+                    await request.DisposeAsync();
+                if (response is not null)
+                    await response.DisposeAsync();
+                TryDeleteClientDirectory(clientDirectory);
+                throw;
+            }
+        }
+
+        static string ResolveEditorFifoEndpoint(string pipeName)
+        {
+            string? fallback = null;
+            foreach (var root in ConduitIpcPaths.GetDiscoveryRoots())
+            {
+                var path = ConduitIpcPaths.GetEndpointDirectory(
+                    root,
+                    "editor-" + pipeName
+                );
+                fallback ??= path;
+                if (Directory.Exists(path))
+                    return path;
+            }
+
+            return fallback
+                   ?? throw new IOException(
+                       "No IPC root is available for the Unity Editor FIFO endpoint."
+                   );
+        }
+
+        static void CreateFifo(string path)
+        {
+            const uint userReadWrite = 0x180;
+            if (mkfifo(path, userReadWrite) != 0)
+                throw new IOException(
+                    $"Could not create FIFO '{path}' (errno {Marshal.GetLastPInvokeError()})."
+                );
+        }
+
+        static int OpenFifoKeeper(string path)
+        {
+            const int readWrite = 2;
+            const int nonBlocking = 0x800;
+            const int closeOnExec = 0x80000;
+            var descriptor = open(path, readWrite | nonBlocking | closeOnExec);
+            if (descriptor < 0)
+                throw new IOException(
+                    $"Could not open FIFO keeper '{path}' (errno {Marshal.GetLastPInvokeError()})."
+                );
+
+            return descriptor;
+        }
+
+        static void CloseFifoKeeper(ref int descriptor)
+        {
+            if (descriptor < 0)
+                return;
+
+            close(descriptor);
+            descriptor = -1;
+        }
+
+        static void TrySetDirectoryMode(string path)
+        {
+            if (OperatingSystem.IsWindows())
+                return;
+
+            try
+            {
+                File.SetUnixFileMode(
+                    path,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                );
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { }
+        }
+
+        static void TryDeleteClientDirectory(string path)
+        {
+            try
+            {
+                Directory.Delete(path, recursive: true);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException) { }
+        }
+
+        [DllImport("libc", SetLastError = true)]
+        static extern int mkfifo(string pathname, uint mode);
+
+        [DllImport("libc", SetLastError = true)]
+        static extern int open(string pathname, int flags);
+
+        [DllImport("libc", SetLastError = true)]
+        static extern int close(int fileDescriptor);
 
         static async Task<BridgeTransport> ConnectUnixSocketAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
@@ -787,7 +1059,7 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
         public bool IsConnected => transport.IsConnected;
 
         string DescribeRequest(string requestId, string commandType, string phase)
-            => $"{phase} for request '{requestId}' ({commandType}) on pid {Handshake.EditorProcessId}, session {Handshake.SessionInstanceId}";
+            => $"{phase} for request '{requestId}' ({commandType}) on pid {Handshake.EffectiveProcessId}, session {Handshake.SessionInstanceId}";
 
         public async Task<BridgeClientResult?> SendCommandAsync(string requestId, BridgeCommand command, CancellationToken ct)
         {
@@ -874,7 +1146,15 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     // command_started arrives. Accepting it here preserves single-completion
                     // semantics across transient disconnects.
                     if (response is { MessageType: BridgeMessageTypes.CommandResult, Result: not null })
-                        return new(BridgeClientResult.Success(Handshake, response.Result.ToToolExecutionResult(), commandSent), null);
+                        return new(
+                            BridgeClientResult.Success(
+                                Handshake,
+                                response.Result.ToToolExecutionResult(),
+                                commandSent,
+                                response.Result.Artifacts
+                            ),
+                            null
+                        );
                 }
 
                 if (startTimeoutCts.IsCancellationRequested && callerToken.IsCancellationRequested)
@@ -953,7 +1233,12 @@ public sealed class UnityBridgeClient(ILogger<UnityBridgeClient> logger)
                     if (response.RequestId != requestId)
                         continue;
 
-                    return BridgeClientResult.Success(Handshake, response.Result.ToToolExecutionResult(), commandSent);
+                    return BridgeClientResult.Success(
+                        Handshake,
+                        response.Result.ToToolExecutionResult(),
+                        commandSent,
+                        response.Result.Artifacts
+                    );
                 }
 
                 if (ct.IsCancellationRequested && callerToken.IsCancellationRequested)

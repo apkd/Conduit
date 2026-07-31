@@ -3,7 +3,9 @@
 using System;
 using System.Threading.Tasks;
 using UnityEditor.PackageManager;
+#if MODULE_UNITYWEBREQUEST
 using UnityEngine.Networking;
+#endif
 
 namespace Conduit
 {
@@ -88,6 +90,7 @@ namespace Conduit
                 latestHash
             );
 
+#if MODULE_UNITYWEBREQUEST
         static async Task<string> GetLatestReleaseHashAsync()
         {
             using var request = UnityWebRequest.Get(LatestReleaseCommitUrl);
@@ -115,5 +118,11 @@ namespace Conduit
 
             return hash;
         }
+#else
+        static Task<string> GetLatestReleaseHashAsync()
+            => Task.FromException<string>(
+                new NotSupportedException("The Unity Web Request module is unavailable.")
+            );
+#endif
     }
 }

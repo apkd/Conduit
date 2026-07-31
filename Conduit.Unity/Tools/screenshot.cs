@@ -22,6 +22,41 @@ namespace Conduit
         const float BoundsSizeEpsilon = 0.01f;
         const string HdrpAssetTypeName = "UnityEngine.Rendering.HighDefinition.HDRenderPipelineAsset";
 
+        internal static string ModuleUnavailableDiagnostic
+        {
+            get
+            {
+#if !MODULE_IMAGECONVERSION && !MODULE_SCREENCAPTURE
+                return BuildModuleUnavailableDiagnostic(false, false);
+#elif !MODULE_IMAGECONVERSION
+                return BuildModuleUnavailableDiagnostic(false, true);
+#elif !MODULE_SCREENCAPTURE
+                return BuildModuleUnavailableDiagnostic(true, false);
+#else
+                return string.Empty;
+#endif
+            }
+        }
+
+        internal static string BuildModuleUnavailableDiagnostic(
+            bool imageConversionEnabled,
+            bool screenCaptureEnabled
+        )
+            => (imageConversionEnabled, screenCaptureEnabled) switch
+            {
+                (false, false) =>
+                    "ERROR: Unity built-in modules `com.unity.modules.imageconversion` and " +
+                    "`com.unity.modules.screencapture` are not enabled in this project. " +
+                    "Ask the user for permission to enable the modules so that the `screenshot` tool can be used.",
+                (false, true) =>
+                    "ERROR: Unity built-in module `com.unity.modules.imageconversion` is not enabled in this project. " +
+                    "Ask the user for permission to enable the module so that the `screenshot` tool can be used.",
+                (true, false) =>
+                    "ERROR: Unity built-in module `com.unity.modules.screencapture` is not enabled in this project. " +
+                    "Ask the user for permission to enable the module so that the `screenshot` tool can be used.",
+                _ => string.Empty,
+            };
+
         static readonly Type? gameViewType
             = Type.GetType("UnityEditor.GameView,UnityEditor");
 
@@ -102,10 +137,7 @@ namespace Conduit
 
         static async Task<string> CaptureEditorWindowTargetAsync(string target)
         {
-            if (Application.isBatchMode)
-                throw new InvalidOperationException($"'{target}' screenshots require an interactive Unity editor window.");
-
-            EnsureHasGraphicsDevice(target);
+            EnsureCanRenderScreenshot(target);
             if (string.IsNullOrWhiteSpace(target["window:".Length..].Trim()))
                 throw new InvalidOperationException("Editor window screenshot target was empty.");
 
@@ -121,10 +153,7 @@ namespace Conduit
 
         static async Task<string> CaptureGameViewAsync()
         {
-            if (Application.isBatchMode)
-                throw new InvalidOperationException("'game_view' screenshots require an interactive Unity editor window.");
-
-            EnsureHasGraphicsDevice("game_view");
+            EnsureCanRenderScreenshot("game_view");
             if (gameViewType == null || playModeViewType == null)
                 throw new InvalidOperationException("'game_view' screenshots are not supported in this Unity version.");
 
@@ -146,7 +175,7 @@ namespace Conduit
 
         static async Task<string> CaptureSceneViewAsync()
         {
-            EnsureHasGraphicsDevice("scene_view");
+            EnsureCanRenderScreenshot("scene_view");
             var window = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
             if (window == null)
                 throw new InvalidOperationException("Could not find or create the Scene View window.");
@@ -159,7 +188,7 @@ namespace Conduit
             if (EditorApplication.isPlaying)
                 throw new InvalidOperationException("Scene asset screenshots are only supported in edit mode.");
 
-            EnsureHasGraphicsDevice(Path.GetFileNameWithoutExtension(sceneAssetPath));
+            EnsureCanRenderScreenshot(Path.GetFileNameWithoutExtension(sceneAssetPath));
             var previewScene = EditorSceneManager.OpenPreviewScene(sceneAssetPath);
             try
             {
@@ -182,7 +211,7 @@ namespace Conduit
 
         static string CaptureCamera(Camera sourceCamera, string prefix)
         {
-            EnsureHasGraphicsDevice(prefix);
+            EnsureCanRenderScreenshot(prefix);
             var width = Mathf.Max(1, sourceCamera.pixelWidth);
             var height = Mathf.Max(1, sourceCamera.pixelHeight);
             if (width <= 1 || height <= 1)
@@ -234,6 +263,7 @@ namespace Conduit
 
         static async Task<string> CaptureAssetPreviewAsync(Object target, string prefix)
         {
+            EnsureCanRenderScreenshot(prefix);
             var previewTexture = AssetPreview.GetAssetPreview(target);
             var deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(5);
             while (previewTexture == null
@@ -262,7 +292,7 @@ namespace Conduit
 
         static string CaptureSceneBounds(Scene scene, Bounds bounds, string prefix, bool topDown)
         {
-            EnsureHasGraphicsDevice(prefix);
+            EnsureCanRenderScreenshot(prefix);
             var (width, height) = GetDefaultCaptureSize(16f / 9f);
             var renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
             GameObject? cameraObject = null;
@@ -679,9 +709,13 @@ namespace Conduit
                 if (flipVertically)
                     FlipTextureVertically(readableTexture);
 
+#if MODULE_IMAGECONVERSION
                 var outputPath = AllocateOutputPath(ConduitAssetPathUtility.GetProjectRootPath(), prefix);
                 File.WriteAllBytes(outputPath.absolute_path, readableTexture.EncodeToJPG(95));
                 return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+#else
+                throw new InvalidOperationException(ModuleUnavailableDiagnostic);
+#endif
             }
             finally
             {
@@ -798,8 +832,11 @@ namespace Conduit
                 : (Mathf.Max(1, Mathf.RoundToInt(DefaultRenderHeight * aspect)), DefaultRenderHeight);
         }
 
-        static void EnsureHasGraphicsDevice(string prefix)
+        static void EnsureCanRenderScreenshot(string prefix)
         {
+            if (Application.isBatchMode)
+                throw new InvalidOperationException($"'{prefix}' screenshots require an interactive Unity editor window.");
+
             if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
                 throw new InvalidOperationException($"'{prefix}' screenshots require a graphics device. Unity is running without one.");
         }

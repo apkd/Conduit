@@ -114,12 +114,14 @@ jobs:
           short_sha="${GITHUB_SHA::12}"
           informational_version="$package_version+sha.$short_sha"
 
-          echo "release_requested=$release_requested" >> "$GITHUB_OUTPUT"
-          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
-          echo "assembly_version=$assembly_version" >> "$GITHUB_OUTPUT"
-          echo "file_version=$file_version" >> "$GITHUB_OUTPUT"
-          echo "informational_version=$informational_version" >> "$GITHUB_OUTPUT"
-          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_requested=$release_requested"
+            echo "package_version=$package_version"
+            echo "assembly_version=$assembly_version"
+            echo "file_version=$file_version"
+            echo "informational_version=$informational_version"
+            echo "previous_tag=$previous_tag"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -153,14 +155,6 @@ jobs:
         with:
           dotnet-version: 10.0.201
 
-      - name: Install Linux NativeAOT prerequisites
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -o Acquire::Retries=10
-          sudo apt-get install -y --no-install-recommends binutils clang lld zlib1g-dev musl-tools
-          clang --version
-          ld.lld --version
-
       - name: Build server binary
         shell: bash
         run: |
@@ -175,20 +169,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/release"
           cp "${{ matrix.publish_source }}" "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
 
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
+          if [[ "${{ matrix.rid }}" == "linux-x64" ]]; then
             chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
             "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
           fi
 
           if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
-            if readelf -l "$RUNNER_TEMP/release/${{ matrix.publish_target }}" | grep -q 'INTERP'; then
-              echo "Linux musl release artifact must not depend on a dynamic ELF interpreter."
-              exit 1
-            fi
             docker run --rm \
               -v "$RUNNER_TEMP/release:/release:ro" \
-              nixos/nix:latest \
-              /release/${{ matrix.publish_target }} --version
+              alpine:3.22 \
+              sh -c 'apk add --no-cache libgcc libstdc++ zlib >/dev/null && /release/${{ matrix.publish_target }} --version'
           fi
 
       - uses: actions/upload-artifact@v6
@@ -198,8 +188,19 @@ jobs:
 
   test-server-binary:
     needs: build
-    runs-on: ubuntu-latest
+    name: server binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: conduit-linux-x64
+            executable: conduit-linux-x64
+          - os: windows-latest
+            artifact: conduit-win-x64
+            executable: conduit-win-x64.exe
 
     steps:
       - uses: actions/checkout@v6
@@ -210,21 +211,26 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: conduit-linux-musl-x64
+          name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/conduit-server
 
       - name: Run binary smoke test
         shell: bash
         run: |
-          executable="$RUNNER_TEMP/conduit-server/conduit-linux-musl-x64"
-          chmod +x "$executable"
+          executable="$RUNNER_TEMP/conduit-server/${{ matrix.executable }}"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then chmod +x "$executable"; fi
           "$executable" --version
           dotnet run --file run-conduit-binary-smoke.cs -- "$executable"
 
   test-server:
     needs: version
-    runs-on: ubuntu-latest
+    name: server tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v6
@@ -236,20 +242,21 @@ jobs:
       - name: Run TUnit tests
         id: dotnet-tests
         continue-on-error: true
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/test-results"
+          mkdir -p test-results
           dotnet run --project Conduit.Tests/Conduit.Tests.csproj \
             -- \
-            --results-directory "$RUNNER_TEMP/test-results" \
+            --results-directory test-results \
             --report-trx \
             --report-trx-filename dotnet.trx
 
       - uses: dorny/test-reporter@v3
         if: ${{ !cancelled() }}
         with:
-          name: Dotnet Test Results
+          name: Dotnet Test Results (${{ matrix.os }})
           reporter: dotnet-trx
-          path: "${{ runner.temp }}/test-results/dotnet.trx"
+          path: test-results/dotnet.trx
           fail-on-error: false
 
       - name: Fail on dotnet test errors
@@ -307,9 +314,11 @@ jobs:
         run: |
           REPO='${{ github.repository }}'
           REPO_LC=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
-          echo "REPO_LC=$REPO_LC" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=ghcr.io/$REPO_LC/unity-ci:${{ github.sha }}-${{ matrix.UNITY_VERSION }}" >> "$GITHUB_ENV"
-          echo "CACHE_REF=ghcr.io/$REPO_LC/unity-ci:cache-${{ matrix.UNITY_VERSION }}" >> "$GITHUB_ENV"
+          {
+            echo "REPO_LC=$REPO_LC"
+            echo "IMAGE_TAG=ghcr.io/$REPO_LC/unity-ci:${{ github.sha }}-${{ matrix.UNITY_VERSION }}"
+            echo "CACHE_REF=ghcr.io/$REPO_LC/unity-ci:cache-${{ matrix.UNITY_VERSION }}"
+          } >> "$GITHUB_ENV"
 
       - uses: docker/build-push-action@v7
         env:
@@ -371,11 +380,11 @@ jobs:
             -v "$RUNNER_TEMP/test-results:$PROJECT/test-results" \
             -v "$LIC_DIR:/root/.local/share/unity3d" \
             -v "$RUNNER_TEMP/unity-secrets:/run/secrets:ro" \
-            -w $PROJECT \
+            -w "$PROJECT" \
             "${{ env.IMAGE_TAG }}" \
             unity-editor \
               -login \
-              -projectPath $PROJECT \
+              -projectPath "$PROJECT" \
               -executeMethod Conduit.CI.RunTests
 
       - name: Locate Unity test results
@@ -404,9 +413,334 @@ jobs:
         if: steps.unity-tests.outcome == 'failure' || steps.unity-test-results.outputs.found != 'true'
         run: exit 1
 
+  build-player-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROJECT: /ConduitPlayerCI
+      UNITY_VERSION: 6000.4.12f1
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image variables
+        shell: bash
+        run: |
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_TAG=ghcr.io/$repo_lc/unity-player-ci:${{ github.sha }}-$UNITY_VERSION" >> "$GITHUB_ENV"
+          echo "CACHE_REF=ghcr.io/$repo_lc/unity-player-ci:cache-$UNITY_VERSION" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          file: ./.github/workflows/Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            UNITY_VERSION=${{ env.UNITY_VERSION }}
+            PROJECT=${{ env.PROJECT }}
+            PROJECT_MANIFEST=player
+          outputs: type=docker
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
+
+      - name: Build Linux development player
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in UNITY_SERIAL UNITY_USER UNITY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || { echo "$name is not configured."; exit 1; }
+          done
+
+          mkdir -p "$RUNNER_TEMP/unity-license" "$RUNNER_TEMP/unity-secrets" "$RUNNER_TEMP/player-linux"
+          printf '%s' "$UNITY_SERIAL" > "$RUNNER_TEMP/unity-secrets/unity_serial"
+          printf '%s' "$UNITY_USER" > "$RUNNER_TEMP/unity-secrets/unity_user"
+          printf '%s' "$UNITY_PASSWORD" > "$RUNNER_TEMP/unity-secrets/unity_password"
+          chmod 600 "$RUNNER_TEMP"/unity-secrets/*
+
+          docker run --rm \
+            --shm-size=8g \
+            -v "$GITHUB_WORKSPACE/Conduit.Unity:$PROJECT/Packages/dev.tryfinally.conduit" \
+            -v "$RUNNER_TEMP/player-linux:$PROJECT/player-output" \
+            -v "$RUNNER_TEMP/unity-license:/root/.local/share/unity3d" \
+            -v "$RUNNER_TEMP/unity-secrets:/run/secrets:ro" \
+            -w "$PROJECT" \
+            "$IMAGE_TAG" \
+            unity-editor \
+              -login \
+              -projectPath "$PROJECT" \
+              -executeMethod Conduit.CI.BuildPlayer \
+              -conduitPlayerTarget linux \
+              -conduitPlayerOutput "$PROJECT/player-output/conduit-player"
+        env:
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+          UNITY_USER: ${{ secrets.UNITY_USER }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: conduit-player-linux
+          path: ${{ runner.temp }}/player-linux
+
+  build-player-windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      UNITY_VERSION: 6000.4.12f1
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure paths
+        shell: pwsh
+        run: |
+          "UNITY_ROOT=$env:RUNNER_TEMP\Unity" >> $env:GITHUB_ENV
+          "UNITY_INSTALLER=$env:RUNNER_TEMP\UnitySetup64.exe" >> $env:GITHUB_ENV
+          "PROJECT=$env:RUNNER_TEMP\ConduitPlayerCI" >> $env:GITHUB_ENV
+
+      - uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}\UnitySetup64.exe
+          key: unity-windows-installer-v1-${{ env.UNITY_VERSION }}
+
+      - name: Install Unity Editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path $env:UNITY_INSTALLER)) {
+            $release = (Invoke-WebRequest "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION").Content
+            $escaped = [regex]::Escape($env:UNITY_VERSION)
+            $match = [regex]::Match(
+              $release,
+              "https://download\.unity3d\.com/download_unity/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escaped\.exe"
+            )
+            if (-not $match.Success) {
+              throw "Could not find the Windows Unity installer for $env:UNITY_VERSION."
+            }
+
+            Invoke-WebRequest $match.Value -OutFile $env:UNITY_INSTALLER
+          }
+
+          $process = Start-Process $env:UNITY_INSTALLER -Wait -PassThru -ArgumentList @(
+            "/S",
+            "/D=$env:UNITY_ROOT"
+          )
+          if ($process.ExitCode -ne 0) {
+            throw "Unity installer exited with code $($process.ExitCode)."
+          }
+
+      - name: Prepare Unity project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force "$env:PROJECT\Packages" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROJECT\ProjectSettings" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROJECT\Assets" | Out-Null
+          Copy-Item -Recurse -Force "$env:GITHUB_WORKSPACE\Conduit.Unity" "$env:PROJECT\Packages\dev.tryfinally.conduit"
+          Copy-Item "$env:GITHUB_WORKSPACE\.github\workflows\player-manifest.json" "$env:PROJECT\Packages\manifest.json"
+          @"
+          m_EditorVersion: $env:UNITY_VERSION
+          "@ | Set-Content "$env:PROJECT\ProjectSettings\ProjectVersion.txt"
+
+      - name: Build Windows development player
+        shell: pwsh
+        env:
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+          UNITY_USER: ${{ secrets.UNITY_USER }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("UNITY_SERIAL", "UNITY_USER", "UNITY_PASSWORD")) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "env:$name").Value)) {
+              throw "$name is not configured."
+            }
+          }
+
+          $unity = @(
+            "$env:UNITY_ROOT\Editor\Unity.exe",
+            "$env:UNITY_ROOT\Unity.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $unity) {
+            throw "Unity.exe was not found under $env:UNITY_ROOT."
+          }
+
+          $output = "$env:RUNNER_TEMP\player-windows\conduit-player.exe"
+          New-Item -ItemType Directory -Force (Split-Path $output) | Out-Null
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Unity\Caches" | Out-Null
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Unity\licenses" | Out-Null
+          New-Item -ItemType Directory -Force "$env:APPDATA\Unity" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROGRAMDATA\Unity" | Out-Null
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new($unity)
+          $startInfo.UseShellExecute = $false
+          $startInfo.WorkingDirectory = $env:PROJECT
+          foreach ($argument in @(
+            "-batchmode",
+            "-nographics",
+            "-silent-crashes",
+            "-logFile", "-",
+            "-serial", $env:UNITY_SERIAL,
+            "-username", $env:UNITY_USER,
+            "-password", $env:UNITY_PASSWORD,
+            "-projectPath", $env:PROJECT,
+            "-executeMethod", "Conduit.CI.BuildPlayer",
+            "-conduitPlayerTarget", "windows",
+            "-conduitPlayerOutput", $output
+          )) {
+            $startInfo.ArgumentList.Add($argument)
+          }
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) {
+            throw "Unity player build exited with code $($process.ExitCode)."
+          }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: conduit-player-windows
+          path: ${{ runner.temp }}/player-windows
+
+  test-player-linux:
+    needs: [build, build-player-linux]
+    name: player E2E (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-player-linux
+          path: ${{ runner.temp }}/conduit-player
+
+      - name: Run Linux player E2E
+        shell: bash
+        run: |
+          sudo apt-get update -o Acquire::Retries=10
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth libgtk-3-0 libglu1-mesa libxrandr2 libxinerama1 \
+            libxcursor1 libxi6 libxss1 libnss3 libgbm1
+          chmod +x "$RUNNER_TEMP/conduit-server/conduit-linux-x64"
+          chmod +x "$RUNNER_TEMP/conduit-player/conduit-player"
+          xvfb-run -a dotnet run --file run-unity-player-mcp-e2e.cs -- \
+            --server "$RUNNER_TEMP/conduit-server/conduit-linux-x64" \
+            --player "$RUNNER_TEMP/conduit-player/conduit-player"
+
+  test-player-windows:
+    needs: [build, build-player-windows]
+    name: player E2E (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-win-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-player-windows
+          path: ${{ runner.temp }}/conduit-player
+
+      - name: Run Windows player E2E
+        shell: pwsh
+        run: |
+          dotnet run --file run-unity-player-mcp-e2e.cs -- `
+            --server "$env:RUNNER_TEMP\conduit-server\conduit-win-x64.exe" `
+            --player "$env:RUNNER_TEMP\conduit-player\conduit-player.exe"
+
+  test-player-proton:
+    needs: [build, build-player-windows]
+    name: player E2E (Proton)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-player-windows
+          path: ${{ runner.temp }}/conduit-player
+
+      - name: Install umu and player dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -o Acquire::Retries=10
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth libgtk-3-0 libglu1-mesa libxrandr2 libxinerama1 \
+            libxcursor1 libxi6 libxss1 libnss3 libgbm1 jq curl
+
+          release="$(curl -fsSL https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest)"
+          python_deb="$(jq -er '[.assets[].browser_download_url | select(test("python3-umu-launcher_.*_amd64_ubuntu-noble\\.deb$"))] | first' <<<"$release")"
+          launcher_deb="$(jq -er '[.assets[].browser_download_url | select(test("umu-launcher_.*_all_ubuntu-noble\\.deb$"))] | first' <<<"$release")"
+          curl -fsSL "$python_deb" -o "$RUNNER_TEMP/python3-umu-launcher.deb"
+          curl -fsSL "$launcher_deb" -o "$RUNNER_TEMP/umu-launcher.deb"
+          sudo apt-get install -y \
+            "$RUNNER_TEMP/python3-umu-launcher.deb" \
+            "$RUNNER_TEMP/umu-launcher.deb"
+          umu-run --version
+
+      - name: Run Proton player E2E
+        shell: bash
+        env:
+          GAMEID: umu-conduit-ci
+          STORE: none
+          PROTONPATH: UMU-Proton
+          WINEPREFIX: ${{ runner.temp }}/umu-prefix
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          chmod +x "$RUNNER_TEMP/conduit-server/conduit-linux-x64"
+          xvfb-run -a dotnet run --file run-unity-player-mcp-e2e.cs -- \
+            --server "$RUNNER_TEMP/conduit-server/conduit-linux-x64" \
+            --player "$RUNNER_TEMP/conduit-player/conduit-player.exe" \
+            --launcher "$(command -v umu-run)"
+
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
-    needs: [version, build, test-server, test-server-binary, test-unity]
+    needs: [version, build, test-server, test-server-binary, test-unity, test-player-linux, test-player-windows, test-player-proton]
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -434,7 +768,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          current="$(jq -r '.version' "$PACKAGE_JSON")"
           next="${{ needs.version.outputs.package_version }}"
           tmp="$PACKAGE_JSON.tmp"
           jq --arg v "$next" '.version = $v' "$PACKAGE_JSON" > "$tmp"
@@ -551,7 +884,7 @@ jobs:
               new_prefix="✨ "
             fi
 
-            info="$(gh api repos/$GITHUB_REPOSITORY/commits/$sha --jq '{email: .commit.author.email, login: (.author.login // .committer.login), profile: (.author.html_url // .committer.html_url), avatar: (.author.avatar_url // .committer.avatar_url)}')"
+            info="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '{email: .commit.author.email, login: (.author.login // .committer.login), profile: (.author.html_url // .committer.html_url), avatar: (.author.avatar_url // .committer.avatar_url)}')"
             login="$(jq -r '.login // empty' <<<"$info")"
             login_display="${login%\[bot\]}"
             profile="$(jq -r '.profile // empty' <<<"$info")"

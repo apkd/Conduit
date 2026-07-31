@@ -75,7 +75,7 @@ public sealed class McpToolArgumentDiagnosticsTests
         await AssertError(
             "help",
             new() { ["unexpected"] = true },
-            "unknown argument 'unexpected' (this tool accepts no arguments)"
+            "unknown argument 'unexpected' (expected arguments: 'projectPath')"
         );
 
         var validNull = await client.CallToolAsync(

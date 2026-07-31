@@ -2419,6 +2419,33 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void Screenshot_ModuleUnavailableDiagnosticListsOnlyMissingModules()
+    {
+        Assert.That(
+            screenshot.BuildModuleUnavailableDiagnostic(false, false),
+            Is.EqualTo(
+                "ERROR: Unity built-in modules `com.unity.modules.imageconversion` and " +
+                "`com.unity.modules.screencapture` are not enabled in this project. " +
+                "Ask the user for permission to enable the modules so that the `screenshot` tool can be used."
+            )
+        );
+        Assert.That(
+            screenshot.BuildModuleUnavailableDiagnostic(false, true),
+            Is.EqualTo(
+                "ERROR: Unity built-in module `com.unity.modules.imageconversion` is not enabled in this project. " +
+                "Ask the user for permission to enable the module so that the `screenshot` tool can be used."
+            )
+        );
+        Assert.That(
+            screenshot.BuildModuleUnavailableDiagnostic(true, false),
+            Is.EqualTo(
+                "ERROR: Unity built-in module `com.unity.modules.screencapture` is not enabled in this project. " +
+                "Ask the user for permission to enable the module so that the `screenshot` tool can be used."
+            )
+        );
+    }
+
+    [Test]
     public void Screenshot_OutputPathsUseShortSequentialFileNames()
     {
         var projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
@@ -2602,11 +2629,12 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void Search_TestQuery_PlayModeFilterWithoutProjectMatchesUsesNoMatchText()
+    public void Search_TestQuery_PlayModeFilterListsRuntimeBridgeTests()
     {
         var result = ConduitSearchUtility.Search("t:test playmode");
 
-        Assert.That(result, Is.EqualTo("No matches for 't:test playmode'."));
+        Assert.That(result, Does.Contain("RuntimeBridgeTests.ArtifactTransferRejectsModifiedChunks | PlayMode"));
+        Assert.That(result, Does.Not.Contain(" | EditMode"));
     }
 
     [Test]

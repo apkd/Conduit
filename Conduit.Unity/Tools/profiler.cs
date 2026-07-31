@@ -175,6 +175,34 @@ namespace Conduit
             }
         }
 
+        public static bool HasMarker(string markerName)
+        {
+            if (string.IsNullOrWhiteSpace(markerName))
+                return false;
+
+            var frames = GetAvailableFrames();
+            for (var frameOrdinal = frames.Count - 1;
+                 frameOrdinal >= 0 && frameOrdinal >= frames.Count - 10;
+                 frameOrdinal--)
+            {
+                var frame = frames[frameOrdinal];
+                for (var threadIndex = 0; ; threadIndex++)
+                {
+                    using var raw = ProfilerDriver.GetRawFrameDataView(
+                        frame,
+                        threadIndex
+                    );
+                    if (!raw.valid)
+                        break;
+
+                    if (raw.GetMarkerId(markerName) != FrameDataView.invalidMarkerId)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
         static async Task<BridgeCommandResult> CaptureAsync(Dictionary<string, string> options)
         {
             var frames = Clamp(ParseInt(GetOption(options, "frames", DefaultCaptureFrameCount.ToString(CultureInfo.InvariantCulture)), DefaultCaptureFrameCount), 1, MaxCaptureFrameCount);
