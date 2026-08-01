@@ -25,22 +25,22 @@ namespace Conduit.Runtime
         public static void Enqueue(
             RuntimeBridgeSession session,
             string requestId,
-            RuntimeBridgeCommand command) =>
+            BridgeCommand command) =>
             requests.Enqueue(new(session, requestId, command));
 
         public static void Pump()
         {
-            if (executing || !requests.TryDequeue(out var request))
+            if (Volatile.Read(ref executing) || !requests.TryDequeue(out var request))
                 return;
 
-            executing = true;
+            Volatile.Write(ref executing, true);
             ExecuteAsync(request);
         }
 
         static async void ExecuteAsync(RuntimeRequest request)
         {
             var ct = request.Session.Begin(request.RequestId);
-            RuntimeBridgeCommandResult result;
+            BridgeCommandResult result;
             try
             {
                 result = await RuntimeToolDispatcher.ExecuteAsync(request.Command, ct);
@@ -49,21 +49,21 @@ namespace Conduit.Runtime
             {
                 result = new()
                 {
-                    outcome = RuntimeToolOutcome.Cancelled,
+                    outcome = ToolOutcome.Cancelled,
                     diagnostic = "The request was cancelled.",
                 };
             }
             catch (Exception exception)
             {
-                result = RuntimeBridgeCommandResult.FromException(Unwrap(exception));
+                result = BridgeCommandResult.FromException(Unwrap(exception));
             }
 
             request.Session.Complete(request.RequestId);
-            executing = false; // a closing one-command FIFO must not hold the player command queue
+            Volatile.Write(ref executing, false); // a closing one-command FIFO must not hold the player command queue
             try
             {
                 await request.Session.SendAsync(
-                    RuntimeBridgeMessage.Result(request.RequestId, result)
+                    BridgeMessage.CreateCommandResult(request.RequestId, result)
                 );
             }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException) { }
@@ -79,7 +79,7 @@ namespace Conduit.Runtime
             public RuntimeRequest(
                 RuntimeBridgeSession session,
                 string requestId,
-                RuntimeBridgeCommand command)
+                BridgeCommand command)
             {
                 Session = session;
                 RequestId = requestId;
@@ -88,14 +88,12 @@ namespace Conduit.Runtime
 
             public RuntimeBridgeSession Session { get; }
             public string RequestId { get; }
-            public RuntimeBridgeCommand Command { get; }
+            public BridgeCommand Command { get; }
         }
     }
 
     static class RuntimeToolDispatcher
     {
-        static readonly DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
-        static readonly Dictionary<string, CachedSnippet> snippets = new(StringComparer.OrdinalIgnoreCase);
 #if !MODULE_IMAGECONVERSION && !MODULE_SCREENCAPTURE
         const string ScreenshotModuleUnavailableDiagnostic =
             "ERROR: Unity built-in modules `com.unity.modules.imageconversion` and " +
@@ -112,64 +110,49 @@ namespace Conduit.Runtime
 #endif
         static readonly string[] capabilities =
         {
-            RuntimeBridgeCommandTypes.Status,
-            RuntimeBridgeCommandTypes.Restart,
-            RuntimeBridgeCommandTypes.Help,
-            RuntimeBridgeCommandTypes.Search,
-            RuntimeBridgeCommandTypes.Show,
-            RuntimeBridgeCommandTypes.ToJson,
-            RuntimeBridgeCommandTypes.FromJsonOverwrite,
-            RuntimeBridgeCommandTypes.Screenshot,
-            RuntimeBridgeCommandTypes.ExecuteCode,
-            RuntimeBridgeCommandTypes.Reflect,
+            BridgeCommandTypes.Status,
+            BridgeCommandTypes.Restart,
+            BridgeCommandTypes.Help,
+            BridgeCommandTypes.Search,
+            BridgeCommandTypes.Show,
+            BridgeCommandTypes.ToJson,
+            BridgeCommandTypes.FromJsonOverwrite,
+            BridgeCommandTypes.Screenshot,
+            BridgeCommandTypes.ExecuteCode,
+            BridgeCommandTypes.Detour,
+            BridgeCommandTypes.Reflect,
             "profiler_marker",
         };
 
         public static string[] Capabilities => capabilities;
 
-        public static async Task<RuntimeBridgeCommandResult> ExecuteAsync(
-            RuntimeBridgeCommand command,
+        public static async Task<BridgeCommandResult> ExecuteAsync(
+            BridgeCommand command,
             CancellationToken ct)
         {
-            var logs = new StringBuilder();
-            void CaptureLog(string condition, string stackTrace, LogType type)
+            using var logs = new BridgeLogCapture();
+            var result = command.command_type switch
             {
-                logs.Append('[').Append(type).Append("] ").AppendLine(condition);
-                if (type is LogType.Exception or LogType.Error && !string.IsNullOrWhiteSpace(stackTrace))
-                    logs.AppendLine(stackTrace);
-            }
+                BridgeCommandTypes.Status => BridgeCommandResult.Success(BuildStatus()),
+                BridgeCommandTypes.Help => BridgeCommandResult.Success(BuildHelp()),
+                BridgeCommandTypes.Search => BridgeCommandResult.Success(Search(command.target)),
+                BridgeCommandTypes.Show => BridgeCommandResult.Success(Show(command.target)),
+                BridgeCommandTypes.ToJson => BridgeCommandResult.Success(ToJson(command.target)),
+                BridgeCommandTypes.FromJsonOverwrite => BridgeCommandResult.Success(
+                    FromJsonOverwrite(command.target, command.snippet)
+                ),
+                BridgeCommandTypes.Screenshot => await ScreenshotAsync(command.target, ct),
+                BridgeCommandTypes.Reflect => reflect.Reflect(command.args),
+                BridgeCommandTypes.ExecuteCode => await ExecuteCodeAsync(command, ct),
+                BridgeCommandTypes.Detour => Detour(command),
+                BridgeCommandTypes.CompilationReferences => AssemblyReferences.GetManifest(),
+                BridgeCommandTypes.AssemblyBlob => AssemblyReferences.GetAssemblyBlob(command.target),
+                BridgeCommandTypes.Restart => Restart(),
+                BridgeCommandTypes.QuitPlayer => QuitPlayer(),
+                _ => BridgeCommandResult.EditorOnly(command.command_type),
+            };
 
-            Application.logMessageReceived += CaptureLog;
-            RuntimeBridgeCommandResult result;
-            try
-            {
-                result = command.command_type switch
-                {
-                    RuntimeBridgeCommandTypes.Status => RuntimeBridgeCommandResult.Success(BuildStatus()),
-                    RuntimeBridgeCommandTypes.Help => RuntimeBridgeCommandResult.Success(BuildHelp()),
-                    RuntimeBridgeCommandTypes.Search => RuntimeBridgeCommandResult.Success(Search(command.target)),
-                    RuntimeBridgeCommandTypes.Show => RuntimeBridgeCommandResult.Success(Show(command.target)),
-                    RuntimeBridgeCommandTypes.ToJson => RuntimeBridgeCommandResult.Success(ToJson(command.target)),
-                    RuntimeBridgeCommandTypes.FromJsonOverwrite => RuntimeBridgeCommandResult.Success(
-                        FromJsonOverwrite(command.target, command.snippet)
-                    ),
-                    RuntimeBridgeCommandTypes.Screenshot => await ScreenshotAsync(command.target, ct),
-                    RuntimeBridgeCommandTypes.Reflect => RuntimeBridgeCommandResult.Success(Reflect(command.args)),
-                    RuntimeBridgeCommandTypes.ExecuteCode => await ExecuteCodeAsync(command, ct),
-                    RuntimeBridgeCommandTypes.CompilationReferences => RuntimeBridgeCommandResult.Success(
-                        BuildCompilationReferences()
-                    ),
-                    RuntimeBridgeCommandTypes.AssemblyBlob => GetAssemblyBlob(command.target),
-                    RuntimeBridgeCommandTypes.Restart => Restart(),
-                    _ => RuntimeBridgeCommandResult.EditorOnly(command.command_type),
-                };
-            }
-            finally
-            {
-                Application.logMessageReceived -= CaptureLog;
-            }
-
-            result.logs = logs.ToString().TrimEnd();
+            result.logs = logs.Drain();
             return result;
         }
 
@@ -190,10 +173,14 @@ namespace Conduit.Runtime
                 {
                     unity_version = Application.unityVersion,
                     platform = Application.platform.ToString(),
-                    editor_process_id = Process.GetCurrentProcess().Id,
-                    uptime = FormatDuration(DateTimeOffset.UtcNow - startedAtUtc),
+                    editor_process_id = BridgeStatusUtility.ProcessId,
+                    uptime = BridgeStatusUtility.FormatDuration(
+                        TimeSpan.FromSeconds(Time.realtimeSinceStartupAsDouble)
+                    ),
                     editor_mode = "player",
-                    active_command_type = RuntimeBridgeCommandTypes.Status,
+                    active_command_type = BridgeCommandTypes.Status,
+                    active_detour_count = DetourRuntime.ActiveCount,
+                    active_detours = DetourRuntime.ActiveMethodNames,
                     scenes = scenes,
                 }
             );
@@ -201,32 +188,16 @@ namespace Conduit.Runtime
 
         static string BuildHelp() =>
             "Player searches inspect loaded objects only.\n"
-            + $"Use {RuntimeObjectId.Prefix}12345 for an exact object ID, /Root/Child for a hierarchy path,\n"
+            + $"Use {BridgeObjectId.Prefix}12345 for an exact object ID, /Root/Child for a hierarchy path,\n"
             + "t:Camera for a loaded type, or a case-insensitive object/type name fragment.";
 
         static string Search(string? query)
         {
             var matches = ConduitRuntimeSearch.ResolveMany(query);
             if (matches.Count == 0)
-                return "No loaded objects matched.";
+                return $"No matches for '{query?.Trim() ?? string.Empty}'.";
 
-            var builder = new StringBuilder();
-            foreach (var match in matches.Take(200))
-            {
-                builder.Append(match.name)
-                    .Append(" [")
-                    .Append(match.GetType().FullName)
-                    .Append("] ")
-                    .Append(RuntimeObjectId.Format(match));
-                if (GetGameObject(match) is { } gameObject)
-                    builder.Append(' ').Append(ConduitRuntimeSearch.GetHierarchyPath(gameObject));
-                builder.AppendLine();
-            }
-
-            if (matches.Count > 200)
-                builder.Append("... ").Append(matches.Count - 200).AppendLine(" more");
-
-            return builder.ToString().TrimEnd();
+            return ConduitRuntimeSearch.FormatMatches(matches.Take(25).ToArray(), includeHint: false);
         }
 
         static string Show(string? query)
@@ -237,7 +208,7 @@ namespace Conduit.Runtime
                 .Append(" [")
                 .Append(target.GetType().FullName)
                 .Append("] ")
-                .AppendLine(RuntimeObjectId.Format(target));
+                .AppendLine(BridgeObjectId.Format(target));
 
             if (GetGameObject(target) is { } gameObject)
             {
@@ -259,19 +230,18 @@ namespace Conduit.Runtime
         static string FromJsonOverwrite(string? query, string? json)
         {
             var target = ConduitRuntimeSearch.ResolveOne(query ?? string.Empty);
-            RuntimeObjectJsonUtility.FromJsonOverwrite(target, json ?? string.Empty);
-            return $"Updated {target.name} [{RuntimeObjectId.Format(target)}].";
+            return RuntimeObjectJsonUtility.FromJsonOverwrite(target, json ?? string.Empty);
         }
 
-        static Task<RuntimeBridgeCommandResult> ScreenshotAsync(
+        static Task<BridgeCommandResult> ScreenshotAsync(
             string? target,
             CancellationToken ct)
         {
 #if !(MODULE_IMAGECONVERSION && MODULE_SCREENCAPTURE)
             return Task.FromResult(
-                new RuntimeBridgeCommandResult
+                new BridgeCommandResult
                 {
-                    outcome = RuntimeToolOutcome.Exception,
+                    outcome = ToolOutcome.Exception,
                     diagnostic = ScreenshotModuleUnavailableDiagnostic,
                 }
             );
@@ -281,7 +251,7 @@ namespace Conduit.Runtime
         }
 
 #if MODULE_IMAGECONVERSION && MODULE_SCREENCAPTURE
-        static async Task<RuntimeBridgeCommandResult> CaptureScreenshotAsync(
+        static async Task<BridgeCommandResult> CaptureScreenshotAsync(
             string? target,
             CancellationToken ct)
         {
@@ -294,7 +264,7 @@ namespace Conduit.Runtime
             {
                 return new()
                 {
-                    outcome = RuntimeToolOutcome.Exception,
+                    outcome = ToolOutcome.Exception,
                     diagnostic = $"Screenshot target '{normalized}' is unavailable in a player.",
                 };
             }
@@ -304,7 +274,7 @@ namespace Conduit.Runtime
             {
                 return new()
                 {
-                    outcome = RuntimeToolOutcome.Exception,
+                    outcome = ToolOutcome.Exception,
                     diagnostic = "Player screenshots require an interactive Unity player with a graphics device.",
                 };
             }
@@ -331,7 +301,7 @@ namespace Conduit.Runtime
                     return_value = "Player image captured.",
                     artifacts = new[]
                     {
-                        RuntimeBridgeArtifact.FromBytes(
+                        BridgeArtifact.FromBytes(
                             $"player-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}.png",
                             "image/png",
                             bytes
@@ -371,133 +341,27 @@ namespace Conduit.Runtime
             }
         }
 
-        static string Reflect(string[] args)
-        {
-            var mode = args.Length > 0 ? args[0] : "types";
-            var type = args.Length > 1 ? NullIfEmpty(args[1]) : null;
-            var member = args.Length > 2 ? NullIfEmpty(args[2]) : null;
-            return ConduitRuntimeReflect.Format(mode, type, member);
-        }
-
-        static async Task<RuntimeBridgeCommandResult> ExecuteCodeAsync(
-            RuntimeBridgeCommand command,
+        static async Task<BridgeCommandResult> ExecuteCodeAsync(
+            BridgeCommand command,
             CancellationToken ct)
-        {
-            if (command.artifacts.Length == 0)
-                throw new InvalidOperationException("The MCP server did not provide a compiled snippet assembly.");
-
-            var assemblyArtifact = command.artifacts.FirstOrDefault(
-                static value => value.name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+            => await CompiledSnippetRunner.ExecuteAsync(
+                command.artifacts,
+                command.target,
+                command.display_name,
+                static artifact => artifact.Decode(),
+                ct
             );
-            if (assemblyArtifact == null)
-                throw new InvalidOperationException("The compiled snippet payload has no DLL artifact.");
 
-            if (!snippets.TryGetValue(assemblyArtifact.sha256, out var snippet))
-            {
-                var pdb = command.artifacts.FirstOrDefault(
-                    static value => value.name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)
-                );
-                var assemblyBytes = assemblyArtifact.Decode();
-                Assembly assembly;
-                try
-                {
-                    assembly = pdb == null
-                        ? Assembly.Load(assemblyBytes)
-                        : Assembly.Load(assemblyBytes, pdb.Decode());
-                }
-                catch (ArgumentException) when (pdb != null)
-                {
-                    assembly = Assembly.Load(assemblyBytes);
-                }
-                var type = assembly.GetType(command.target ?? string.Empty, throwOnError: true);
-                var method = type.GetMethod(
-                    "Execute",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static
-                ) ?? throw new MissingMethodException(type.FullName, "Execute");
-                snippet = new(method, command.display_name ?? assemblyArtifact.name);
-                snippets[assemblyArtifact.sha256] = snippet;
-            }
+        static BridgeCommandResult Detour(BridgeCommand command)
+            => DetourCommandRunner.Execute(
+                command.args,
+                command.artifacts,
+                command.target,
+                command.display_name,
+                static artifact => artifact.Decode()
+            );
 
-            ct.ThrowIfCancellationRequested();
-            var value = snippet.Method.Invoke(null, null);
-            if (value is Task task)
-            {
-                await task;
-                value = task.GetType().GetProperty("Result")?.GetValue(task);
-            }
-
-            return new()
-            {
-                display_name = snippet.DisplayName,
-                return_value = FormatValue(value),
-            };
-        }
-
-        static string BuildCompilationReferences()
-        {
-            var references = new List<RuntimeAssemblyReference>();
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    if (assembly.IsDynamic || string.IsNullOrWhiteSpace(assembly.Location))
-                        continue;
-
-                    var file = new FileInfo(assembly.Location);
-                    references.Add(
-                        new()
-                        {
-                            id = assembly.ManifestModule.ModuleVersionId.ToString("N"),
-                            assembly_name = assembly.FullName ?? assembly.GetName().Name ?? string.Empty,
-                            path = assembly.Location,
-                            length = file.Exists ? file.Length : 0,
-                        }
-                    );
-                }
-                catch (Exception) { }
-            }
-
-            return JsonUtility.ToJson(new RuntimeAssemblyReferenceManifest { references = references.ToArray() });
-        }
-
-        static RuntimeBridgeCommandResult GetAssemblyBlob(string? referenceId)
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    if (assembly.IsDynamic
-                        || assembly.ManifestModule.ModuleVersionId.ToString("N") != referenceId
-                        || string.IsNullOrWhiteSpace(assembly.Location))
-                        continue;
-
-                    var bytes = File.ReadAllBytes(assembly.Location);
-                    return new()
-                    {
-                        artifacts = new[]
-                        {
-                            RuntimeBridgeArtifact.FromBytes(
-                                Path.GetFileName(assembly.Location),
-                                "application/vnd.microsoft.portable-executable",
-                                bytes
-                            ),
-                        },
-                    };
-                }
-                catch (Exception exception)
-                {
-                    return RuntimeBridgeCommandResult.FromException(exception);
-                }
-            }
-
-            return new()
-            {
-                outcome = RuntimeToolOutcome.Exception,
-                diagnostic = $"Loaded assembly reference '{referenceId}' was not found.",
-            };
-        }
-
-        static RuntimeBridgeCommandResult Restart()
+        static BridgeCommandResult Restart()
         {
             var arguments = Environment.GetCommandLineArgs();
             if (arguments.Length == 0)
@@ -514,7 +378,7 @@ namespace Conduit.Runtime
             var process = Process.Start(startInfo)
                           ?? throw new InvalidOperationException("The replacement player process did not start.");
             RuntimeBridgeBootstrap.RequestQuit();
-            return RuntimeBridgeCommandResult.Success(
+            return BridgeCommandResult.Success(
                 JsonUtility.ToJson(
                     new RuntimeRestartResult
                     {
@@ -525,13 +389,19 @@ namespace Conduit.Runtime
             );
         }
 
+        static BridgeCommandResult QuitPlayer()
+        {
+            RuntimeBridgeBootstrap.RequestQuit();
+            return BridgeCommandResult.Success();
+        }
+
         static void AppendHierarchy(StringBuilder builder, Transform transform, string indent)
         {
             builder.Append(indent)
                 .Append("- ")
                 .Append(transform.name)
                 .Append(" [")
-                .Append(RuntimeObjectId.Format(transform.gameObject))
+                .Append(BridgeObjectId.Format(transform.gameObject))
                 .AppendLine("]");
             var childIndent = indent + "  ";
             for (var index = 0; index < transform.childCount; index++)
@@ -550,8 +420,10 @@ namespace Conduit.Runtime
                              | BindingFlags.DeclaredOnly
                          ))
                 {
-                    if (field.IsStatic || count++ == 100)
+                    if (field.IsStatic)
                         continue;
+                    if (count++ >= 100)
+                        return;
 
                     object? value;
                     try
@@ -566,7 +438,7 @@ namespace Conduit.Runtime
                     builder.Append("- ")
                         .Append(field.Name)
                         .Append(": ")
-                        .AppendLine(FormatValue(value) ?? "null");
+                        .AppendLine(BridgeValueFormatter.Format(value) ?? "null");
                 }
         }
 
@@ -578,36 +450,10 @@ namespace Conduit.Runtime
                 _ => null,
             };
 
-        static string? FormatValue(object? value) =>
-            value switch
-            {
-                null => null,
-                Object unityObject => $"{unityObject.name} [{RuntimeObjectId.Format(unityObject)}]",
-                string text => text,
-                System.Collections.IEnumerable sequence => string.Join(
-                    ", ",
-                    sequence.Cast<object>().Take(25).Select(FormatValue)
-                ),
-                _ => value.ToString(),
-            };
-
-        static string FormatDuration(TimeSpan duration)
-        {
-            if (duration.TotalDays >= 1)
-                return $"{(int)duration.TotalDays} days {duration.Hours} hours";
-            if (duration.TotalHours >= 1)
-                return $"{(int)duration.TotalHours} hours {duration.Minutes} minutes";
-            if (duration.TotalMinutes >= 1)
-                return $"{(int)duration.TotalMinutes} minutes {duration.Seconds} seconds";
-            return $"{Math.Max(1, duration.Seconds)} seconds";
-        }
-
         static string QuoteArgument(string argument) =>
             argument.Length > 0 && argument.All(static value => !char.IsWhiteSpace(value) && value != '"')
                 ? argument
                 : '"' + argument.Replace("\\", "\\\\").Replace("\"", "\\\"") + '"';
-
-        static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
 
         [Serializable]
         sealed class RuntimePingSnapshot
@@ -618,23 +464,10 @@ namespace Conduit.Runtime
             public string uptime = string.Empty;
             public string editor_mode = "player";
             public string? active_command_type;
+            public int active_detour_count;
+            public string[] active_detours = Array.Empty<string>();
             public string[] scenes = Array.Empty<string>();
             public string[] dirty_scenes = Array.Empty<string>();
-        }
-
-        [Serializable]
-        sealed class RuntimeAssemblyReferenceManifest
-        {
-            public RuntimeAssemblyReference[] references = Array.Empty<RuntimeAssemblyReference>();
-        }
-
-        [Serializable]
-        sealed class RuntimeAssemblyReference
-        {
-            public string id = string.Empty;
-            public string assembly_name = string.Empty;
-            public string path = string.Empty;
-            public long length;
         }
 
         [Serializable]
@@ -644,16 +477,5 @@ namespace Conduit.Runtime
             public string handoff_token = string.Empty;
         }
 
-        sealed class CachedSnippet
-        {
-            public CachedSnippet(MethodInfo method, string displayName)
-            {
-                Method = method;
-                DisplayName = displayName;
-            }
-
-            public MethodInfo Method { get; }
-            public string DisplayName { get; }
-        }
     }
 }

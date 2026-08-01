@@ -6,11 +6,12 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Conduit;
 using UnityEditor;
-using UnityEditor.Compilation;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -22,6 +23,19 @@ public sealed class ConduitMcpToolsTests
     const string TestAssetsRoot = "Packages/dev.tryfinally.conduit/Tests/EditMode/TestAssets";
     const string MaterialAsset = TestAssetsRoot + "/JsonOverwriteMaterial.mat";
     const string SceneAsset = TestAssetsRoot + "/Scenes/BridgeFixtureScene.unity";
+
+    [Test]
+    public void SharedStatusDurationUsesTwoSignificantUnits()
+    {
+        Assert.That(
+            BridgeStatusUtility.FormatDuration(new TimeSpan(1, 2, 3, 4)),
+            Is.EqualTo("1 day 2 hours")
+        );
+        Assert.That(
+            BridgeStatusUtility.FormatDuration(TimeSpan.FromSeconds(61)),
+            Is.EqualTo("1 minute 1 second")
+        );
+    }
     const string SettingsRoot = TestAssetsRoot + "/Settings";
     const string SourceAsset = SettingsRoot + "/DependencyPipeline.asset";
     const string DependencyAsset = SettingsRoot + "/DependencyRenderer.asset";
@@ -544,10 +558,15 @@ public sealed class ConduitMcpToolsTests
     public void ReflectTypes_FiltersStructsAndEnums()
     {
         var structResult = reflect.Reflect(new[] { "structs", "ConduitReflectStructFixture", string.Empty });
+        var refStructResult = reflect.Reflect(new[] { "structs", "ConduitReflectRefStructFixture", string.Empty });
         var enumResult = reflect.Reflect(new[] { "enums", "ConduitReflectEnumFixture", string.Empty });
 
         Assert.That(structResult.outcome, Is.EqualTo(ToolOutcome.Success));
         Assert.That(structResult.return_value, Does.Contain("struct ConduitReflectStructFixture"));
+        Assert.That(
+            refStructResult.return_value,
+            Does.Contain("readonly ref struct ConduitReflectRefStructFixture")
+        );
         Assert.That(enumResult.outcome, Is.EqualTo(ToolOutcome.Success));
         Assert.That(enumResult.return_value, Does.Contain("enum ConduitReflectEnumFixture"));
     }
@@ -581,13 +600,99 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
         Assert.That(result.return_value, Does.Contain("Declared on ConduitReflectDerivedFixture"));
-        Assert.That(result.return_value, Does.Contain("private int derivedPrivateField"));
+        Assert.That(result.return_value, Does.Contain("int derivedPrivateField"));
+        Assert.That(result.return_value, Does.Not.Contain("private int derivedPrivateField"));
         Assert.That(result.return_value, Does.Contain("public string DerivedProperty { get; private set; }"));
         Assert.That(result.return_value, Does.Contain("public T GenericMethod<T>(ref int value, out string text, params T[] items)"));
         Assert.That(result.return_value, Does.Contain("Inherited from ConduitReflectBaseFixture"));
         Assert.That(result.return_value, Does.Contain("protected string ReflectBaseOnlyMethod()"));
         Assert.That(result.return_value, Does.Contain("Interface ConduitReflectInterfaceFixture"));
         Assert.That(result.return_value, Does.Not.Contain("System.Object"));
+    }
+
+    [Test]
+    public void ReflectMethods_PreservesAdvancedSignaturesAndMarksOnlyUnsupportedMethods()
+    {
+        var result = reflect.Reflect(new[] { "methods", "ConduitReflectSignatureFixture", string.Empty });
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Does.Contain("static ref int RefReturn()"));
+        Assert.That(result.return_value, Does.Contain("static ref readonly int RefReadonlyReturn()"));
+        Assert.That(result.return_value, Does.Contain("Span<int> values"));
+        Assert.That(result.return_value, Does.Contain("int* pointer"));
+        Assert.That(result.return_value, Does.Contain("delegate*<int, int> managed"));
+        Assert.That(result.return_value, Does.Contain("delegate* unmanaged[Cdecl]<int, int> native"));
+        Assert.That(result.return_value, Does.Contain("in int input"));
+        Assert.That(result.return_value, Does.Contain("ref int reference"));
+        Assert.That(result.return_value, Does.Contain("out int output"));
+        Assert.That(
+            result.return_value,
+            Does.Contain(
+                "static ConduitReflectSignatureFixture.@class @event("
+                + "ConduitReflectSignatureFixture.@class @this)"
+            )
+        );
+        Assert.That(result.return_value, Does.Contain("Generic<T>() // detour-incompatible"));
+        Assert.That(result.return_value, Does.Contain("Native() // detour-incompatible"));
+        Assert.That(result.return_value, Does.Not.Contain("private static"));
+        const string supportedSignature = "static unsafe Span<int> SpanAndPointers(Span<int> values, int* pointer, delegate*<int, int> managed, delegate* unmanaged[Cdecl]<int, int> native)";
+        Assert.That(result.return_value, Does.Contain(supportedSignature));
+        Assert.That(result.return_value, Does.Not.Contain(supportedSignature + " // detour-incompatible"));
+        Assert.That(
+            result.return_value,
+            Does.Not.Contain(
+                "@event(ConduitReflectSignatureFixture.@class @this) // detour-incompatible"
+            )
+        );
+    }
+
+    [Test]
+    public void ReflectFieldsAndPropertiesPreserveUnsafeAndRefReturnDeclarations()
+    {
+        var fields = reflect.Reflect(
+            new[] { "fields", "ConduitReflectSignatureFixture", "operation" }
+        );
+        var properties = reflect.Reflect(
+            new[] { "properties", "ConduitReflectSignatureFixture", "Property" }
+        );
+
+        Assert.That(fields.return_value, Does.Contain("static unsafe delegate*<int, int> operation"));
+        Assert.That(properties.return_value, Does.Contain("static ref int RefProperty { get; }"));
+        Assert.That(
+            properties.return_value,
+            Does.Contain("static ref readonly int RefReadonlyProperty { get; }")
+        );
+        Assert.That(
+            properties.return_value,
+            Does.Contain("static unsafe int* PointerProperty { get; }")
+        );
+    }
+
+    [Test]
+    public void ReflectInterfaceMethods_OmitImplicitAccessAndAbstractModifiers()
+    {
+        var result = reflect.Reflect(new[] { "methods", "ConduitReflectInterfaceFixture", string.Empty });
+
+        Assert.That(result.return_value, Does.Contain("void ReflectInterfaceMethod() // detour-incompatible"));
+        Assert.That(result.return_value, Does.Not.Contain("public abstract void ReflectInterfaceMethod"));
+    }
+
+    [Test]
+    public void ReflectConstructorsOmitImplicitPrivateAndMarkThemIncompatible()
+    {
+        var result = reflect.Reflect(
+            new[] { "constructors", "ConduitReflectDerivedFixture", string.Empty }
+        );
+
+        Assert.That(
+            result.return_value,
+            Does.Contain("public ConduitReflectDerivedFixture() // detour-incompatible")
+        );
+        Assert.That(
+            result.return_value,
+            Does.Contain("static ConduitReflectDerivedFixture() // detour-incompatible")
+        );
+        Assert.That(result.return_value, Does.Not.Contain("private static"));
     }
 
     [Test]
@@ -627,8 +732,9 @@ public sealed class ConduitMcpToolsTests
         var result = reflect.Reflect(new[] { "methods", string.Empty, "ReflectRank" });
 
         Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
-        var exactIndex = result.return_value.IndexOf("public void ReflectRank()", StringComparison.Ordinal);
-        var looseIndex = result.return_value.IndexOf("public void PrefixReflectRankSuffix()", StringComparison.Ordinal);
+        var text = result.return_value!;
+        var exactIndex = text.IndexOf("public void ReflectRank()", StringComparison.Ordinal);
+        var looseIndex = text.IndexOf("public void PrefixReflectRankSuffix()", StringComparison.Ordinal);
 
         Assert.That(exactIndex, Is.GreaterThanOrEqualTo(0), result.return_value);
         Assert.That(looseIndex, Is.GreaterThanOrEqualTo(0), result.return_value);
@@ -1806,619 +1912,6 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public void ExecuteCode_GetAdditionalReferences_ReusesCachedProjectLocalSnapshot()
-    {
-        execute_code.Initialize();
-        var projectPath = execute_code.GetCurrentProjectPath();
-        var snippetRootPath = execute_code.GetSnippetRootPath(projectPath);
-        var first = execute_code.GetAdditionalReferences(projectPath, snippetRootPath);
-        var second = execute_code.GetAdditionalReferences(projectPath, snippetRootPath);
-
-        Assert.That(first, Is.Not.Empty);
-        Assert.That(second, Is.SameAs(first));
-        foreach (var reference in first)
-        {
-            Assert.That(Path.IsPathRooted(reference), Is.False, reference);
-            Assert.That(reference, Does.EndWith(".dll"), reference);
-            Assert.That(reference, Does.Not.StartWith("Library/Conduit/ExecuteCodeReferences/"), reference);
-            Assert.That(reference, Does.Not.StartWith("Temp/execute_code/"), reference);
-        }
-    }
-
-    [Test]
-    public void ExecuteCode_SnippetArtifactIdsAreShortSequentialNumbers()
-    {
-        execute_code.Initialize();
-        var first = execute_code.AllocateSnippetArtifactId();
-        var second = execute_code.AllocateSnippetArtifactId();
-
-        Assert.That(int.TryParse(first, out var firstId), Is.True, first);
-        Assert.That(int.TryParse(second, out var secondId), Is.True, second);
-        Assert.That(secondId, Is.EqualTo(firstId + 1));
-        Assert.That(first, Does.Not.Contain("-"));
-        Assert.That(first.Length, Is.LessThanOrEqualTo(10));
-    }
-
-    [Test]
-    public void ExecuteCode_SnippetFileNamesRequireCanonicalPositiveIds()
-    {
-        Assert.That(execute_code.TryParseSnippetFileName("17.cs", out var artifactId), Is.True);
-        Assert.That(artifactId, Is.EqualTo("17"));
-
-        foreach (var value in new[]
-                 {
-                     "0.cs",
-                     "01.cs",
-                     "-1.cs",
-                     "17.CS",
-                     " 17.cs",
-                     "17.cs ",
-                     "../17.cs",
-                     "snippet.cs",
-                 })
-            Assert.That(execute_code.TryParseSnippetFileName(value, out _), Is.False, value);
-    }
-
-    [Test]
-    public void ExecuteCode_ExistingSnippetFilesAdvanceArtifactIds()
-    {
-        var directoryPath = Path.Combine(Path.GetTempPath(), $"ConduitSnippetIds_{Guid.NewGuid():N}");
-        Directory.CreateDirectory(directoryPath);
-        try
-        {
-            foreach (var fileName in new[] { "2.cs", "11.cs", "03.cs", "snippet.cs", "12.cs.bak" })
-                File.WriteAllText(Path.Combine(directoryPath, fileName), string.Empty);
-
-            Assert.That(execute_code.GetHighestSnippetArtifactId(directoryPath), Is.EqualTo(11));
-        }
-        finally
-        {
-            Directory.Delete(directoryPath, true);
-        }
-    }
-
-    [Test]
-    public void ExecuteCode_CompilerMessageFormattingAvoidsDuplicateLocationPrefix()
-    {
-        var compilerMessage = new CompilerMessage
-        {
-            type = CompilerMessageType.Warning,
-            file = "Temp/execute_code/1.cs",
-            line = 2,
-            column = 1,
-            message = "Temp/execute_code/1.cs(2,1): warning CS0618: 'Application.RegisterLogCallback(Application.LogCallback)' is obsolete: 'Application.RegisterLogCallback is deprecated. Use Application.logMessageReceived instead.'",
-        };
-
-        var formatted = execute_code.FormatCompilerMessages(new[] { compilerMessage });
-
-        Assert.That(formatted, Is.EqualTo(
-            "[Warning] Temp/execute_code/1.cs(2,1): warning CS0618: " +
-            "'Application.RegisterLogCallback(Application.LogCallback)' is obsolete: " +
-            "'Application.RegisterLogCallback is deprecated. Use Application.logMessageReceived instead.'"));
-    }
-
-    [Test]
-    public void ExecuteCode_NormalizeBareReturns_RewritesOnlyEntryPointDiagnostics()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse(
-            "object Broken() { return; }\n"
-            + "if (true)\n"
-            + "    return /* first */ ;\n"
-            + "if (false) return;\n"
-            + "return \"ok\";\n"
-        );
-        var objectResultMessages = new[]
-        {
-            Error(1, 19, "CS0126", "An object of a type convertible to 'object' is required"),
-            Error(3, 5, "CS0126", "An object of a type convertible to 'object' is required"),
-            Error(4, 12, "CS0126", "An object of a type convertible to 'object' is required"),
-        };
-        var noResultMessages = new[]
-        {
-            Error(1, 19, "CS0126", "An object of a type convertible to 'object' is required"),
-            Error(5, 1, "CS1997", "A return keyword must not be followed by an object expression"),
-        };
-
-        var normalized = execute_code.TryNormalizeBareReturns(
-            parsedSnippet.Body,
-            objectResultMessages,
-            noResultMessages,
-            out var normalizedBody,
-            out var recoveredLocations
-        );
-
-        Assert.That(normalized, Is.True);
-        Assert.That(recoveredLocations, Has.Count.EqualTo(2));
-        Assert.That(recoveredLocations[(3, 5)], Is.EqualTo(1));
-        Assert.That(recoveredLocations[(4, 12)], Is.EqualTo(1));
-        Assert.That(normalizedBody.Text, Does.Contain("object Broken() { return; }"));
-        Assert.That(normalizedBody.Text, Does.Contain("return null /* first */ ;"));
-        Assert.That(normalizedBody.Text, Does.Contain("if (false) return null;"));
-
-        static CompilerMessage Error(int line, int column, string code, string text) => new()
-        {
-            type = CompilerMessageType.Error,
-            file = "Temp/execute_code/1.cs",
-            line = line,
-            column = column,
-            message = $"Temp/execute_code/1.cs({line},{column}): error {code}: {text}",
-        };
-    }
-
-    [Test]
-    public void ExecuteCode_NormalizeBareReturns_FailsClosedForInvalidCompilerLocation()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse("Debug.Log(\"return;\");");
-        var objectResultMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                line = 1,
-                column = 1,
-                message = "Temp/execute_code/1.cs(1,1): error CS0126: An object of a type convertible to 'object' is required",
-            },
-        };
-
-        var normalized = execute_code.TryNormalizeBareReturns(
-            parsedSnippet.Body,
-            objectResultMessages,
-            Array.Empty<CompilerMessage>(),
-            out var normalizedBody,
-            out var recoveredLocations
-        );
-
-        Assert.That(normalized, Is.False);
-        Assert.That(normalizedBody.Text, Is.EqualTo(parsedSnippet.Body.Text));
-        Assert.That(recoveredLocations, Is.Empty);
-    }
-
-    [Test]
-    public void ExecuteCode_ParseRetryableMissingSymbol_RecognizesSupportedDiagnostics()
-    {
-        var missingName = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(9,36): error CS0103: The name 'BindingFlags' does not exist in the current context",
-        };
-        var missingType = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
-        };
-
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingName, out var missingNameSymbol), Is.True);
-        Assert.That(missingNameSymbol, Is.EqualTo("BindingFlags"));
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingType, out var missingTypeSymbol), Is.True);
-        Assert.That(missingTypeSymbol, Is.EqualTo("MethodInfo"));
-    }
-
-    [Test]
-    public void ExecuteCode_ParseRetryableMissingSymbol_RejectsUnsupportedOrNonTypeLikeDiagnostics()
-    {
-        var missingVariable = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(9,36): error CS0103: The name 'bindingFlags' does not exist in the current context",
-        };
-        var lowercaseType = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'math' does not exist in the current context",
-        };
-        var unsupported = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(9,36): error CS1061: 'string' does not contain a definition for 'Foo'",
-        };
-
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(missingVariable, out _), Is.False);
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(lowercaseType, out _), Is.False);
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(unsupported, out _), Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_ParseRetryableMissingSymbol_RejectsQualifiedNames()
-    {
-        var qualifiedType = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'System.Reflection.MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
-        };
-        var aliasedType = new CompilerMessage
-        {
-            type = CompilerMessageType.Error,
-            message = "Temp/execute_code/1.cs(2,1): error CS0246: The type or namespace name 'global::MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
-        };
-
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(qualifiedType, out _), Is.False);
-        Assert.That(execute_code.TryParseRetryableMissingSymbol(aliasedType, out _), Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_ResolvesUnambiguousReflectionImport()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse("return BindingFlags.Public.ToString();");
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            execute_code.GetCurrentProjectPath(),
-            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
-            parsedSnippet,
-            compilerMessages,
-            out var inferredNamespaces
-        );
-
-        Assert.That(inferred, Is.True);
-        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection" }));
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_ResolvesAllLowercaseMathematicsTypes()
-    {
-        var projectPath = execute_code.GetCurrentProjectPath();
-        var lowercaseTypeNames = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-        foreach (var type in GetLoadableTypes(assembly))
-        {
-            var aritySeparator = type.Name.IndexOf('`');
-            var typeName = aritySeparator >= 0 ? type.Name[..aritySeparator] : type.Name;
-            if (!type.IsNested
-                && type.Namespace == "Unity.Mathematics"
-                && IsLowercaseTypeName(typeName))
-                lowercaseTypeNames.Add(typeName);
-        }
-
-        Assert.That(lowercaseTypeNames, Does.Contain("math"));
-        foreach (var typeName in lowercaseTypeNames)
-        {
-            var parsedSnippet = ConduitCodeParser.Parse($"return typeof({typeName}).Name;");
-            var compilerMessages = new[]
-            {
-                new CompilerMessage
-                {
-                    type = CompilerMessageType.Error,
-                    message = $"Temp/execute_code/1.cs(1,15): error CS0246: The type or namespace name '{typeName}' could not be found (are you missing a using directive or an assembly reference?)",
-                },
-            };
-
-            var inferred = execute_code.TryInferMissingNamespaces(
-                projectPath,
-                execute_code.GetSnippetRootPath(projectPath),
-                parsedSnippet,
-                compilerMessages,
-                out var inferredNamespaces
-            );
-
-            Assert.That(inferred, Is.True, typeName);
-            Assert.That(inferredNamespaces, Is.EqualTo(new[] { "Unity.Mathematics" }), typeName);
-        }
-
-        static bool IsLowercaseTypeName(string typeName)
-        {
-            if (typeName.Length == 0 || !char.IsLower(typeName[0]))
-                return false;
-
-            foreach (var ch in typeName)
-                if (char.IsUpper(ch))
-                    return false;
-
-            return true;
-        }
-
-        static IEnumerable<Type> GetLoadableTypes(System.Reflection.Assembly assembly)
-        {
-            Type?[] types;
-            try
-            {
-                types = assembly.GetTypes();
-            }
-            catch (ReflectionTypeLoadException exception)
-            {
-                types = exception.Types;
-            }
-
-            foreach (var type in types)
-                if (type is not null)
-                    yield return type;
-        }
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_RejectsMissingVariables()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse("return bindingFlags.ToString();");
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'bindingFlags' does not exist in the current context",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            execute_code.GetCurrentProjectPath(),
-            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
-            parsedSnippet,
-            compilerMessages,
-            out _
-        );
-
-        Assert.That(inferred, Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_ResolvesMultipleNamespacesInSingleRetry()
-    {
-        var projectPath = execute_code.GetCurrentProjectPath();
-        var parsedSnippet = ConduitCodeParser.Parse("return Regex.IsMatch(typeof(MethodInfo).Name, \"^Method\").ToString();");
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,24): error CS0103: The name 'Regex' does not exist in the current context",
-            },
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,39): error CS0246: The type or namespace name 'MethodInfo' could not be found (are you missing a using directive or an assembly reference?)",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            projectPath,
-            execute_code.GetSnippetRootPath(projectPath),
-            parsedSnippet,
-            compilerMessages,
-            out var inferredNamespaces
-        );
-
-        Assert.That(inferred, Is.True);
-        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection", "System.Text.RegularExpressions" }));
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_DeduplicatesRepeatedMissingSymbols()
-    {
-        var projectPath = execute_code.GetCurrentProjectPath();
-        var parsedSnippet = ConduitCodeParser.Parse("var a = BindingFlags.Public; return BindingFlags.NonPublic.ToString();");
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,9): error CS0103: The name 'BindingFlags' does not exist in the current context",
-            },
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,38): error CS0103: The name 'BindingFlags' does not exist in the current context",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            projectPath,
-            execute_code.GetSnippetRootPath(projectPath),
-            parsedSnippet,
-            compilerMessages,
-            out var inferredNamespaces
-        );
-
-        Assert.That(inferred, Is.True);
-        Assert.That(inferredNamespaces, Is.EqualTo(new[] { "System.Reflection" }));
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_DoesNotRetryWhenNamespaceAlreadyImported()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse(
-            "using System.Reflection;\n"
-            + "\n"
-            + "return BindingFlags.Public.ToString();\n"
-        );
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(3,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            execute_code.GetCurrentProjectPath(),
-            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
-            parsedSnippet,
-            compilerMessages,
-            out _
-        );
-
-        Assert.That(inferred, Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_BuildSnippetSource_DeduplicatesInferredAndExplicitUsingDirectives()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse(
-            "using System.Reflection;\n"
-            + "using System.Reflection;\n"
-            + "\n"
-            + "return BindingFlags.Public.ToString();\n"
-        );
-        var buildSnippetSource = typeof(execute_code).GetMethod(
-            "BuildSnippetSource",
-            BindingFlags.Static | BindingFlags.NonPublic
-        );
-        Assert.That(buildSnippetSource, Is.Not.Null);
-
-        var generatedSource = (string)buildSnippetSource!.Invoke(
-            null,
-            new object?[]
-            {
-                "SnippetHost_Test",
-                "1.cs",
-                parsedSnippet,
-                new[] { "System.Reflection" },
-            }
-        )!;
-
-        Assert.That(CountOccurrences(generatedSource, "using System.Reflection;"), Is.EqualTo(1), generatedSource);
-    }
-
-    [Test]
-    public void ExecuteCode_BuildSnippetSource_ImportsConduitHelpers()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse("return Reflect.Type(\"UnityEngine.Camera\").Name + Search<Material>(\"JsonOverwriteMaterial\").name;");
-        var buildSnippetSource = typeof(execute_code).GetMethod(
-            "BuildSnippetSource",
-            BindingFlags.Static | BindingFlags.NonPublic
-        );
-        Assert.That(buildSnippetSource, Is.Not.Null);
-
-        var generatedSource = (string)buildSnippetSource!.Invoke(
-            null,
-            new object?[]
-            {
-                "SnippetHost_Test",
-                "1.cs",
-                parsedSnippet,
-                Array.Empty<string>(),
-            }
-        )!;
-
-        Assert.That(CountOccurrences(generatedSource, "using static Conduit.ConduitSearch;"), Is.EqualTo(1), generatedSource);
-        Assert.That(CountOccurrences(generatedSource, "using Reflect = Conduit.ConduitReflect;"), Is.EqualTo(1), generatedSource);
-        Assert.That(CountOccurrences(generatedSource, "using Object = UnityEngine.Object;"), Is.EqualTo(1), generatedSource);
-        Assert.That(generatedSource, Does.Contain("public static object Execute()"), generatedSource);
-        Assert.That(generatedSource, Does.Not.Contain("async Task<object> Execute()"), generatedSource);
-    }
-
-    [Test]
-    public void ExecuteCode_AsyncContextRetry_RequiresRemovedDiagnostic()
-    {
-        var wrapperAwait = CompilerError("CS4032", 1, 1);
-        var nestedAwait = CompilerError("CS4033", 2, 5);
-
-        Assert.That(
-            execute_code.RemovesAsyncContextError(
-                new[] { wrapperAwait, nestedAwait },
-                new[] { nestedAwait }
-            ),
-            Is.True
-        );
-        Assert.That(
-            execute_code.RemovesAsyncContextError(
-                new[] { nestedAwait },
-                new[] { nestedAwait }
-            ),
-            Is.False
-        );
-
-        static CompilerMessage CompilerError(string code, int line, int column)
-            => new()
-            {
-                type = CompilerMessageType.Error,
-                line = line,
-                column = column,
-                message = $"Temp/execute_code/1.cs({line},{column}): error {code}: async context required",
-            };
-    }
-
-    [Test]
-    public void ExecuteCode_InferMissingNamespaces_RejectsMixedErrorSets()
-    {
-        var parsedSnippet = ConduitCodeParser.Parse("return BindingFlags.Public.ToString();");
-        var compilerMessages = new[]
-        {
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,8): error CS0103: The name 'BindingFlags' does not exist in the current context",
-            },
-            new CompilerMessage
-            {
-                type = CompilerMessageType.Error,
-                message = "Temp/execute_code/1.cs(1,1): error CS1002: ; expected",
-            },
-        };
-
-        var inferred = execute_code.TryInferMissingNamespaces(
-            execute_code.GetCurrentProjectPath(),
-            execute_code.GetSnippetRootPath(execute_code.GetCurrentProjectPath()),
-            parsedSnippet,
-            compilerMessages,
-            out _
-        );
-
-        Assert.That(inferred, Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_ResolveMissingSymbolNamespace_RejectsAmbiguousCandidates()
-    {
-        var lookup = new Dictionary<string, string[]>(StringComparer.Ordinal)
-        {
-            ["Thing"] = new[] { "A.B", "C.D" },
-        };
-
-        var resolved = execute_code.TryResolveMissingSymbolNamespace(
-            "Thing",
-            lookup,
-            new(StringComparer.Ordinal),
-            new(StringComparer.Ordinal),
-            out _
-        );
-
-        Assert.That(resolved, Is.False);
-    }
-
-    [Test]
-    public void ExecuteCode_ResolveMissingSymbolNamespace_ReusesPreviouslyResolvedNamespace()
-    {
-        var lookup = new Dictionary<string, string[]>(StringComparer.Ordinal)
-        {
-            ["Thing"] = new[] { "A.B", "C.D" },
-        };
-        var resolvedNamespaces = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "A.B",
-        };
-
-        var resolved = execute_code.TryResolveMissingSymbolNamespace(
-            "Thing",
-            lookup,
-            new(StringComparer.Ordinal),
-            resolvedNamespaces,
-            out var resolvedNamespace
-        );
-
-        Assert.That(resolved, Is.True);
-        Assert.That(resolvedNamespace, Is.EqualTo("A.B"));
-    }
-
-    static int CountOccurrences(string text, string value)
-    {
-        var count = 0;
-        var startIndex = 0;
-        while ((startIndex = text.IndexOf(value, startIndex, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            startIndex += value.Length;
-        }
-
-        return count;
-    }
-
-    [Test]
     public void Screenshot_ModuleUnavailableDiagnosticListsOnlyMissingModules()
     {
         Assert.That(
@@ -3346,6 +2839,30 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void BridgeArtifact_VerifiesProjectRelativeFilesAndRejectsTraversal()
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes("compiled");
+        var path = Path.Combine(ConduitProjectIdentity.GetProjectPath(), "Temp", "ConduitTests", "artifact.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
+        File.WriteAllBytes(path, bytes);
+        try
+        {
+            var artifact = BridgeArtifact.FromBytes("artifact.dll", "application/octet-stream", bytes);
+            artifact.relative_path = "Temp/ConduitTests/artifact.dll";
+            artifact.chunks = Array.Empty<string>();
+
+            Assert.That(artifact.Decode(), Is.EqualTo(bytes));
+
+            artifact.relative_path = "../artifact.dll";
+            Assert.Throws<InvalidOperationException>(() => artifact.Decode());
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Test]
     public void ReimportSettlement_WaitsForIdleSettleWindow()
     {
         Assert.That(ConduitToolRunner.ReimportIdleSettleUpdates, Is.EqualTo(8));
@@ -4094,6 +3611,10 @@ struct ConduitReflectStructFixture
     public int Value;
 }
 
+readonly ref struct ConduitReflectRefStructFixture
+{
+}
+
 enum ConduitReflectEnumFixture
 {
     First,
@@ -4101,6 +3622,41 @@ enum ConduitReflectEnumFixture
 }
 
 delegate void ConduitReflectDelegateFixture();
+
+sealed class ConduitReflectSignatureFixture
+{
+    static int storage;
+    static unsafe delegate*<int, int> operation;
+
+    static ref int RefReturn() => ref storage;
+
+    static ref readonly int RefReadonlyReturn() => ref storage;
+
+    static ref int RefProperty => ref storage;
+
+    static ref readonly int RefReadonlyProperty => ref storage;
+
+    static unsafe int* PointerProperty => null;
+
+    static void ReferenceParameters(in int input, ref int reference, out int output)
+        => output = input + reference;
+
+    static unsafe Span<int> SpanAndPointers(
+        Span<int> values,
+        int* pointer,
+        delegate*<int, int> managed,
+        delegate* unmanaged[Cdecl]<int, int> native)
+        => values;
+
+    static @class @event(@class @this) => @this;
+
+    static T Generic<T>() => default!;
+
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void Native();
+
+    sealed class @class { }
+}
 
 sealed class ConduitReflectExactRankFixture
 {

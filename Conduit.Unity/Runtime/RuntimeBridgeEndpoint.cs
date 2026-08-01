@@ -21,8 +21,8 @@ namespace Conduit.Runtime
         static readonly TimeSpan leaseInterval = TimeSpan.FromSeconds(2);
         readonly CancellationTokenSource cancellation = new();
         readonly ConcurrentDictionary<int, RuntimeBridgeSession> sessions = new();
-        readonly RuntimeEndpointDescriptor descriptor;
-        readonly RuntimeBridgeHandshake handshake;
+        readonly BridgeEndpointDescriptor descriptor;
+        readonly BridgeProjectHandshake handshake;
         readonly string endpointDirectory;
         readonly bool useFifo;
         int nextSessionId;
@@ -74,6 +74,7 @@ namespace Conduit.Runtime
                 started_utc = DateTimeOffset.UtcNow.ToString("O"),
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
                 can_monitor_process = !wine,
+                is_test_player = Environment.GetEnvironmentVariable("CONDUIT_TEST_PLAYER") == "1",
                 capabilities = capabilities,
             };
         }
@@ -233,10 +234,10 @@ namespace Conduit.Runtime
                 handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
                 var payload = await connection.Reader.ReadLineAsync();
                 handshakeCts.Token.ThrowIfCancellationRequested();
-                var request = RuntimeBridgeProtocol.Deserialize(payload ?? string.Empty);
-                if (request?.message_type != RuntimeBridgeMessageTypes.Hello
+                var request = BridgeProtocol.Deserialize(payload ?? string.Empty);
+                if (request?.message_type != BridgeMessageTypes.Hello
                     || request.project == null
-                    || request.protocol_version != RuntimeBridgeProtocol.Version
+                    || request.protocol_version != BridgeProtocol.Version
                     || request.project.process_id is > 0 && request.project.process_id != descriptor.process_id
                     || request.project.session_instance_id is { Length: > 0 }
                     && request.project.session_instance_id != descriptor.session_instance_id)
@@ -244,7 +245,7 @@ namespace Conduit.Runtime
 
                 handshake.last_seen_utc = DateTimeOffset.UtcNow.ToString("O");
                 await connection.WriteAsync(
-                    RuntimeBridgeProtocol.Serialize(RuntimeBridgeMessage.Hello(handshake)),
+                    BridgeProtocol.Serialize(BridgeMessage.CreateHello(handshake)),
                     endpointToken
                 );
 
@@ -260,20 +261,20 @@ namespace Conduit.Runtime
                     if (payload == null)
                         break;
 
-                    var message = RuntimeBridgeProtocol.Deserialize(payload);
+                    var message = BridgeProtocol.Deserialize(payload);
                     if (message?.request_id is not { Length: > 0 })
                         continue;
 
-                    if (message.message_type == RuntimeBridgeMessageTypes.CancelCommand)
+                    if (message.message_type == BridgeMessageTypes.CancelCommand)
                     {
                         session.Cancel(message.request_id);
                         continue;
                     }
 
-                    if (message.message_type != RuntimeBridgeMessageTypes.Command || message.command == null)
+                    if (message.message_type != BridgeMessageTypes.Command || message.command == null)
                         continue;
 
-                    await session.SendAsync(RuntimeBridgeMessage.Started(message.request_id));
+                    await session.SendAsync(BridgeMessage.CreateCommandStarted(message.request_id));
                     RuntimeBridgeDispatcher.Enqueue(session, message.request_id, message.command);
                 }
             }
@@ -312,29 +313,6 @@ namespace Conduit.Runtime
                 await Task.Delay(500, ct);
             }
             catch (OperationCanceledException) { }
-        }
-
-        [Serializable]
-        sealed class RuntimeEndpointDescriptor
-        {
-            public int protocol_version = RuntimeBridgeProtocol.Version;
-            public string endpoint_kind = string.Empty;
-            public string transport = string.Empty;
-            public string endpoint_id = string.Empty;
-            public string pipe_name = string.Empty;
-            public int process_id;
-            public string session_instance_id = string.Empty;
-            public string handoff_token = string.Empty;
-            public string unity_version = string.Empty;
-            public string platform = string.Empty;
-            public string build_guid = string.Empty;
-            public string cloud_project_id = string.Empty;
-            public string company_name = string.Empty;
-            public string product_name = string.Empty;
-            public string started_utc = string.Empty;
-            public string last_seen_utc = string.Empty;
-            public bool can_monitor_process;
-            public string[] capabilities = Array.Empty<string>();
         }
     }
 
@@ -430,9 +408,9 @@ namespace Conduit.Runtime
                 cancellation.Cancel();
         }
 
-        public Task SendAsync(RuntimeBridgeMessage message)
+        public Task SendAsync(BridgeMessage message)
             => connection.WriteAsync(
-                RuntimeBridgeProtocol.Serialize(message),
+                BridgeProtocol.Serialize(message),
                 endpointToken
             );
 

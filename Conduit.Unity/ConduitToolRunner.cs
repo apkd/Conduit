@@ -23,7 +23,6 @@ namespace Conduit
 
             initialized = true;
             ConduitOpenSceneDiskChangeGuard.Initialize();
-            execute_code.Initialize();
             scheduler.Initialize();
         }
 
@@ -168,6 +167,7 @@ namespace Conduit
         {
             // connection callbacks may arrive outside editor update; mutable scheduler state stays pump-owned
             readonly ConcurrentQueue<SchedulerEvent> pendingEvents = new();
+            readonly ConcurrentQueue<Action> pendingMainThreadActions = new();
             readonly List<PendingOperationState> queuedOperations = new();
             readonly ToolLogCapture logCapture = new();
             readonly EditorModeTransition editorModeTransition;
@@ -214,6 +214,9 @@ namespace Conduit
                 while (pendingEvents.TryDequeue(out var schedulerEvent))
                     ProcessEvent(schedulerEvent);
 
+                while (pendingMainThreadActions.TryDequeue(out var action))
+                    action();
+
                 PumpQueuedCommands();
             }
 
@@ -232,9 +235,9 @@ namespace Conduit
                         result,
                         operation.command_type
                     ))
-                    ClearPendingResult(operation.request_id, operation.command_type);
-
-                PumpQueuedCommands();
+                    pendingMainThreadActions.Enqueue(
+                        () => ClearPendingResult(operation.request_id, operation.command_type)
+                    );
             }
 
             public void PrepareForAssemblyReload()
@@ -440,11 +443,13 @@ namespace Conduit
                     client_id = clientId,
                     target = command.target,
                     snippet = command.snippet,
+                    display_name = command.display_name,
                     test_filter = command.test_filter,
                     @async = command.@async,
                     rebuild_cache = command.rebuild_cache,
                     tool_usage_started_utc_ticks = usageStartedUtcTicks,
                     args = command.args ?? Array.Empty<string>(),
+                    artifacts = command.artifacts ?? Array.Empty<BridgeArtifact>(),
                 };
                 queuedOperations.Add(operation);
                 return operation;
@@ -459,7 +464,9 @@ namespace Conduit
                 if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
                     return;
 
-                await ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks);
+                pendingMainThreadActions.Enqueue(
+                    () => _ = ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks)
+                );
             }
 
             async Task AcknowledgeQueuedCommandAsync(PendingOperationState operation)
@@ -475,7 +482,19 @@ namespace Conduit
                 if (operation.client_id <= 0)
                     return;
 
-                if (!await ConduitConnection.TrySendCommandStartedAsync(operation.client_id, operation.request_id, operation.command_type))
+                var acknowledged = await ConduitConnection.TrySendCommandStartedAsync(
+                    operation.client_id,
+                    operation.request_id,
+                    operation.command_type
+                );
+                pendingMainThreadActions.Enqueue(
+                    () => CompleteAcknowledgement(operation, acknowledged)
+                );
+            }
+
+            void CompleteAcknowledgement(PendingOperationState operation, bool acknowledged)
+            {
+                if (!acknowledged)
                 {
                     RemoveQueuedOperation(operation);
                     return;
@@ -487,8 +506,6 @@ namespace Conduit
                     operation.is_acknowledged = true;
                     UpdateSnapshot();
                 }
-
-                PumpQueuedCommands();
             }
 
             void PumpQueuedCommands()
@@ -558,6 +575,15 @@ namespace Conduit
                             break;
                         case BridgeCommandKind.ExecuteCode:
                             await ExecuteCodeAsync(operation);
+                            break;
+                        case BridgeCommandKind.Detour:
+                            await ExecuteDetourAsync(operation);
+                            break;
+                        case BridgeCommandKind.CompilationReferences:
+                            await CompleteCurrentAsync(compilation_references.GetManifest());
+                            break;
+                        case BridgeCommandKind.AssemblyBlob:
+                            await CompleteCurrentAsync(compilation_references.GetAssemblyBlob(operation.target));
                             break;
                         case BridgeCommandKind.ViewBurstAsm:
                             await ExecuteViewBurstAsmAsync(operation);

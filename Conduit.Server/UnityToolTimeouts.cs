@@ -38,6 +38,7 @@ static class UnityToolTimeouts
             RefreshAssetDatabase => TimeSpan.FromMinutes(10),
             ReimportAssets       => TimeSpan.FromMinutes(10),
             ExecuteCode          => TimeSpan.FromMinutes(10),
+            Detour              => TimeSpan.FromMinutes(10),
             ViewBurstAsm         => TimeSpan.FromMinutes(5),
             Reflect              => TimeSpan.FromSeconds(90),
             RunTestsEditMode     => TimeSpan.FromMinutes(10),

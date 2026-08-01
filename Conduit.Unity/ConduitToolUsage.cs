@@ -23,6 +23,7 @@ namespace Conduit
         // help is server-only, so it has no meaningful Unity-side duration.
         internal static readonly string[] ToolNames =
         {
+            BridgeCommandTypes.Detour,
             BridgeCommandTypes.DiscardScenes,
             BridgeCommandTypes.EditMode,
             BridgeCommandTypes.ExecuteCode,

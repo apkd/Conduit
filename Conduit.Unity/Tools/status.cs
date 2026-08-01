@@ -4,15 +4,11 @@ using System;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-using Process = System.Diagnostics.Process;
 
 namespace Conduit
 {
     static class status
     {
-        static readonly int editorProcessId = Process.GetCurrentProcess().Id;
-        static readonly DateTimeOffset editorStartedAtUtc = GetEditorStartedAtUtc();
-
         public static string Status() => JsonUtility.ToJson(CreateSnapshot());
 
         static PingSnapshot CreateSnapshot()
@@ -20,8 +16,10 @@ namespace Conduit
             {
                 unity_version = Application.unityVersion,
                 platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
-                editor_process_id = editorProcessId,
-                uptime = FormatDuration(DateTimeOffset.UtcNow - editorStartedAtUtc),
+                editor_process_id = BridgeStatusUtility.ProcessId,
+                uptime = BridgeStatusUtility.FormatDuration(
+                    TimeSpan.FromSeconds(EditorApplication.timeSinceStartup)
+                ),
                 editor_log_path = Application.consoleLogPath,
                 editor_mode = EditorApplication.isPlaying ? "play mode" : "edit mode",
                 is_paused = EditorApplication.isPaused,
@@ -30,6 +28,8 @@ namespace Conduit
                 is_test_runner_active = ConduitToolRunner.IsTestRunnerActive(),
                 active_test_mode = ConduitToolRunner.GetActiveTestRunMode(),
                 active_command_type = ConduitToolRunner.GetActiveCommandType(),
+                active_detour_count = DetourRuntime.ActiveCount,
+                active_detours = DetourRuntime.ActiveMethodNames,
                 profiler_status_line = profiler.BuildStatusLine(),
                 scenes = BuildScenes(),
                 dirty_scenes = ConduitSceneCommandUtility.GetDirtySceneDescriptions(),
@@ -57,52 +57,6 @@ namespace Conduit
             return scenes.ToArray();
         }
 
-        /*
-         * Process.StartTime is not free and status is one of the hottest commands.
-         * Cache the editor start once, then derive uptime from the cached instant.
-         */
-        static DateTimeOffset GetEditorStartedAtUtc()
-        {
-            try
-            {
-                using var process = Process.GetCurrentProcess();
-                return new(process.StartTime);
-            }
-            catch
-            {
-                return DateTimeOffset.UtcNow;
-            }
-        }
-
-        static string FormatDuration(TimeSpan duration)
-        {
-            if (duration < TimeSpan.Zero)
-                duration = TimeSpan.Zero;
-
-            string? primary = null;
-            string? secondary = null;
-
-            AddPart(duration.Days, "day");
-            AddPart(duration.Hours, "hour");
-            AddPart(duration.Minutes, "minute");
-            if (primary == null)
-                AddPart(Math.Max(1, duration.Seconds), "second");
-
-            return secondary == null ? primary ?? "0 seconds" : primary + " " + secondary;
-
-            void AddPart(int value, string unit)
-            {
-                if (value <= 0 || secondary != null)
-                    return;
-
-                var part = value == 1 ? $"1 {unit}" : $"{value} {unit}s";
-                if (primary == null)
-                    primary = part;
-                else
-                    secondary = part;
-            }
-        }
-
         [Serializable]
         sealed class PingSnapshot
         {
@@ -118,6 +72,8 @@ namespace Conduit
             public bool is_test_runner_active;
             public string? active_test_mode;
             public string? active_command_type;
+            public int active_detour_count;
+            public string[] active_detours = Array.Empty<string>();
             public string? profiler_status_line;
             public string[] scenes = Array.Empty<string>();
             public string[] dirty_scenes = Array.Empty<string>();

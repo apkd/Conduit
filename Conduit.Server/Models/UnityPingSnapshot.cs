@@ -26,6 +26,10 @@ sealed class UnityPingSnapshot
 
     public string? ActiveCommandType { get; set; }
 
+    public int ActiveDetourCount { get; set; }
+
+    public string[] ActiveDetours { get; set; } = [];
+
     public string? ProfilerStatusLine { get; set; }
 
     public string[] Scenes { get; set; } = [];

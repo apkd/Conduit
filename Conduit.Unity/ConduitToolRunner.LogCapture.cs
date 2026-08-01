@@ -95,12 +95,16 @@ namespace Conduit
             if (mode == TestMode.PlayMode && !playerRun)
                 ConduitGameView.PrepareForPlayMode();
 
-            activeRunGuid = GetOrCreateTestRunnerApi().Execute(
-                new ExecutionSettings(filter)
-                {
-                    playerHeartbeatTimeout = 600,
-                }
-            );
+            var settings = new ExecutionSettings(filter)
+            {
+                playerHeartbeatTimeout = 30,
+                overloadTestRunSettings = playerRun
+                    ? new PlayerTestRunSettings(
+                        EditorUserBuildSettings.activeBuildTarget == BuildTarget.StandaloneLinux64
+                    )
+                    : null,
+            };
+            activeRunGuid = GetOrCreateTestRunnerApi().Execute(settings);
 
             if (operation.@async)
             {
@@ -223,6 +227,9 @@ namespace Conduit
 
         void HandleRunError(string message)
         {
+            if (!string.IsNullOrEmpty(activeRunGuid))
+                TestRunnerApi.CancelTestRun(activeRunGuid);
+
             if (run_tests.TryCreateUserStoppedPlayModeTestRunResult(
                     message,
                     activeCommandKind == BridgeCommandKind.RunTestsPlayMode,
@@ -494,6 +501,46 @@ namespace Conduit
             public void TestFinished(ITestResultAdaptor result) => owner.HandleTestFinished(result);
             public void OnError(string message) => owner.HandleRunError(message);
         }
+
+        sealed class PlayerTestRunSettings : ITestRunSettings
+        {
+            const string TestPlayerEnvironmentVariable = "CONDUIT_TEST_PLAYER";
+            const string VideoDriverEnvironmentVariable = "SDL_VIDEODRIVER";
+            const string XInput2EnvironmentVariable = "SDL_VIDEO_X11_XINPUT2";
+            readonly bool configureLinuxDisplay;
+            string? previousTestPlayer;
+            string? previousVideoDriver;
+            string? previousXInput2;
+
+            public PlayerTestRunSettings(bool configureLinuxDisplay)
+                => this.configureLinuxDisplay = configureLinuxDisplay;
+
+            public void Apply()
+            {
+                previousTestPlayer = Environment.GetEnvironmentVariable(TestPlayerEnvironmentVariable);
+                // inherited by the launched process so the server never shuts down an unrelated development player
+                Environment.SetEnvironmentVariable(TestPlayerEnvironmentVariable, "1");
+                if (!configureLinuxDisplay)
+                    return;
+
+                previousVideoDriver = Environment.GetEnvironmentVariable(VideoDriverEnvironmentVariable);
+                previousXInput2 = Environment.GetEnvironmentVariable(XInput2EnvironmentVariable);
+                // Unity's bundled SDL crashes in the XInput2 touch path under XWayland; prefer native Wayland there.
+                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+                    Environment.SetEnvironmentVariable(VideoDriverEnvironmentVariable, "wayland");
+                Environment.SetEnvironmentVariable(XInput2EnvironmentVariable, "0");
+            }
+
+            public void Dispose()
+            {
+                Environment.SetEnvironmentVariable(TestPlayerEnvironmentVariable, previousTestPlayer);
+                if (!configureLinuxDisplay)
+                    return;
+
+                Environment.SetEnvironmentVariable(VideoDriverEnvironmentVariable, previousVideoDriver);
+                Environment.SetEnvironmentVariable(XInput2EnvironmentVariable, previousXInput2);
+            }
+        }
     }
 
     sealed class ToolLogCapture
@@ -582,36 +629,7 @@ namespace Conduit
         }
 
         public static string? TrimCommonTail(string? simplifiedStackTrace)
-        {
-            if (simplifiedStackTrace == null || string.IsNullOrWhiteSpace(simplifiedStackTrace))
-                return simplifiedStackTrace;
-
-            var end = simplifiedStackTrace.Length;
-            var removedAny = false;
-            while (true)
-            {
-                while (end > 0 && (simplifiedStackTrace[end - 1] == '\r' || simplifiedStackTrace[end - 1] == '\n'))
-                    end--;
-
-                if (end <= 0)
-                    return null;
-
-                var lastLineBreak = simplifiedStackTrace.LastIndexOf('\n', end - 1);
-                var lineStart = lastLineBreak < 0 ? 0 : lastLineBreak + 1;
-                var frame = simplifiedStackTrace[lineStart..end].TrimEnd();
-                if (!IsIgnorableLogTailFrame(frame))
-                    break;
-
-                removedAny = true;
-                end = lineStart == 0 ? 0 : lineStart - 1;
-            }
-
-            if (!removedAny)
-                return simplifiedStackTrace;
-
-            var trimmed = simplifiedStackTrace[..end].TrimEnd('\r', '\n');
-            return trimmed.Length == 0 ? null : trimmed;
-        }
+            => BridgeExceptionFormatter.TrimCommonLogTail(simplifiedStackTrace);
 
         public static string? CleanCapturedStackTrace(BridgeCommandKind commandKind, string? stackTrace, LogType logType)
         {
@@ -820,40 +838,12 @@ namespace Conduit
         }
 
         static void AppendCapturedLogEntry(StringBuilder builder, CapturedLogEntry entry)
-        {
-            AppendQuotedLines(builder, entry.Message);
-            if (entry.StackTrace is { Length: > 0 })
-            {
-                AppendSectionSeparator(builder);
-                builder.Append(entry.StackTrace);
-            }
-
-            if (entry.RepeatCount > 1)
-            {
-                AppendSectionSeparator(builder);
-                builder.Append("*log repeated ");
-                builder.Append(entry.RepeatCount);
-                builder.Append(" times*");
-            }
-        }
-
-        static void AppendQuotedLines(StringBuilder builder, string message)
-        {
-            if (string.IsNullOrEmpty(message))
-                return;
-
-            builder.Append("> ");
-            for (var index = 0; index < message.Length; index++)
-            {
-                var character = message[index];
-                if (character == '\r')
-                    continue;
-
-                builder.Append(character);
-                if (character == '\n' && index + 1 < message.Length)
-                    builder.Append("> ");
-            }
-        }
+            => BridgeLogFormatter.Append(
+                builder,
+                entry.Message,
+                entry.StackTrace,
+                entry.RepeatCount
+            );
 
         static void AppendSectionSeparator(StringBuilder builder)
         {
@@ -986,26 +976,6 @@ namespace Conduit
 
             return false;
         }
-
-        static bool IsIgnorableLogTailFrame(string frame)
-            => frame is "System.Reflection.MethodBase:Invoke"
-                or "UnityEngine.UnitySynchronizationContext:ExecuteTasks"
-                or "NUnit.Framework.Internal.MethodWrapper:Invoke"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunNonAsyncTestMethod"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:RunTestMethod"
-                or "NUnit.Framework.Internal.Commands.TestMethodCommand:Execute"
-                or "UnityEditor.EditorApplication:Internal_CallUpdateFunctions"
-                || IsExecuteCodeCompilerCallbackFrame(frame);
-
-        // these async completion frames point at the editor harness instead of the user's snippet
-        static bool IsExecuteCodeCompilerCallbackFrame(string frame)
-            => frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
-               && frame.EndsWith(":SetResult", StringComparison.Ordinal)
-               || frame.StartsWith("System.Threading.Tasks.TaskCompletionSource", StringComparison.Ordinal)
-               && frame.EndsWith(":TrySetResult", StringComparison.Ordinal)
-               || frame.StartsWith(
-                   "UnityEditor.Scripting.ScriptCompilation.EditorCompilationInterface:IsCompiling",
-                   StringComparison.Ordinal);
 
         static bool IsMethodBaseInvokeFrame(string frame)
             => FrameNameEquals(frame, "System.Reflection.MethodBase:Invoke")

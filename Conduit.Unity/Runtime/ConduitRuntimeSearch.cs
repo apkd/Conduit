@@ -2,7 +2,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -38,8 +37,8 @@ namespace Conduit.Runtime
             if (TryResolveObjectId(normalized, out var byId))
                 return byId == null ? new() : new() { byId };
 
-            if (normalized[0] == '/' && ResolveHierarchyPath(normalized) is { } byPath)
-                return new() { byPath };
+            if (normalized[0] == '/')
+                return ResolveHierarchyPath(normalized).Cast<Object>().ToList();
 
             ParseQuery(
                 normalized,
@@ -76,13 +75,29 @@ namespace Conduit.Runtime
                 var name = string.Compare(left.name, right.name, StringComparison.OrdinalIgnoreCase);
                 return name != 0
                     ? name
-                    : RuntimeObjectId.Get(left).CompareTo(RuntimeObjectId.Get(right));
+                    : BridgeObjectId.Get(left).CompareTo(BridgeObjectId.Get(right));
             });
             return results;
         }
 
         internal static Object ResolveOne(string query)
             => SelectSingle<Object>(query, ResolveMany(query));
+
+        internal static string FormatMatches(IReadOnlyList<Object> matches, bool includeHint)
+        {
+            var lines = new List<string>(matches.Count + 3);
+            foreach (var match in matches)
+                lines.Add($"- {match.name} | {GetLocation(match)} | {BridgeObjectId.Format(match)}");
+
+            if (includeHint && matches.Count > 1)
+            {
+                lines.Add(string.Empty);
+                lines.Add("Multiple objects match your query.");
+                lines.Add($"Rerun with {BridgeObjectId.Prefix}<number> to select a specific match.");
+            }
+
+            return string.Join("\n", lines);
+        }
 
         internal static string GetHierarchyPath(GameObject gameObject)
         {
@@ -108,9 +123,10 @@ namespace Conduit.Runtime
                 }
 
                 if (candidate is GameObject gameObject
-                    && typeof(Component).IsAssignableFrom(typeof(T))
-                    && gameObject.GetComponent(typeof(T)) is T component)
-                    yield return component;
+                    && typeof(Component).IsAssignableFrom(typeof(T)))
+                    foreach (var component in gameObject.GetComponents(typeof(T)))
+                        if (component is T typedComponent)
+                            yield return typedComponent;
             }
         }
 
@@ -118,13 +134,14 @@ namespace Conduit.Runtime
         {
             using var enumerator = values.GetEnumerator();
             if (!enumerator.MoveNext())
-                throw new InvalidOperationException($"No loaded Unity object matches '{query}'.");
+                throw new InvalidOperationException($"No matches for '{query}'.");
 
             var value = enumerator.Current;
-            if (enumerator.MoveNext())
-                throw new InvalidOperationException($"The query '{query}' matches multiple loaded Unity objects.");
+            if (!enumerator.MoveNext())
+                return value;
 
-            return value;
+            var matches = values.Cast<Object>().Take(25).ToArray();
+            throw new InvalidOperationException(FormatMatches(matches, includeHint: true));
         }
 
         static bool TryResolveObjectId(string query, out Object? value)
@@ -135,28 +152,24 @@ namespace Conduit.Runtime
                 ? query.IndexOf(':') + 1
                 : 0;
             if (prefixLength == 0
-                || !ulong.TryParse(
-                    query.Substring(prefixLength),
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out var objectId
-                ))
+                || !BridgeObjectId.TryParse(query.Substring(prefixLength), out var objectId))
                 return false;
 
             value = Resources.FindObjectsOfTypeAll<Object>()
                 .FirstOrDefault(candidate =>
                     candidate != null
                     && IsInspectable(candidate)
-                    && RuntimeObjectId.Get(candidate) == objectId
+                    && BridgeObjectId.Get(candidate) == objectId
                 );
             return true;
         }
 
-        static GameObject? ResolveHierarchyPath(string query)
+        static List<GameObject> ResolveHierarchyPath(string query)
         {
             var segments = query.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            var matches = new List<GameObject>();
             if (segments.Length == 0)
-                return null;
+                return matches;
 
             for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
             {
@@ -179,11 +192,11 @@ namespace Conduit.Runtime
                     }
 
                     if (matched && current != null)
-                        return current.gameObject;
+                        matches.Add(current.gameObject);
                 }
             }
 
-            return null;
+            return matches;
         }
 
         static Transform? FindChild(Transform parent, string name)
@@ -213,7 +226,7 @@ namespace Conduit.Runtime
                      || part.StartsWith("t=", StringComparison.OrdinalIgnoreCase))
                     && part.Length > 2)
                 {
-                    requestedType = ConduitRuntimeReflect.ResolveType(part.Substring(2));
+                    requestedType = ConduitReflect.ResolveType(part.Substring(2));
                     unresolvedType |= requestedType == null;
                     continue;
                 }
@@ -235,7 +248,8 @@ namespace Conduit.Runtime
         }
 
         static bool IsInspectable(Object candidate) =>
-            candidate is GameObject
+            (candidate.hideFlags & HideFlags.HideAndDontSave) == 0
+            && candidate is GameObject
             or Component
             or ScriptableObject
             or Texture
@@ -246,28 +260,24 @@ namespace Conduit.Runtime
             or RuntimeAnimatorController
 #endif
             ;
-    }
 
-    static class RuntimeObjectId
-    {
-#if UNITY_6000_2_OR_NEWER
-        public const string Prefix = "eid:";
-#else
-        public const string Prefix = "id:";
-#endif
-
-        public static ulong Get(Object target)
+        static string GetLocation(Object target)
         {
-#if UNITY_6000_4_OR_NEWER
-            return EntityId.ToULong(target.GetEntityId());
-#elif UNITY_6000_2_OR_NEWER
-            return unchecked((uint)(int)target.GetEntityId());
-#else
-            return unchecked((uint)target.GetInstanceID());
-#endif
+            if (target is GameObject gameObject)
+                return FormatSceneLocation(gameObject.scene, GetHierarchyPath(gameObject));
+            if (target is Component component)
+                return FormatSceneLocation(component.gameObject.scene, GetHierarchyPath(component.gameObject));
+            return target.GetType().Name;
         }
 
-        public static string Format(Object target)
-            => Prefix + Get(target).ToString(CultureInfo.InvariantCulture);
+        static string FormatSceneLocation(Scene scene, string hierarchyPath)
+        {
+            var sceneName = !string.IsNullOrWhiteSpace(scene.path)
+                ? scene.path
+                : string.IsNullOrWhiteSpace(scene.name)
+                    ? "<unsaved scene>"
+                    : $"<unsaved scene:{scene.name}>";
+            return $"{sceneName}:{hierarchyPath}";
+        }
     }
 }

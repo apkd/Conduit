@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Text.RegularExpressions;
 using UnityEngine;
 using UnityEngine.Pool;
 using UnityEngine.SceneManagement;
@@ -32,13 +31,6 @@ namespace Conduit
                 ReturnStringBuilder(rentedBuilder);
             }
         }
-
-        const string TargetInvocationDiagnostic = "Exception has been thrown by the target of an invocation.";
-
-        static readonly Regex StackTraceFilePattern = new(@"\s*\[0x[0-9a-fA-F]+\]\s+in\s+(.+?)(?::line\s+|:)(\d+)\s*$", RegexOptions.Compiled);
-        static readonly Regex RuntimeLocationPattern = new(@"\s*\(<[^>]+>:\d+\)\s*$", RegexOptions.Compiled);
-        static readonly Regex StateMachineFramePattern = new(@"^(?<type>.+)/<(?<method>.+)>d(?:__\d+)?:MoveNext$", RegexOptions.Compiled);
-        static readonly Regex LocalFunctionNamePattern = new(@"^<(?<outer>[^>]+)>g__(?<local>[^|]+)\|[\d_]+$", RegexOptions.Compiled);
 
         public static string? Stringify(object? value)
         {
@@ -254,38 +246,16 @@ namespace Conduit
             return builder.ToString();
         }
 
-#if UNITY_6000_4_OR_NEWER
         /// <summary>
         /// Resolves the stable object identifier for a Unity object using entity IDs on modern Unity.
         /// </summary>
-        public static ulong GetObjectId(Object target) => EntityId.ToULong(target.GetEntityId());
-
-        /// <summary>
-        /// Formats an object identifier for display in tool output.
-        /// </summary>
-        public static string FormatObjectId(ulong objectId) => $"eid:{objectId}";
-#elif UNITY_6000_2_OR_NEWER
-        /// <summary>
-        /// Resolves the stable object identifier for a Unity object using entity IDs on modern Unity.
-        /// </summary>
-        public static ulong GetObjectId(Object target) => (ulong)(int)target.GetEntityId();
+        public static ulong GetObjectId(Object target) => BridgeObjectId.Get(target);
 
         /// <summary>
         /// Formats an object identifier for display in tool output.
         /// </summary>
         public static string FormatObjectId(ulong objectId)
-            => $"eid:{unchecked((int)objectId).ToString(CultureInfo.InvariantCulture)}";
-#else
-        /// <summary>
-        /// Resolves the stable object identifier for a Unity object using instance IDs on older Unity.
-        /// </summary>
-        public static ulong GetObjectId(Object target) => unchecked((uint)target.GetInstanceID());
-
-        /// <summary>
-        /// Formats an object identifier for display in tool output.
-        /// </summary>
-        public static string FormatObjectId(ulong objectId) => $"id:{objectId.ToString(CultureInfo.InvariantCulture)}";
-#endif
+            => BridgeObjectId.Format(objectId);
 
         /// <summary>Resolves an object identifier produced by <see cref="GetObjectId(Object)"/>.</summary>
         public static Object? ResolveObjectId(ulong objectId)
@@ -333,191 +303,34 @@ namespace Conduit
         /// Removes diagnostics that only repeat the exception message.
         /// </summary>
         public static string? NormalizeDiagnostic(string? diagnostic, string? exceptionMessage)
-        {
-            if (NormalizeUserFacingText(diagnostic) is not { Length: > 0 } normalizedDiagnostic)
-                return null;
-
-            var normalizedExceptionMessage = NormalizeUserFacingText(exceptionMessage);
-            if (normalizedDiagnostic == normalizedExceptionMessage)
-                return null;
-
-            return normalizedDiagnostic == TargetInvocationDiagnostic
-                   && !string.IsNullOrWhiteSpace(normalizedExceptionMessage) ? null : normalizedDiagnostic;
-        }
+            => BridgeExceptionFormatter.NormalizeDiagnostic(diagnostic, exceptionMessage);
 
         /// <summary>
         /// Replaces double quotes in user-facing text to keep JSON output compact and readable.
         /// </summary>
         public static string? NormalizeUserFacingText(string? value)
-            => value is not { Length: > 0 } ? value : value.Replace('"', '\'');
+            => BridgeExceptionFormatter.NormalizeUserFacingText(value);
 
         /// <summary>
         /// Converts an exception into the compact wire shape used by the tool surface.
         /// </summary>
         public static BridgeExceptionInfo ToExceptionInfo(Exception exception)
-        {
-            var effectiveException = exception is System.Reflection.TargetInvocationException targetInvocationException && targetInvocationException.InnerException != null
-                ? targetInvocationException.InnerException
-                : exception;
-
-            return new()
-            {
-                type = SimplifyTypeName(effectiveException.GetType().FullName ?? effectiveException.GetType().Name),
-                message = NormalizeUserFacingText(effectiveException.Message) ?? string.Empty,
-                stack_trace = SimplifyStackTrace(effectiveException.StackTrace),
-            };
-        }
+            => BridgeExceptionFormatter.ToInfo(exception);
 
         /// <summary>
         /// Trims namespaces from exception type names.
         /// </summary>
         public static string SimplifyTypeName(string typeName)
-        {
-            if (string.IsNullOrWhiteSpace(typeName))
-                return string.Empty;
-
-            var lastDot = typeName.LastIndexOf('.');
-            var lastPlus = typeName.LastIndexOf('+');
-            var separatorIndex = Math.Max(lastDot, lastPlus);
-            return separatorIndex >= 0 && separatorIndex + 1 < typeName.Length
-                ? typeName[(separatorIndex + 1)..]
-                : typeName;
-        }
+            => BridgeExceptionFormatter.SimplifyTypeName(typeName);
 
         /// <summary>Produces compact logical frames from runtime and compiler-generated stack traces.</summary>
         public static string? SimplifyStackTrace(string? stackTrace)
-        {
-            if (string.IsNullOrWhiteSpace(stackTrace))
-                return null;
-
-            using var pooledBuilder = GetStringBuilder(out var builder);
-            try
-            {
-                using var reader = new StringReader(stackTrace);
-                string? pendingSourceWrapper = null;
-                while (reader.ReadLine() is { } line)
-                {
-                    if (line.Trim() is not { Length: > 0 } trimmed
-                        || IsInternalStackTraceFrame(trimmed)
-                        || IsAsyncMethodBuilderFrame(trimmed))
-                        continue;
-
-                    var frame = SimplifyStackTraceLine(trimmed);
-
-                    // before the first suspension, roslyn reports both MoveNext and its source wrapper.
-                    // carry one expected wrapper across ignored builder frames without collapsing recursion.
-                    if (pendingSourceWrapper is { } sourceWrapper)
-                    {
-                        pendingSourceWrapper = null;
-                        if (!frame.IsStateMachine && frame.Identity == sourceWrapper)
-                            continue;
-                    }
-
-                    if (builder.Length > 0)
-                        builder.AppendLine();
-
-                    builder.Append(frame.Text);
-                    pendingSourceWrapper = frame.IsStateMachine ? frame.Identity : null;
-                }
-
-                return builder.Length == 0 ? null : builder.ToString();
-            }
-            catch
-            {
-                return stackTrace;
-            }
-        }
+            => BridgeExceptionFormatter.SimplifyStackTrace(stackTrace);
 
         /// <summary>
         /// Ensures extensions always include a leading dot.
         /// </summary>
         static string NormalizeExtension(string extension)
             => extension.StartsWith(".", StringComparison.Ordinal) ? extension : $".{extension}";
-
-        static bool IsInternalStackTraceFrame(string line)
-            => line.Contains("Conduit.", StringComparison.Ordinal)
-               || line.Contains("ConduitGenerated.", StringComparison.Ordinal);
-
-        static bool IsAsyncMethodBuilderFrame(string line)
-        {
-            var frame = line.StartsWith("at ", StringComparison.Ordinal) ? line[3..] : line;
-            return frame.StartsWith("System.Runtime.CompilerServices.AsyncVoidMethodBuilder", StringComparison.Ordinal)
-                   || frame.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal)
-                   || frame.StartsWith("System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder", StringComparison.Ordinal);
-        }
-
-        static (string Text, string Identity, bool IsStateMachine) SimplifyStackTraceLine(string line)
-        {
-            var match = StackTraceFilePattern.Match(line);
-            var frame = match.Success
-                ? line[..match.Index].TrimEnd()
-                : RuntimeLocationPattern.Replace(line, string.Empty).TrimEnd();
-            var simplified = SimplifyGeneratedMethodFrame(RemoveMethodParameters(frame));
-
-            if (match.Success)
-            {
-                var filePath = match.Groups[1].Value.Replace('/', Path.DirectorySeparatorChar);
-                var fileName = GetSafeFileName(filePath);
-                var lineNumber = match.Groups[2].Value;
-                return ($"{simplified.Text} ({fileName}:{lineNumber})", simplified.Text, simplified.IsStateMachine);
-            }
-
-            return (simplified.Text, simplified.Text, simplified.IsStateMachine);
-        }
-
-        static (string Text, bool IsStateMachine) SimplifyGeneratedMethodFrame(string frame)
-        {
-            var stateMachineMatch = StateMachineFramePattern.Match(frame);
-            if (stateMachineMatch.Success
-                && SimplifyStateMachineMethodName(stateMachineMatch.Groups["method"].Value) is { } methodName)
-                return (stateMachineMatch.Groups["type"].Value + ':' + methodName, true);
-
-            var methodSeparator = frame.LastIndexOf(':');
-            return methodSeparator >= 0
-                   && SimplifyLocalFunctionName(frame[(methodSeparator + 1)..]) is { } localFunctionName
-                ? (frame[..(methodSeparator + 1)] + localFunctionName, false)
-                : (frame, false);
-        }
-
-        // only stable roslyn naming shapes are decoded; unfamiliar generated frames retain their diagnostic value.
-        static string? SimplifyStateMachineMethodName(string generatedName)
-            => SimplifyLocalFunctionName(generatedName)
-               ?? (generatedName.Length > 0
-                   && generatedName.IndexOf('<') < 0
-                   && generatedName.IndexOf('>') < 0
-                   ? generatedName
-                   : null);
-
-        static string? SimplifyLocalFunctionName(string generatedName)
-        {
-            var match = LocalFunctionNamePattern.Match(generatedName);
-            return match.Success
-                ? match.Groups["outer"].Value + '.' + match.Groups["local"].Value
-                : null;
-        }
-
-        static string? GetSafeFileName(string? filePath)
-        {
-            if (filePath is not { Length: > 0 })
-                return filePath;
-
-            var lastSeparator = filePath.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
-            return lastSeparator >= 0 && lastSeparator + 1 < filePath.Length
-                ? filePath[(lastSeparator + 1)..]
-                : filePath;
-        }
-
-        static string RemoveMethodParameters(string line)
-        {
-            var closeParen = line.LastIndexOf(')');
-            if (closeParen < 0)
-                return line;
-
-            var openParen = line.LastIndexOf('(', closeParen);
-            if (openParen < 0)
-                return line;
-
-            return line.Remove(openParen, closeParen - openParen + 1).TrimEnd();
-        }
     }
 }

@@ -1,248 +1,38 @@
 #nullable enable
 
 using System;
-using UnityEngine;
+using System.IO;
 
 namespace Conduit
 {
-    static class BridgeCommandTypes
+    static class BridgeArtifactExtensions
     {
-        public const string Help = "help";
-        public const string Restart = "restart";
-        public const string Status = "status";
-        public const string PlayMode = "playmode";
-        public const string EditMode = "editmode";
-        public const string Screenshot = "screenshot";
-        public const string GetDependencies = "get_dependencies";
-        public const string FindReferencesTo = "find_references_to";
-        public const string FindMissingScripts = "find_missing_scripts";
-        public const string Show = "show";
-        public const string Search = "search";
-        public const string ToJson = "to_json";
-        public const string FromJsonOverwrite = "from_json_overwrite";
-        public const string SaveScenes = "save_scenes";
-        public const string DiscardScenes = "discard_scenes";
-        public const string RefreshAssetDatabase = "refresh_asset_database";
-        public const string ReimportAssets = "reimport_assets";
-        public const string ExecuteCode = "execute_code";
-        public const string ViewBurstAsm = "view_burst_asm";
-        public const string Reflect = "reflect";
-        public const string RunTestsEditMode = "run_tests_editmode";
-        public const string RunTestsPlayMode = "run_tests_playmode";
-        public const string RunTestsPlayer = "run_tests_player";
-        public const string ProfilerRecord = "profiler_record";
-        public const string ProfilerOverview = "profiler_overview";
-        public const string ProfilerBrowse = "profiler_browse";
-        internal const string ProfilerHasMarker = "profiler_has_marker";
-        internal const string CompilationReferences = "compilation_references";
-        internal const string AssemblyBlob = "assembly_blob";
+        public static byte[] Decode(this BridgeArtifact artifact)
+        {
+            if (string.IsNullOrWhiteSpace(artifact.relative_path))
+                return artifact.DecodeChunks();
 
-    }
+            var bytes = ReadProjectFile(artifact.relative_path!);
+            artifact.Verify(bytes);
+            return bytes;
+        }
 
-    enum BridgeCommandKind : byte
-    {
-        Unknown,
-        Status,
-        PlayMode,
-        EditMode,
-        Screenshot,
-        GetDependencies,
-        FindReferencesTo,
-        FindMissingScripts,
-        Show,
-        Search,
-        ToJson,
-        FromJsonOverwrite,
-        SaveScenes,
-        DiscardScenes,
-        RefreshAssetDatabase,
-        ReimportAssets,
-        ExecuteCode,
-        ViewBurstAsm,
-        Reflect,
-        RunTestsEditMode,
-        RunTestsPlayMode,
-        RunTestsPlayer,
-        ProfilerRecord,
-        ProfilerOverview,
-        ProfilerBrowse,
-        ProfilerHasMarker,
-    }
+        static byte[] ReadProjectFile(string relativePath)
+        {
+            if (Path.IsPathRooted(relativePath))
+                throw new InvalidOperationException($"Artifact '{relativePath}' must use a project-relative path.");
 
-    static class BridgeCommandKinds
-    {
-        public static BridgeCommandKind Parse(string? commandType)
-            => commandType switch
-            {
-                BridgeCommandTypes.Status               => BridgeCommandKind.Status,
-                BridgeCommandTypes.PlayMode             => BridgeCommandKind.PlayMode,
-                BridgeCommandTypes.EditMode             => BridgeCommandKind.EditMode,
-                BridgeCommandTypes.Screenshot           => BridgeCommandKind.Screenshot,
-                BridgeCommandTypes.GetDependencies      => BridgeCommandKind.GetDependencies,
-                BridgeCommandTypes.FindReferencesTo     => BridgeCommandKind.FindReferencesTo,
-                BridgeCommandTypes.FindMissingScripts   => BridgeCommandKind.FindMissingScripts,
-                BridgeCommandTypes.Show                 => BridgeCommandKind.Show,
-                BridgeCommandTypes.Search               => BridgeCommandKind.Search,
-                BridgeCommandTypes.ToJson               => BridgeCommandKind.ToJson,
-                BridgeCommandTypes.FromJsonOverwrite    => BridgeCommandKind.FromJsonOverwrite,
-                BridgeCommandTypes.SaveScenes           => BridgeCommandKind.SaveScenes,
-                BridgeCommandTypes.DiscardScenes        => BridgeCommandKind.DiscardScenes,
-                BridgeCommandTypes.RefreshAssetDatabase => BridgeCommandKind.RefreshAssetDatabase,
-                BridgeCommandTypes.ReimportAssets       => BridgeCommandKind.ReimportAssets,
-                BridgeCommandTypes.ExecuteCode          => BridgeCommandKind.ExecuteCode,
-                BridgeCommandTypes.ViewBurstAsm         => BridgeCommandKind.ViewBurstAsm,
-                BridgeCommandTypes.Reflect              => BridgeCommandKind.Reflect,
-                BridgeCommandTypes.RunTestsEditMode     => BridgeCommandKind.RunTestsEditMode,
-                BridgeCommandTypes.RunTestsPlayMode     => BridgeCommandKind.RunTestsPlayMode,
-                BridgeCommandTypes.RunTestsPlayer       => BridgeCommandKind.RunTestsPlayer,
-                BridgeCommandTypes.ProfilerRecord       => BridgeCommandKind.ProfilerRecord,
-                BridgeCommandTypes.ProfilerOverview     => BridgeCommandKind.ProfilerOverview,
-                BridgeCommandTypes.ProfilerBrowse       => BridgeCommandKind.ProfilerBrowse,
-                BridgeCommandTypes.ProfilerHasMarker    => BridgeCommandKind.ProfilerHasMarker,
-                _                                       => BridgeCommandKind.Unknown,
-            };
+            var projectRoot = Path.GetFullPath(ConduitProjectIdentity.GetProjectPath());
+            var path = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+            var normalized = Path.GetRelativePath(projectRoot, path);
+            // the server may only reference artifacts it wrote inside this Unity project.
+            if (Path.IsPathRooted(normalized)
+                || normalized == ".."
+                || normalized.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Artifact '{relativePath}' resolves outside the Unity project.");
 
-        public static bool IsTest(BridgeCommandKind commandKind)
-            => commandKind is BridgeCommandKind.RunTestsEditMode
-                or BridgeCommandKind.RunTestsPlayMode
-                or BridgeCommandKind.RunTestsPlayer;
-
-        public static bool IsAssetImport(BridgeCommandKind commandKind)
-            => commandKind is BridgeCommandKind.RefreshAssetDatabase or BridgeCommandKind.ReimportAssets;
-
-        public static bool IsEditorMode(BridgeCommandKind commandKind)
-            => commandKind is BridgeCommandKind.PlayMode or BridgeCommandKind.EditMode;
-    }
-
-    static class BridgeMessageTypes
-    {
-        public const string Hello = "hello";
-        public const string Command = "command";
-        public const string CancelCommand = "cancel_command";
-        public const string CommandStarted = "command_started";
-        public const string CommandResult = "command_result";
-    }
-
-    static class ToolOutcome
-    {
-        public const string Success = "success";
-        public const string Exception = "exception";
-        public const string CompileError = "compile_error";
-        public const string TestFailed = "test_failed";
-        public const string Timeout = "timeout";
-        public const string NotConnected = "not_connected";
-        public const string DirtyScene = "dirty_scene";
-        public const string AmbiguousTarget = "ambiguous_target";
-        public const string Cancelled = "cancelled";
-    }
-
-    [Serializable]
-    sealed class BridgeMessage
-    {
-        public int protocol_version = BridgeProtocol.Version;
-        public string message_type = string.Empty;
-        public string? request_id;
-        public BridgeProjectHandshake? project;
-        public BridgeCommand? command;
-        public BridgeCommandResult? result;
-
-        public static BridgeMessage CreateHello(BridgeProjectHandshake project)
-            => new()
-            {
-                message_type = BridgeMessageTypes.Hello,
-                project = project,
-            };
-
-        public static BridgeMessage CreateCommandStarted(string requestId)
-            => new()
-            {
-                message_type = BridgeMessageTypes.CommandStarted,
-                request_id = requestId,
-            };
-
-        public static BridgeMessage CreateCancelCommand(string requestId)
-            => new()
-            {
-                message_type = BridgeMessageTypes.CancelCommand,
-                request_id = requestId,
-            };
-
-        public static BridgeMessage CreateCommandResult(string requestId, BridgeCommandResult result)
-            => new()
-            {
-                message_type = BridgeMessageTypes.CommandResult,
-                request_id = requestId,
-                result = result,
-            };
-    }
-
-    [Serializable]
-    public sealed class BridgeProjectHandshake
-    {
-        public string project_path = string.Empty;
-        public string display_name = string.Empty;
-        public string unity_version = string.Empty;
-        public int editor_process_id;
-        public int process_id;
-        public string endpoint_kind = "editor";
-        public string platform = string.Empty;
-        public string build_guid = string.Empty;
-        public string cloud_project_id = string.Empty;
-        public string company_name = string.Empty;
-        public string product_name = string.Empty;
-        public bool can_monitor_process = true;
-        public string[] capabilities = Array.Empty<string>();
-        /// <summary>The effective editor log path for this Unity process.</summary>
-        public string editor_log_path = string.Empty;
-        public string session_instance_id = string.Empty;
-        public string handoff_token = string.Empty;
-        public string last_seen_utc = string.Empty;
-    }
-
-    [Serializable]
-    sealed class BridgeCommand
-    {
-        public string command_type = string.Empty;
-        public string? target;
-        public string? snippet;
-        public string? display_name;
-        public string? test_filter;
-        public bool @async;
-        public bool rebuild_cache;
-        public bool track_usage;
-        public bool is_restored;
-        public string[] args = Array.Empty<string>();
-        public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
-    }
-
-    [Serializable]
-    sealed class BridgeCommandResult
-    {
-        public string outcome = ToolOutcome.Success;
-        public string logs = string.Empty;
-        public string? display_name;
-        public string? return_value;
-        public BridgeExceptionInfo? exception;
-        public string? diagnostic;
-        public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
-    }
-
-    [Serializable]
-    sealed class BridgeArtifact
-    {
-        public string name = string.Empty;
-        public string media_type = "application/octet-stream";
-        public string sha256 = string.Empty;
-        public string? relative_path;
-        public string[] chunks = Array.Empty<string>();
-    }
-
-    [Serializable]
-    sealed class BridgeExceptionInfo
-    {
-        public string type = string.Empty;
-        public string message = string.Empty;
-        public string? stack_trace;
+            return File.ReadAllBytes(path);
+        }
     }
 
     [Serializable]
@@ -253,6 +43,7 @@ namespace Conduit
         public BridgeCommandKind kind;
         public string? target;
         public string? snippet;
+        public string? display_name;
         public string? test_filter;
         public bool @async;
         public bool rebuild_cache;
@@ -262,6 +53,7 @@ namespace Conduit
         // session state preserves this timestamp across play-mode and compilation domain reloads.
         public long tool_usage_started_utc_ticks;
         public string[] args = Array.Empty<string>();
+        public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
         public string[] reimport_asset_paths = Array.Empty<string>();
     }
 
@@ -277,157 +69,5 @@ namespace Conduit
     {
         public string guid = string.Empty;
         public string[] referencer_guids = Array.Empty<string>();
-    }
-
-    [Serializable]
-    sealed class BridgeMessageHeader
-    {
-        public string message_type = string.Empty;
-    }
-
-    [Serializable]
-    sealed class BridgeHelloEnvelope
-    {
-        public int protocol_version = BridgeProtocol.Version;
-        public string message_type = string.Empty;
-        public BridgeProjectHandshake? project;
-
-        public BridgeHelloEnvelope() { }
-
-        public BridgeHelloEnvelope(BridgeMessage message)
-        {
-            protocol_version = message.protocol_version;
-            message_type = message.message_type;
-            project = message.project;
-        }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                project = project,
-            };
-    }
-
-    [Serializable]
-    sealed class BridgeCommandEnvelope
-    {
-        public int protocol_version = BridgeProtocol.Version;
-        public string message_type = string.Empty;
-        public string request_id = string.Empty;
-        public BridgeCommand? command;
-
-        public BridgeCommandEnvelope() { }
-
-        public BridgeCommandEnvelope(BridgeMessage message)
-        {
-            protocol_version = message.protocol_version;
-            message_type = message.message_type;
-            request_id = message.request_id ?? string.Empty;
-            command = message.command;
-        }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-                command = command,
-            };
-    }
-
-    [Serializable]
-    sealed class BridgeCommandStartedEnvelope
-    {
-        public int protocol_version = BridgeProtocol.Version;
-        public string message_type = string.Empty;
-        public string request_id = string.Empty;
-
-        public BridgeCommandStartedEnvelope() { }
-
-        public BridgeCommandStartedEnvelope(BridgeMessage message)
-        {
-            protocol_version = message.protocol_version;
-            message_type = message.message_type;
-            request_id = message.request_id ?? string.Empty;
-        }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-            };
-    }
-
-    [Serializable]
-    sealed class BridgeCommandResultEnvelope
-    {
-        public int protocol_version = BridgeProtocol.Version;
-        public string message_type = string.Empty;
-        public string request_id = string.Empty;
-        public BridgeCommandResult? result;
-
-        public BridgeCommandResultEnvelope() { }
-
-        public BridgeCommandResultEnvelope(BridgeMessage message)
-        {
-            protocol_version = message.protocol_version;
-            message_type = message.message_type;
-            request_id = message.request_id ?? string.Empty;
-            result = message.result;
-        }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-                result = result,
-            };
-    }
-
-    static class BridgeProtocol
-    {
-        public const int Version = 4;
-
-        public static string Serialize(BridgeMessage message)
-            => message.message_type switch
-            {
-                BridgeMessageTypes.Hello          => JsonUtility.ToJson(new BridgeHelloEnvelope(message)),
-                BridgeMessageTypes.Command        => JsonUtility.ToJson(new BridgeCommandEnvelope(message)),
-                BridgeMessageTypes.CancelCommand  => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
-                BridgeMessageTypes.CommandStarted => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
-                BridgeMessageTypes.CommandResult  => JsonUtility.ToJson(new BridgeCommandResultEnvelope(message)),
-                _                                 => JsonUtility.ToJson(new BridgeMessageHeader { message_type = message.message_type }),
-            };
-
-        public static BridgeMessage? Deserialize(string payload)
-        {
-            if (string.IsNullOrWhiteSpace(payload))
-                return null;
-
-            try
-            {
-                var header = JsonUtility.FromJson<BridgeMessageHeader>(payload);
-                return header?.message_type switch
-                {
-                    BridgeMessageTypes.Hello          => JsonUtility.FromJson<BridgeHelloEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.Command        => JsonUtility.FromJson<BridgeCommandEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CancelCommand  => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CommandStarted => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CommandResult  => JsonUtility.FromJson<BridgeCommandResultEnvelope>(payload)?.ToMessage(),
-                    _                                 => null,
-                };
-            }
-            catch (ArgumentException)
-            {
-                return null;
-            }
-        }
     }
 }

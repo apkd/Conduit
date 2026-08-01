@@ -45,6 +45,11 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="..\Conduit.Unity\Core\BridgeContract.cs" Link="Bridge\BridgeContract.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\BridgeExceptionFormatter.cs" Link="Bridge\BridgeExceptionFormatter.cs"/>
+    </ItemGroup>
+
+    <ItemGroup>
         <FrameworkReference Include="Microsoft.AspNetCore.App"/>
     </ItemGroup>
 

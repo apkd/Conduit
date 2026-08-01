@@ -32,7 +32,9 @@ public sealed class PlayerBridgeDiscoveryTests
         var root = CreateTemporaryDirectory();
         try
         {
-            WriteEndpoint(root, "live", Endpoint(101, "live", now));
+            var live = Endpoint(101, "live", now);
+            live.IsTestPlayer = true;
+            WriteEndpoint(root, "live", live);
             WriteEndpoint(root, "stale", Endpoint(102, "stale", now - TimeSpan.FromSeconds(11)));
             var editor = Endpoint(103, "editor", now);
             editor.EndpointKind = BridgeEndpointKinds.Editor;
@@ -48,6 +50,9 @@ public sealed class PlayerBridgeDiscoveryTests
                 "future-protocol",
                 futureProtocol
             );
+            var editorRuntime = Endpoint(105, "editor-runtime", now);
+            editorRuntime.Platform = "LinuxEditor";
+            WriteEndpoint(root, "editor-runtime", editorRuntime);
             var malformedDirectory = Path.Combine(root, "endpoints", "malformed");
             Directory.CreateDirectory(malformedDirectory);
             File.WriteAllText(Path.Combine(malformedDirectory, "endpoint.json"), "{");
@@ -60,6 +65,7 @@ public sealed class PlayerBridgeDiscoveryTests
 
             await Assert.That(endpoints.Length).IsEqualTo(1);
             await Assert.That(endpoints[0].ProcessId).IsEqualTo(101);
+            await Assert.That(endpoints[0].IsTestPlayer).IsTrue();
             await Assert.That(endpoints[0].EndpointDirectoryPath)
                 .IsEqualTo(Path.Combine(root, "endpoints", "live"));
         }

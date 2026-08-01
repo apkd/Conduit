@@ -2,7 +2,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Reflection;
 using UnityEditor;
 using UnityEditor.Compilation;
@@ -174,85 +173,24 @@ namespace Conduit
 
         static bool TryResolveObjectId(string query, out ResolvedObjectMatch match, out bool isObjectIdQuery)
         {
-            isObjectIdQuery = false;
-#if UNITY_6000_2_OR_NEWER
-            return TryResolveEntityId(query, out match, out isObjectIdQuery);
-#else
-            return TryResolveInstanceId(query, out match, out isObjectIdQuery);
-#endif
-        }
-
-#if UNITY_6000_2_OR_NEWER
-        static bool TryResolveEntityId(string query, out ResolvedObjectMatch match, out bool isObjectIdQuery)
-        {
             match = default;
             isObjectIdQuery = TryGetObjectIdValue(query, out var candidate);
             if (!isObjectIdQuery
                 || candidate.IsEmpty
-#if UNITY_6000_4_OR_NEWER
-                || !ulong.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rawEntityId))
-#else
-                || !TryParseLegacyEntityId(candidate, out var rawEntityId))
-#endif
+                || !BridgeObjectId.TryParse(candidate.ToString(), out var objectId))
                 return false;
 
-            var target = ConduitUtility.ResolveObjectId(
-#if UNITY_6000_4_OR_NEWER
-                rawEntityId
-#else
-                unchecked((ulong)rawEntityId)
-#endif
-            );
+            var target = ConduitUtility.ResolveObjectId(objectId);
             if (target == null)
                 return false;
 
+#if UNITY_6000_2_OR_NEWER
             match = CreateMatch(target, ResolvedObjectMatchSource.EntityId);
-            return true;
-        }
-
-#if !UNITY_6000_4_OR_NEWER
-        static bool TryParseLegacyEntityId(ReadOnlySpan<char> candidate, out int entityId)
-        {
-            if (int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out entityId))
-                return true;
-
-            if (!ulong.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsignedEntityId))
-                return false;
-
-            entityId = unchecked((int)unsignedEntityId);
-            return true;
-        }
-#endif
 #else
-        static bool TryResolveInstanceId(string query, out ResolvedObjectMatch match, out bool isObjectIdQuery)
-        {
-            match = default;
-            isObjectIdQuery = TryGetObjectIdValue(query, out var candidate);
-            if (!isObjectIdQuery
-                || candidate.IsEmpty
-                || !TryParseInstanceId(candidate, out var instanceId))
-                return false;
-
-            var target = EditorUtility.InstanceIDToObject(instanceId);
-            if (target == null)
-                return false;
-
             match = CreateMatch(target, ResolvedObjectMatchSource.InstanceId);
-            return true;
-        }
-
-        static bool TryParseInstanceId(ReadOnlySpan<char> candidate, out int instanceId)
-        {
-            if (int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out instanceId))
-                return true;
-
-            if (!uint.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsignedInstanceId))
-                return false;
-
-            instanceId = unchecked((int)unsignedInstanceId);
-            return true;
-        }
 #endif
+            return true;
+        }
 
         static bool TryResolveAssetPath(string query, out ResolvedObjectMatch match)
         {

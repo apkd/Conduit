@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Conduit
@@ -18,6 +17,18 @@ namespace Conduit
         static readonly object IndexLock = new();
         static IReadOnlyList<Type>? cachedIndex;
         static string cachedLoadWarning = string.Empty;
+
+        static reflect()
+            => AppDomain.CurrentDomain.AssemblyLoad += static (_, _) => InvalidateIndex();
+
+        static void InvalidateIndex()
+        {
+            lock (IndexLock)
+            {
+                cachedIndex = null;
+                cachedLoadWarning = string.Empty;
+            }
+        }
 
         public static BridgeCommandResult Reflect(string[] args)
         {
@@ -63,12 +74,12 @@ namespace Conduit
             }
 
             SortTypes(matches);
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             AppendLoadWarning(builder, loadWarning);
             if (matches.Count == 0)
             {
                 builder.Append("No types matched.");
-                return Success(builder.TrimEnd().ToString());
+                return Success(Trimmed(builder));
             }
 
             if (matches.Count > MaxTypeRows)
@@ -78,7 +89,7 @@ namespace Conduit
                 AppendType(builder, matches[matchIndex]);
 
             AppendTruncation(builder, matches.Count, MaxTypeRows, "types");
-            return Success(builder.TrimEnd().ToString());
+            return Success(Trimmed(builder));
         }
 
         static BridgeCommandResult SearchMembers(
@@ -117,7 +128,7 @@ namespace Conduit
 
             var target = match.Type!;
             var normalizedMember = NormalizeQuery(memberQuery);
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             AppendLoadWarning(builder, loadWarning);
             builder.AppendLine($"Members for {FormatType(target, includeNamespace: true)}");
             builder.AppendLine($"Assembly: {target.Assembly.GetName().Name}");
@@ -129,7 +140,7 @@ namespace Conduit
             if (!appendedAny)
                 builder.Append("No members matched.");
 
-            return Success(builder.TrimEnd().ToString());
+            return Success(Trimmed(builder));
         }
 
         static BridgeCommandResult SearchWideMembers(
@@ -145,12 +156,12 @@ namespace Conduit
 
             matches.Sort(CompareMembers);
 
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             AppendLoadWarning(builder, loadWarning);
             if (matches.Count == 0)
             {
                 builder.Append("No members matched.");
-                return Success(builder.TrimEnd().ToString());
+                return Success(Trimmed(builder));
             }
 
             if (matches.Count > MaxWideMemberRows)
@@ -185,7 +196,7 @@ namespace Conduit
             }
 
             AppendTruncation(builder, matches.Count, MaxWideMemberRows, "members");
-            return Success(builder.TrimEnd().ToString());
+            return Success(Trimmed(builder));
         }
 
         static bool AppendTypeScopedMembers(StringBuilder builder, Type target, ReflectMemberKind kind, string memberQuery)
@@ -325,7 +336,7 @@ namespace Conduit
                         members.Add(new(type, ReflectMemberKind.Property, property.Name, FormatProperty(property), rank));
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type))
+                foreach (var method in GetMethods(type, memberQuery))
                     if (TryGetMemberMatchRank(method, memberQuery, out var rank))
                         members.Add(new(type, ReflectMemberKind.Method, method.Name, FormatMethod(method), rank));
 
@@ -343,16 +354,24 @@ namespace Conduit
         static PropertyInfo[] GetProperties(Type type)
             => type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
 
-        static MethodInfo[] GetMethods(Type type)
+        static MethodInfo[] GetMethods(Type type, string memberQuery = "")
         {
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+            var includeAccessors = IsAccessorQuery(memberQuery);
             var filtered = new List<MethodInfo>(methods.Length);
             foreach (var method in methods)
-                if (!IsPropertyOrEventAccessor(method))
+                if (includeAccessors || !IsPropertyOrEventAccessor(method))
                     filtered.Add(method);
 
             return filtered.ToArray();
         }
+
+        static bool IsAccessorQuery(string memberQuery)
+            => memberQuery.StartsWith("get_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("set_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("add_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("remove_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("raise_", StringComparison.OrdinalIgnoreCase);
 
         static ConstructorInfo[] GetConstructors(Type type)
             => type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
@@ -370,7 +389,7 @@ namespace Conduit
                         return true;
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type))
+                foreach (var method in GetMethods(type, memberQuery))
                     if (MatchesMember(method, memberQuery))
                         return true;
 
@@ -492,20 +511,47 @@ namespace Conduit
             }
         }
 
+        internal static IReadOnlyList<Type> LoadIndexForHelpers()
+            => LoadIndex(out _);
+
         static IReadOnlyList<Type> BuildIndex(out string warning)
         {
-            // Unity's native index avoids Assembly.GetTypes(), which can stall the editor for minutes
-            // in projects with many packages. Interfaces are recovered from the indexed concrete types.
-            var uniqueTypes = new HashSet<Type>(UnityEditor.TypeCache.GetTypesDerivedFrom<object>());
-            var indexedTypes = new List<Type>(uniqueTypes);
-            foreach (var type in indexedTypes)
-                foreach (var interfaceType in type.GetInterfaces())
-                    uniqueTypes.Add(interfaceType);
+            var types = new List<Type>();
+            var warnings = new StringBuilder();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    types.AddRange(assembly.GetTypes());
+                }
+                catch (ReflectionTypeLoadException exception)
+                {
+                    foreach (var type in exception.Types)
+                        if (type != null)
+                            types.Add(type);
 
-            var types = new List<Type>(uniqueTypes);
+                    AppendLoadFailure(assembly, exception);
+                }
+                catch (Exception exception)
+                {
+                    AppendLoadFailure(assembly, exception);
+                }
+            }
+
             SortTypes(types);
-            warning = string.Empty;
+            warning = Trimmed(warnings);
             return types;
+
+            void AppendLoadFailure(Assembly assembly, Exception exception)
+            {
+                if (warnings.Length == 0)
+                    warnings.AppendLine("Warning: some loaded assemblies could not be fully reflected.");
+
+                warnings.Append("- ")
+                    .Append(assembly.GetName().Name)
+                    .Append(": ")
+                    .AppendLine(exception.Message);
+            }
         }
 
         static bool TryParseMode(string mode, out ReflectMode queryMode)
@@ -565,44 +611,71 @@ namespace Conduit
 
         static string FormatField(FieldInfo field)
         {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             AppendFieldAccess(builder, field);
             AppendFieldModifiers(builder, field);
             builder.Append(FormatType(field.FieldType));
             builder.Append(' ');
-            builder.Append(field.Name);
+            builder.Append(CSharpIdentifier.Escape(field.Name));
             return builder.ToString();
         }
 
         static string FormatProperty(PropertyInfo property)
         {
-            var accessor = property.GetMethod ?? property.SetMethod;
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var accessor = PrimaryAccessor(property);
+            var builder = new StringBuilder();
             if (accessor != null)
             {
-                builder.Append(Access(accessor));
-                builder.Append(' ');
+                AppendAccess(builder, accessor);
                 if (accessor.IsStatic)
                     builder.Append("static ");
             }
 
-            builder.Append(FormatType(property.PropertyType));
+            if (RequiresUnsafe(property.PropertyType)
+                || Array.Exists(
+                    property.GetIndexParameters(),
+                    static parameter => RequiresUnsafe(parameter.ParameterType)
+                ))
+                builder.Append("unsafe ");
+
+            var propertyType = property.PropertyType;
+            if (propertyType.IsByRef)
+            {
+                builder.Append(property.GetMethod is { } getter && IsReadOnly(getter.ReturnParameter)
+                    ? "ref readonly "
+                    : "ref ");
+                propertyType = propertyType.GetElementType() ?? propertyType;
+            }
+
+            builder.Append(FormatType(propertyType));
             builder.Append(' ');
             builder.Append(FormatPropertyName(property));
             builder.Append(" { ");
             AppendPropertyAccessor(builder, "get", property.GetMethod, accessor);
             if (property.GetMethod != null && property.SetMethod != null)
                 builder.Append(' ');
-            AppendPropertyAccessor(builder, "set", property.SetMethod, accessor);
+            AppendPropertyAccessor(builder, IsInitOnly(property.SetMethod) ? "init" : "set", property.SetMethod, accessor);
             builder.Append(" }");
             return builder.ToString();
+        }
+
+        static MethodInfo? PrimaryAccessor(PropertyInfo property)
+        {
+            if (property.GetMethod == null)
+                return property.SetMethod;
+            if (property.SetMethod == null)
+                return property.GetMethod;
+
+            return AccessRank(property.GetMethod) >= AccessRank(property.SetMethod)
+                ? property.GetMethod
+                : property.SetMethod;
         }
 
         static string FormatPropertyName(PropertyInfo property)
         {
             var parameters = property.GetIndexParameters();
             if (parameters.Length == 0)
-                return property.Name;
+                return CSharpIdentifier.Escape(property.Name);
 
             return "this[" + FormatParameters(parameters) + "]";
         }
@@ -612,10 +685,9 @@ namespace Conduit
             if (accessor == null)
                 return;
 
-            if (primaryAccessor != null && Access(accessor) != Access(primaryAccessor))
+            if (primaryAccessor != null && AccessRank(accessor) != AccessRank(primaryAccessor))
             {
-                builder.Append(Access(accessor));
-                builder.Append(' ');
+                AppendAccess(builder, accessor, includePrivate: true);
             }
 
             builder.Append(name);
@@ -624,38 +696,52 @@ namespace Conduit
 
         static string FormatMethod(MethodInfo method)
         {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            builder.Append(Access(method));
-            builder.Append(' ');
+            var builder = new StringBuilder();
+            AppendAccess(builder, method);
             AppendMethodModifiers(builder, method);
-            builder.Append(FormatType(method.ReturnType));
+            AppendReturnType(builder, method);
             builder.Append(' ');
-            builder.Append(method.Name);
+            builder.Append(CSharpIdentifier.EscapeQualified(method.Name));
             AppendGenericArguments(builder, method.GetGenericArguments());
             builder.Append('(');
             builder.Append(FormatParameters(method.GetParameters()));
             builder.Append(')');
+            AppendDetourCompatibility(builder, method);
             return builder.ToString();
         }
 
         static string FormatConstructor(ConstructorInfo constructor)
         {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             if (constructor.IsStatic)
-            {
                 builder.Append("static ");
-            }
             else
-            {
-                builder.Append(Access(constructor));
-                builder.Append(' ');
-            }
+                AppendAccess(builder, constructor);
 
             builder.Append(constructor.DeclaringType == null ? ".ctor" : DisplayTypeName(constructor.DeclaringType, includeNamespace: false));
             builder.Append('(');
             builder.Append(FormatParameters(constructor.GetParameters()));
             builder.Append(')');
+            AppendDetourCompatibility(builder, constructor);
             return builder.ToString();
+        }
+
+        static void AppendReturnType(StringBuilder builder, MethodInfo method)
+        {
+            var returnType = method.ReturnType;
+            if (returnType.IsByRef)
+            {
+                builder.Append(IsReadOnly(method.ReturnParameter) ? "ref readonly " : "ref ");
+                returnType = returnType.GetElementType() ?? returnType;
+            }
+
+            builder.Append(FormatType(returnType));
+        }
+
+        static void AppendDetourCompatibility(StringBuilder builder, MethodBase method)
+        {
+            if (MethodDetourSupport.GetUnsupportedReason(method) != null)
+                builder.Append(" // detour-incompatible");
         }
 
         static string FormatParameters(ParameterInfo[] parameters)
@@ -680,9 +766,11 @@ namespace Conduit
             var parameterType = parameter.ParameterType;
             if (parameterType.IsByRef)
             {
-                if (parameter.IsOut)
+                if (HasAttribute(parameter, "System.Runtime.CompilerServices.RequiresLocationAttribute"))
+                    builder.Append("ref readonly ");
+                else if (parameter.IsOut)
                     builder.Append("out ");
-                else if (parameter.GetCustomAttribute<InAttribute>() != null)
+                else if (parameter.IsIn || IsReadOnly(parameter))
                     builder.Append("in ");
                 else
                     builder.Append("ref ");
@@ -692,12 +780,40 @@ namespace Conduit
 
             builder.Append(FormatType(parameterType));
             builder.Append(' ');
-            builder.Append(parameter.Name);
+            builder.Append(CSharpIdentifier.Escape(parameter.Name ?? "arg"));
             if (parameter.HasDefaultValue)
             {
                 builder.Append(" = ");
                 builder.Append(FormatDefaultValue(parameter.DefaultValue));
             }
+        }
+
+        static bool IsReadOnly(ParameterInfo parameter)
+            => HasAttribute(parameter, "System.Runtime.CompilerServices.IsReadOnlyAttribute")
+               || HasAttribute(parameter, "System.Runtime.InteropServices.InAttribute")
+               || HasRequiredModifier(parameter, "System.Runtime.CompilerServices.IsReadOnlyAttribute")
+               || HasRequiredModifier(parameter, "System.Runtime.InteropServices.InAttribute");
+
+        static bool HasAttribute(ParameterInfo parameter, string fullName)
+        {
+            foreach (var attribute in parameter.GetCustomAttributesData())
+                if (attribute.AttributeType.FullName == fullName)
+                    return true;
+
+            return false;
+        }
+
+        static bool HasRequiredModifier(ParameterInfo parameter, string fullName)
+        {
+            try
+            {
+                foreach (var modifier in parameter.GetRequiredCustomModifiers())
+                    if (modifier.FullName == fullName)
+                        return true;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException) { }
+
+            return false;
         }
 
         static string FormatDefaultValue(object? value)
@@ -707,7 +823,7 @@ namespace Conduit
                 string text => "\"" + text.Replace("\"", "\\\"") + "\"",
                 char c      => "'" + c + "'",
                 bool b      => b ? "true" : "false",
-                Enum e      => e.GetType().Name + "." + e,
+                Enum e      => CSharpIdentifier.Escape(e.GetType().Name) + "." + e,
                 _           => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "null",
             };
 
@@ -715,6 +831,12 @@ namespace Conduit
         {
             if (type.IsByRef)
                 type = type.GetElementType() ?? type;
+
+            if (MonoSignature.IsFunctionPointer(type))
+                return MonoSignature.FormatFunctionPointer(type);
+
+            if (type.IsPointer)
+                return FormatType(type.GetElementType() ?? typeof(void), includeNamespace) + "*";
 
             if (TryBuiltInAlias(type, out var alias))
                 return alias;
@@ -733,40 +855,44 @@ namespace Conduit
 
         static string DisplayTypeName(Type type, bool includeNamespace)
         {
-            if (!type.IsGenericType)
-                return PlainTypeName(type, includeNamespace);
+            var hierarchy = new Stack<Type>();
+            for (var current = type; current != null; current = current.DeclaringType)
+                hierarchy.Push(current);
 
-            var definitionName = PlainTypeName(type, includeNamespace);
-            var tick = definitionName.IndexOf('`');
-            if (tick >= 0)
-                definitionName = definitionName[..tick];
-
-            var arguments = type.GetGenericArguments();
-            var builder = new StringBuilder(definitionName);
-            builder.Append('<');
-            for (var index = 0; index < arguments.Length; index++)
+            var arguments = type.IsGenericType ? type.GetGenericArguments() : Type.EmptyTypes;
+            var argumentIndex = 0;
+            var builder = new StringBuilder();
+            while (hierarchy.Count > 0)
             {
-                if (index > 0)
-                    builder.Append(", ");
+                var part = hierarchy.Pop();
+                if (builder.Length == 0 && includeNamespace && !string.IsNullOrEmpty(part.Namespace))
+                    builder.Append(CSharpIdentifier.EscapeQualified(part.Namespace)).Append('.');
+                else if (builder.Length > 0)
+                    builder.Append('.');
 
-                builder.Append(FormatType(arguments[index], includeNamespace));
+                var tick = part.Name.IndexOf('`');
+                builder.Append(CSharpIdentifier.Escape(
+                    tick < 0 ? part.Name : part.Name.Substring(0, tick)
+                ));
+                if (tick < 0)
+                    continue;
+
+                var arity = int.Parse(part.Name.Substring(tick + 1), CultureInfo.InvariantCulture);
+                builder.Append('<');
+                for (var index = 0; index < arity; index++)
+                {
+                    if (index > 0)
+                        builder.Append(", ");
+
+                    builder.Append(argumentIndex < arguments.Length
+                        ? FormatType(arguments[argumentIndex++], includeNamespace)
+                        : "?");
+                }
+
+                builder.Append('>');
             }
 
-            builder.Append('>');
             return builder.ToString();
-        }
-
-        static string PlainTypeName(Type type, bool includeNamespace)
-        {
-            var name = includeNamespace
-                ? type.FullName ?? type.Name
-                : type.Name;
-
-            name = name.Replace('+', '.');
-            if (!includeNamespace || string.IsNullOrEmpty(type.Namespace))
-                return name;
-
-            return name;
         }
 
         static bool TryBuiltInAlias(Type type, out string alias)
@@ -793,29 +919,52 @@ namespace Conduit
 
         static void AppendFieldAccess(StringBuilder builder, FieldInfo field)
         {
-            builder.Append(Access(field));
-            builder.Append(' ');
+            var access = Access(field, includePrivate: field.DeclaringType?.IsInterface == true);
+            if (access.Length > 0)
+                builder.Append(access).Append(' ');
         }
 
         static void AppendFieldModifiers(StringBuilder builder, FieldInfo field)
         {
-            if (field.IsStatic)
-                if (!field.IsLiteral)
-                    builder.Append("static ");
             if (field.IsLiteral)
                 builder.Append("const ");
-            else if (field.IsInitOnly)
-                builder.Append("readonly ");
+            else
+            {
+                if (field.IsStatic)
+                    builder.Append("static ");
+                if (RequiresUnsafe(field.FieldType))
+                    builder.Append("unsafe ");
+                if (IsVolatile(field))
+                    builder.Append("volatile ");
+                else if (field.IsInitOnly)
+                    builder.Append("readonly ");
+            }
         }
 
         static void AppendMethodModifiers(StringBuilder builder, MethodInfo method)
         {
             if (method.IsStatic)
                 builder.Append("static ");
-            if (method.IsAbstract)
+            if (!method.IsStatic && method.DeclaringType?.IsValueType == true && HasMethodAttribute(method, "System.Runtime.CompilerServices.IsReadOnlyAttribute"))
+                builder.Append("readonly ");
+            if (RequiresUnsafe(method))
+                builder.Append("unsafe ");
+
+            var isInterface = method.DeclaringType?.IsInterface == true;
+            var isOverride = IsOverride(method);
+            if (isOverride)
+            {
+                if (method.IsFinal)
+                    builder.Append("sealed ");
+                builder.Append("override ");
+            }
+            else if (method.IsAbstract && (!isInterface || method.IsStatic))
                 builder.Append("abstract ");
-            else if (method.IsVirtual && !method.IsFinal)
-                builder.Append(IsOverride(method) ? "override " : "virtual ");
+            else if (method.IsVirtual && !method.IsFinal && (!isInterface || method.IsStatic))
+                builder.Append("virtual ");
+
+            if (!method.IsAbstract && HasNoManagedBody(method))
+                builder.Append("extern ");
         }
 
         static bool IsOverride(MethodInfo method)
@@ -841,16 +990,23 @@ namespace Conduit
                 if (index > 0)
                     builder.Append(", ");
 
-                builder.Append(genericArguments[index].Name);
+                builder.Append(CSharpIdentifier.Escape(genericArguments[index].Name));
             }
 
             builder.Append('>');
         }
 
-        static string Access(MethodBase method)
+        static void AppendAccess(StringBuilder builder, MethodBase method, bool includePrivate = false)
+        {
+            var access = Access(method, includePrivate || method.DeclaringType?.IsInterface == true);
+            if (access.Length > 0)
+                builder.Append(access).Append(' ');
+        }
+
+        static string Access(MethodBase method, bool includePrivate)
         {
             if (method.IsPublic)
-                return "public";
+                return method.DeclaringType?.IsInterface == true ? string.Empty : "public";
             if (method.IsFamily)
                 return "protected";
             if (method.IsFamilyOrAssembly)
@@ -859,13 +1015,13 @@ namespace Conduit
                 return "private protected";
             if (method.IsAssembly)
                 return "internal";
-            return "private";
+            return includePrivate && !IsExplicitInterfaceImplementation(method) ? "private" : string.Empty;
         }
 
-        static string Access(FieldInfo field)
+        static string Access(FieldInfo field, bool includePrivate)
         {
             if (field.IsPublic)
-                return "public";
+                return field.DeclaringType?.IsInterface == true ? string.Empty : "public";
             if (field.IsFamily)
                 return "protected";
             if (field.IsFamilyOrAssembly)
@@ -874,7 +1030,88 @@ namespace Conduit
                 return "private protected";
             if (field.IsAssembly)
                 return "internal";
-            return "private";
+            return includePrivate ? "private" : string.Empty;
+        }
+
+        static int AccessRank(MethodBase method)
+        {
+            if (method.IsPublic)
+                return 5;
+            if (method.IsFamilyOrAssembly)
+                return 4;
+            if (method.IsFamily || method.IsAssembly)
+                return 3;
+            if (method.IsFamilyAndAssembly)
+                return 2;
+            return 1;
+        }
+
+        static bool IsExplicitInterfaceImplementation(MethodBase method)
+            => method.IsPrivate && method.IsFinal && method.IsVirtual && method.Name.IndexOf('.') >= 0;
+
+        static bool HasMethodAttribute(MethodInfo method, string fullName)
+        {
+            foreach (var attribute in method.GetCustomAttributesData())
+                if (attribute.AttributeType.FullName == fullName)
+                    return true;
+
+            return false;
+        }
+
+        static bool IsVolatile(FieldInfo field)
+        {
+            try
+            {
+                foreach (var modifier in field.GetRequiredCustomModifiers())
+                    if (modifier.FullName == "System.Runtime.CompilerServices.IsVolatile")
+                        return true;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException) { }
+
+            return false;
+        }
+
+        static bool IsInitOnly(MethodInfo? setter)
+            => setter != null && HasRequiredModifier(setter.ReturnParameter, "System.Runtime.CompilerServices.IsExternalInit");
+
+        static bool HasNoManagedBody(MethodInfo method)
+        {
+            try
+            {
+                return method.GetMethodBody() == null;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+            {
+                return true;
+            }
+        }
+
+        static bool RequiresUnsafe(MethodInfo method)
+        {
+            if (RequiresUnsafe(method.ReturnType))
+                return true;
+
+            foreach (var parameter in method.GetParameters())
+                if (RequiresUnsafe(parameter.ParameterType))
+                    return true;
+
+            return false;
+        }
+
+        static bool RequiresUnsafe(Type type)
+        {
+            if (type.IsByRef || type.IsArray)
+                return RequiresUnsafe(type.GetElementType() ?? type);
+            if (type.IsPointer || MonoSignature.IsFunctionPointer(type))
+                return true;
+            if (!type.IsGenericType)
+                return false;
+
+            foreach (var argument in type.GetGenericArguments())
+                if (RequiresUnsafe(argument))
+                    return true;
+
+            return false;
         }
 
         static bool IsPropertyOrEventAccessor(MethodInfo method)
@@ -916,8 +1153,25 @@ namespace Conduit
             if (type.IsSubclassOf(typeof(MulticastDelegate)))
                 return "delegate";
             if (type.IsValueType)
-                return "struct";
+            {
+                var readOnly = HasTypeAttribute(
+                    type,
+                    "System.Runtime.CompilerServices.IsReadOnlyAttribute"
+                );
+                if (type.IsByRefLike)
+                    return readOnly ? "readonly ref struct" : "ref struct";
+                return readOnly ? "readonly struct" : "struct";
+            }
             return "class";
+        }
+
+        static bool HasTypeAttribute(Type type, string fullName)
+        {
+            foreach (var attribute in type.GetCustomAttributesData())
+                if (attribute.AttributeType.FullName == fullName)
+                    return true;
+
+            return false;
         }
 
         static string MemberKindHeader(ReflectMemberKind kind)
@@ -963,7 +1217,7 @@ namespace Conduit
 
         static string TypeCandidates(string header, IReadOnlyList<Type> candidates)
         {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             builder.AppendLine(header);
             builder.AppendLine("Candidates:");
             for (var index = 0; index < candidates.Count && index < MaxCandidates; index++)
@@ -973,7 +1227,7 @@ namespace Conduit
             }
 
             AppendTruncation(builder, candidates.Count, MaxCandidates, "candidates");
-            return builder.TrimEnd().ToString();
+            return Trimmed(builder);
         }
 
         static string InvalidModeDiagnostic(string mode)
@@ -981,6 +1235,14 @@ namespace Conduit
 
         static string NormalizeQuery(string value)
             => value?.Trim() ?? string.Empty;
+
+        static string Trimmed(StringBuilder builder)
+        {
+            while (builder.Length > 0 && char.IsWhiteSpace(builder[builder.Length - 1]))
+                builder.Length--;
+
+            return builder.ToString();
+        }
 
         static bool Contains(string value, string query)
             => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;

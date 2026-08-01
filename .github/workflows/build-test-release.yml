@@ -188,7 +188,6 @@ jobs:
 
   test-server-binary:
     needs: build
-    name: server binary (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     strategy:
@@ -613,7 +612,6 @@ jobs:
 
   test-player-linux:
     needs: [build, build-player-linux]
-    name: player E2E (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -649,7 +647,6 @@ jobs:
 
   test-player-windows:
     needs: [build, build-player-windows]
-    name: player E2E (Windows)
     runs-on: windows-latest
     timeout-minutes: 20
 
@@ -679,7 +676,6 @@ jobs:
 
   test-player-proton:
     needs: [build, build-player-windows]
-    name: player E2E (Proton)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

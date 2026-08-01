@@ -79,6 +79,9 @@ namespace Conduit
         static async Task ExecuteCodeAsync(PendingOperationState operation)
             => await CompleteCurrentAsync(await execute_code.ExecuteAsync(operation));
 
+        static Task ExecuteDetourAsync(PendingOperationState operation)
+            => CompleteCurrentAsync(detour.Execute(operation));
+
         static async Task ExecuteViewBurstAsmAsync(PendingOperationState operation)
         {
             try

@@ -1,6 +1,9 @@
 {
   "name": "Conduit.Unity.Runtime",
-  "references": [],
+  "references": [
+    "Conduit.Unity.Core",
+    "Conduit.Unity.Detours"
+  ],
   "includePlatforms": [],
   "excludePlatforms": [],
   "allowUnsafeCode": false,

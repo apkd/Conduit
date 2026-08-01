@@ -4,6 +4,7 @@ namespace Conduit;
 
 [JsonSourceGenerationOptions(
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    GenerationMode = JsonSourceGenerationMode.Metadata,
     PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower
 )]
 [JsonSerializable(typeof(BridgeMessage))]
@@ -13,8 +14,8 @@ namespace Conduit;
 [JsonSerializable(typeof(BridgeExceptionInfo))]
 [JsonSerializable(typeof(BridgeArtifact))]
 [JsonSerializable(typeof(BridgeEndpointDescriptor))]
-[JsonSerializable(typeof(RuntimeAssemblyReferenceManifest))]
-[JsonSerializable(typeof(RuntimeAssemblyReference))]
+[JsonSerializable(typeof(BridgeAssemblyReferenceManifest))]
+[JsonSerializable(typeof(BridgeAssemblyReference))]
 [JsonSerializable(typeof(UnityPingSnapshot))]
 [JsonSerializable(typeof(RecentProjectDocument))]
 [JsonSerializable(typeof(RecentProjectRecord))]

@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text;
 
 namespace Conduit
 {
@@ -10,8 +11,6 @@ namespace Conduit
     {
         const int MaxCandidates = 25;
         const string ValidModes = "types, classes, structs, enums, interfaces, delegates, members, fields, properties, methods, constructors";
-        static readonly object indexLock = new();
-        static IReadOnlyList<Type>? cachedIndex;
 
         static T[] FindManyCore<T>(string mode, string? type, string? member) where T : class
         {
@@ -19,7 +18,7 @@ namespace Conduit
                 throw new InvalidOperationException(InvalidModeDiagnostic(mode));
 
             ValidateResultType<T>(queryMode);
-            var index = LoadIndex();
+            var index = reflect.LoadIndexForHelpers();
             return queryMode.Category == ReflectCategory.Types
                 ? FindTypes<T>(index, queryMode, type, member)
                 : FindMembers<T>(index, queryMode, type, member);
@@ -31,7 +30,7 @@ namespace Conduit
                 throw new InvalidOperationException(InvalidModeDiagnostic(mode));
 
             ValidateResultType<T>(queryMode);
-            var index = LoadIndex();
+            var index = reflect.LoadIndexForHelpers();
             var normalizedType = NormalizeQuery(type);
             if (queryMode.Category == ReflectCategory.Types && normalizedType.Length > 0)
                 return FindSingleType<T>(index, queryMode, normalizedType, member);
@@ -44,7 +43,7 @@ namespace Conduit
         static T FindSingleType<T>(IReadOnlyList<Type> index, ReflectMode mode, string typeQuery, string? memberQuery) where T : class
         {
             var normalizedMember = NormalizeQuery(memberQuery);
-            using var pooledCandidates = ConduitUtility.GetPooledList<Type>(out var candidates);
+            var candidates = new List<Type>();
             foreach (var type in index)
                 if (MatchesTypeKind(type, mode.TypeKind))
                     candidates.Add(type);
@@ -68,7 +67,7 @@ namespace Conduit
             if (normalizedType.Length == 0 && normalizedMember.Length == 0)
                 throw new InvalidOperationException("reflect type modes require `type` or `member`.");
 
-            using var pooledMatches = ConduitUtility.GetPooledList<Type>(out var matches);
+            var matches = new List<Type>();
             foreach (var type in index)
             {
                 if (!MatchesTypeKind(type, mode.TypeKind))
@@ -95,7 +94,7 @@ namespace Conduit
                 throw new InvalidOperationException("reflect member modes require `type` or `member`.");
 
             var effectiveKind = GetEffectiveMemberKind<T>(mode.MemberKind);
-            using var pooledMatches = ConduitUtility.GetPooledList<MemberInfo>(out var matches);
+            var matches = new List<MemberInfo>();
             if (normalizedType.Length > 0)
                 CollectTypeScopedMembers(index, normalizedType, normalizedMember, effectiveKind, matches);
             else
@@ -159,7 +158,7 @@ namespace Conduit
                         matches.Add(property);
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type))
+                foreach (var method in GetMethods(type, memberQuery))
                     if (MatchesMember(method, memberQuery))
                         matches.Add(method);
 
@@ -242,43 +241,6 @@ namespace Conduit
             return results;
         }
 
-        static IReadOnlyList<Type> LoadIndex()
-        {
-            lock (indexLock)
-            {
-                if (cachedIndex != null)
-                    return cachedIndex;
-
-                cachedIndex = BuildIndex();
-                return cachedIndex;
-            }
-        }
-
-        static IReadOnlyList<Type> BuildIndex()
-        {
-            var types = new List<Type>();
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (assembly.IsDynamic)
-                    continue;
-
-                try
-                {
-                    types.AddRange(assembly.GetTypes());
-                }
-                catch (ReflectionTypeLoadException exception)
-                {
-                    // partially loaded assemblies still contain useful project and package types.
-                    foreach (var type in exception.Types)
-                        if (type != null)
-                            types.Add(type);
-                }
-            }
-
-            SortTypes(types);
-            return types;
-        }
-
         static bool TryParseMode(string mode, out ReflectMode queryMode)
         {
             queryMode = default;
@@ -336,7 +298,7 @@ namespace Conduit
 
         static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, string memberQuery)
         {
-            using var pooledMatches = ConduitUtility.GetPooledList<MemberInfo>(out var matches);
+            var matches = new List<MemberInfo>();
             CollectDeclaredMembers(type, kind, memberQuery, matches);
             return matches.Count > 0;
         }
@@ -347,16 +309,23 @@ namespace Conduit
         static PropertyInfo[] GetProperties(Type type)
             => type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
 
-        static MethodInfo[] GetMethods(Type type)
+        static MethodInfo[] GetMethods(Type type, string memberQuery)
         {
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-            using var pooledFiltered = ConduitUtility.GetPooledList<MethodInfo>(out var filtered);
+            var filtered = new List<MethodInfo>();
             foreach (var method in methods)
-                if (!IsPropertyOrEventAccessor(method))
+                if (IsAccessorQuery(memberQuery) || !IsPropertyOrEventAccessor(method))
                     filtered.Add(method);
 
             return filtered.ToArray();
         }
+
+        static bool IsAccessorQuery(string memberQuery)
+            => memberQuery.StartsWith("get_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("set_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("add_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("remove_", StringComparison.OrdinalIgnoreCase)
+               || memberQuery.StartsWith("raise_", StringComparison.OrdinalIgnoreCase);
 
         static ConstructorInfo[] GetConstructors(Type type)
             => type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
@@ -466,7 +435,7 @@ namespace Conduit
                 definitionName = definitionName[..tick];
 
             var arguments = type.GetGenericArguments();
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             builder.Append(definitionName);
             builder.Append('<');
             for (var index = 0; index < arguments.Length; index++)
@@ -535,14 +504,14 @@ namespace Conduit
 
         static string FormatResultCandidates<T>(string header, IReadOnlyList<T> candidates) where T : class
         {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             builder.AppendLine(header);
             builder.AppendLine("Candidates:");
             for (var index = 0; index < candidates.Count && index < MaxCandidates; index++)
                 builder.AppendLine("- " + FormatCandidate(candidates[index]));
 
             AppendTruncation(builder, candidates.Count, MaxCandidates, "candidates");
-            return builder.TrimEnd().ToString();
+            return Trimmed(builder);
         }
 
         static string FormatCandidate(object candidate)
@@ -573,7 +542,7 @@ namespace Conduit
         {
             var normalizedType = NormalizeQuery(type);
             var normalizedMember = NormalizeQuery(member);
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            var builder = new StringBuilder();
             builder.Append("reflect query mode='");
             builder.Append(NormalizeQuery(mode));
             builder.Append('\'');
@@ -625,5 +594,13 @@ namespace Conduit
 
         static string ShortTypeName(Type type)
             => DisplayTypeName(type, includeNamespace: false);
+
+        static string Trimmed(StringBuilder builder)
+        {
+            while (builder.Length > 0 && char.IsWhiteSpace(builder[builder.Length - 1]))
+                builder.Length--;
+
+            return builder.ToString();
+        }
     }
 }

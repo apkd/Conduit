@@ -112,6 +112,7 @@ static class UnityProjectStatusFormatter
                 string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath) ? fallbackEditorLogPath : pingSnapshot.EditorLogPath
             );
             AppendProfilerStatus(ref builder, pingSnapshot);
+            AppendActiveDetours(ref builder, pingSnapshot);
 
             builder.AppendLine("Scenes:");
             if (pingSnapshot.Scenes.Length == 0)
@@ -198,6 +199,20 @@ static class UnityProjectStatusFormatter
             return;
 
         builder.AppendLine(pingSnapshot.ProfilerStatusLine);
+    }
+
+    static void AppendActiveDetours(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (pingSnapshot.ActiveDetourCount == 0 && pingSnapshot.ActiveDetours.Length == 0)
+            return;
+
+        builder.Append("Active detours: ");
+        builder.AppendLine(Math.Max(pingSnapshot.ActiveDetourCount, pingSnapshot.ActiveDetours.Length));
+        foreach (var method in pingSnapshot.ActiveDetours)
+        {
+            builder.Append("- ");
+            builder.AppendLine(method);
+        }
     }
 
     static string BuildStatusLine(UnityPingSnapshot pingSnapshot)

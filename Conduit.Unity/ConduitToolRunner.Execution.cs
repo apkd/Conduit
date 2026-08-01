@@ -80,13 +80,13 @@ namespace Conduit
             => "Cannot enter play mode because the project has compilation errors.";
 
         public static string BuildCompletionDiagnostic(bool targetPlayMode, bool changedMode, bool isPaused)
-            => (targetPlayMode, changedMode) switch
+            => ((targetPlayMode, changedMode) switch
             {
                 (true, true)   => $"Entered play mode. Paused: {(isPaused ? "yes" : "no")}.",
                 (true, false)  => $"Already in play mode. Paused: {(isPaused ? "yes" : "no")}.",
                 (false, true)  => "Entered edit mode.",
                 (false, false) => "Already in edit mode.",
-            };
+            }) + DetourEditorLifecycle.BuildCompletionSuffix(targetPlayMode);
 
         void InstallHooks()
         {

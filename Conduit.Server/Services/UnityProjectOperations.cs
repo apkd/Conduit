@@ -13,7 +13,8 @@ public sealed class UnityProjectOperations(
     UnityProjectRegistry projectRegistry,
     UnityPlayerDiscovery playerDiscovery,
     UnityBridgeClient bridgeClient,
-    PlayerSnippetCompiler playerSnippetCompiler,
+    SnippetCompiler snippetCompiler,
+    DetourCompiler detourCompiler,
     UnityProjectEnvironmentInspector environmentInspector,
     UnityEditorProcessController processController,
     UnitySceneReloadPromptRecovery sceneReloadPromptRecovery,
@@ -288,57 +289,89 @@ public sealed class UnityProjectOperations(
             );
         }
 
-        if (PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _))
-            return ExecutePlayerCodeAsync(BridgeTarget.Normalize(projectPath), snippet, ct);
-
-        return EnqueueAsync(
-            projectPath: projectPath,
-            command: new() { CommandType = BridgeCommandTypes.ExecuteCode, Snippet = snippet },
-            ct: ct
-        );
+        return ExecuteCompiledCodeAsync(BridgeTarget.Normalize(projectPath), snippet, ct);
     }
 
-    async Task<ToolExecutionResult> ExecutePlayerCodeAsync(
-        string playerTarget,
+    async Task<ToolExecutionResult> ExecuteCompiledCodeAsync(
+        string target,
         string snippet,
         CT ct)
     {
-        var prepared = await playerSnippetCompiler.CompileAsync(playerTarget, snippet, ct);
+        var prepared = await snippetCompiler.CompileAsync(target, snippet, ct);
         if (prepared.Failure is { } failure)
             return failure;
 
         var compilation = prepared.Compilation!;
-        var command = compilation.ToCommand();
-        if (!PlayerSelector.TryParse(playerTarget, out var selector))
-            throw new InvalidOperationException($"Invalid Unity player selector '{playerTarget}'.");
+        return await DispatchCompiledCommandAsync(
+            target,
+            compilation.ToCommand(),
+            compilation.Warning,
+            "The MCP server could not stage the compiled player snippet.",
+            ct
+        );
+    }
 
-        var resolution = playerDiscovery.Resolve(selector);
-        if (resolution.Endpoint is not { } endpoint)
-            return new()
+    internal static bool CallsAssetDatabaseRefresh(string? snippet) =>
+        !string.IsNullOrEmpty(snippet) && assetDatabaseRefreshCallPattern.IsMatch(snippet);
+
+    public async Task<ToolExecutionResult> DetourAsync(
+        string projectPath,
+        string methodName,
+        string replacementBody,
+        CT ct)
+    {
+        var target = BridgeTarget.Normalize(projectPath);
+        var prepared = await detourCompiler.PrepareAsync(target, methodName, replacementBody, ct);
+        if (prepared.Failure is { } failure)
+            return failure;
+
+        return await DispatchCompiledCommandAsync(
+            target,
+            prepared.Command!,
+            prepared.Warning,
+            "The MCP server could not stage the compiled detour.",
+            ct
+        );
+    }
+
+    async Task<ToolExecutionResult> DispatchCompiledCommandAsync(
+        string target,
+        BridgeCommand command,
+        string? warning,
+        string stagingFailureDiagnostic,
+        CT ct)
+    {
+        ToolExecutionResult result;
+        if (!PlayerSelector.TryParse(target, out var selector))
+            result = await EnqueueAsync(target, command, ct);
+        else
+        {
+            var resolution = playerDiscovery.Resolve(selector);
+            if (resolution.Endpoint is not { } endpoint)
+                return new()
+                {
+                    Outcome = ToolOutcome.NotConnected,
+                    Diagnostic = resolution.Diagnostic,
+                };
+
+            try
             {
-                Outcome = ToolOutcome.NotConnected,
-                Diagnostic = resolution.Diagnostic,
-            };
+                // editor artifacts are shared project files; remote players need endpoint-local files.
+                command.Artifacts = PlayerArtifactStore.Materialize(endpoint, command.Artifacts);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return ToolExecutionResult.FromException(
+                    exception,
+                    string.Empty,
+                    stagingFailureDiagnostic
+                );
+            }
 
-        try
-        {
-            command.Artifacts = PlayerArtifactStore.Materialize(
-                endpoint,
-                command.Artifacts
-            );
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            return ToolExecutionResult.FromException(
-                exception,
-                string.Empty,
-                "The MCP server could not stage the compiled player snippet."
-            );
+            result = await EnqueuePlayerAsync(target, command, ct);
         }
 
-        var result = await EnqueuePlayerAsync(playerTarget, command, ct);
-        if (string.IsNullOrWhiteSpace(compilation.Warning)
-            || result.Outcome != ToolOutcome.Success)
+        if (string.IsNullOrWhiteSpace(warning) || result.Outcome != ToolOutcome.Success)
             return result;
 
         return new()
@@ -348,12 +381,9 @@ public sealed class UnityProjectOperations(
             Logs = result.Logs,
             ReturnValue = result.ReturnValue,
             Exception = result.Exception,
-            Diagnostic = compilation.Warning,
+            Diagnostic = warning,
         };
     }
-
-    internal static bool CallsAssetDatabaseRefresh(string? snippet) =>
-        !string.IsNullOrEmpty(snippet) && assetDatabaseRefreshCallPattern.IsMatch(snippet);
 
     public Task<ToolExecutionResult> ViewBurstAsmAsync(string projectPath, string target, CT ct)
         => EnqueueAsync(
@@ -907,14 +937,17 @@ public sealed class UnityProjectOperations(
 
             var execution = await ExecuteReplayableCommandAsync(commandTimeout);
             await RecoverTimedOutTestCommandAsync(commandKind, queuedCommand.Session.ProjectPath, execution);
-            return execution.Result
-                   ?? ToToolExecutionResult(
-                       queuedCommand.Session.ProjectPath,
-                       queuedCommand.Command.CommandType,
-                       execution,
-                       commandTimeout,
-                       environmentInspector
-                   );
+            var result = execution.Result
+                         ?? ToToolExecutionResult(
+                             queuedCommand.Session.ProjectPath,
+                             queuedCommand.Command.CommandType,
+                             execution,
+                             commandTimeout,
+                             environmentInspector
+                         );
+            if (commandKind == BridgeCommandKind.RunTestsPlayer)
+                await ShutdownTestPlayersAsync(queuedCommand.Session.ProjectPath, result);
+            return result;
         }
         finally
         {
@@ -1011,6 +1044,82 @@ public sealed class UnityProjectOperations(
                 );
             }
         }
+    }
+
+    async Task ShutdownTestPlayersAsync(string projectPath, ToolExecutionResult testResult)
+    {
+        var players = playerDiscovery.FindForProject(projectPath)
+            .Where(static endpoint => endpoint.IsTestPlayer)
+            .ToArray();
+        if (players.Length == 0)
+            return;
+
+        using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(
+            applicationLifetime.ApplicationStopping
+        );
+        shutdownCts.CancelAfter(TimeSpan.FromSeconds(15));
+        var failures = new List<string>();
+
+        // the test framework can drop its queued quit message when it disconnects; use the independent bridge
+        foreach (var player in players)
+        {
+            try
+            {
+                var execution = await bridgeClient.ExecuteCommandAsync(
+                    player.Selector,
+                    ConduitUtility.CreateRequestId(),
+                    new()
+                    {
+                        CommandType = BridgeCommandTypes.QuitPlayer,
+                        TrackUsage = false,
+                    },
+                    UnityToolTimeouts.StatusCommand,
+                    processIdHint: null,
+                    shutdownCts.Token
+                );
+                if (execution.Result?.Outcome != ToolOutcome.Success
+                    && execution.FailureKind != BridgeRuntimeFailureKind.ProcessExited
+                    && IsLive(player))
+                    failures.Add(
+                        $"{player.Selector}: "
+                        + (execution.Result?.Diagnostic
+                           ?? execution.FailureDiagnostic
+                           ?? "the player did not accept its shutdown request")
+                    );
+            }
+            catch (OperationCanceledException) when (shutdownCts.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                failures.Add($"{player.Selector}: {exception.Message}");
+            }
+        }
+
+        try
+        {
+            while (players.Any(IsLive))
+                await Task.Delay(TimeSpan.FromMilliseconds(100), timeProvider, shutdownCts.Token);
+        }
+        catch (OperationCanceledException) when (shutdownCts.IsCancellationRequested) { }
+
+        foreach (var player in players.Where(IsLive))
+            failures.Add($"{player.Selector}: the player did not exit within 15 seconds");
+
+        if (failures.Count > 0)
+            testResult.Diagnostic = string.Join(
+                "\n",
+                new[] { testResult.Diagnostic, "Player shutdown failed: " + string.Join("; ", failures) }
+                    .Where(static value => !string.IsNullOrWhiteSpace(value))
+            );
+
+        bool IsLive(BridgeEndpointDescriptor endpoint) => playerDiscovery.Discover()
+            .Any(candidate => string.Equals(
+                candidate.SessionInstanceId,
+                endpoint.SessionInstanceId,
+                StringComparison.Ordinal
+            ));
     }
 
     internal static ToolExecutionResult ToToolExecutionResult(

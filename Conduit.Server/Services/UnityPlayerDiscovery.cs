@@ -40,6 +40,7 @@ public sealed class UnityPlayerDiscovery
                     if (descriptor is null
                         || descriptor.ProtocolVersion != BridgeProtocol.Version
                         || descriptor.EndpointKind != BridgeEndpointKinds.Player
+                        || descriptor.Platform.EndsWith("Editor", StringComparison.OrdinalIgnoreCase)
                         || descriptor.ProcessId <= 0
                         || !TryReadTimestamp(descriptor.LastSeenUtc, out var lastSeen)
                         || now - lastSeen > leaseLifetime)

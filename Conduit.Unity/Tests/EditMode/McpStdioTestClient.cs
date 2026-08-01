@@ -21,7 +21,7 @@ namespace Conduit
         const string SupportedProtocolVersion = "2025-03-26";
         const string RepoRootEnvironmentVariable = "CONDUIT_REPO_ROOT";
         const string ServerExecutableEnvironmentVariable = "CONDUIT_SERVER_EXECUTABLE";
-        // cold AssemblyBuilder and asset import requests routinely exceed short RPC-style timeouts
+        // cold Roslyn compilation and asset import requests routinely exceed short RPC-style timeouts
         static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromMinutes(2);
         static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(5);
         static readonly Regex responseIdRegex = new("\"id\":(?<id>\\d+)", RegexOptions.Compiled);

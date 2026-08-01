@@ -1,6 +1,8 @@
 {
   "name": "Conduit.Unity.Editor",
   "references": [
+    "Conduit.Unity.Core",
+    "Conduit.Unity.Detours",
     "UnityEditor.TestRunner",
     "UnityEngine.TestRunner"
   ],

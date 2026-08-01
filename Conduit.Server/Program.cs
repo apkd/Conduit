@@ -136,7 +136,8 @@ static void ConfigureCommon(
     services.AddSingleton<UnityProjectRegistry>();
     services.AddSingleton<UnityPlayerDiscovery>();
     services.AddSingleton<UnityBridgeClient>();
-    services.AddSingleton<PlayerSnippetCompiler>();
+    services.AddSingleton<SnippetCompiler>();
+    services.AddSingleton<DetourCompiler>();
     services.AddSingleton<UnityProjectEnvironmentInspector>();
     services.AddSingleton<UnityEditorProcessController>();
     services.AddSingleton<UnitySceneReloadPromptRecovery>();

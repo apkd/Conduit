@@ -253,25 +253,48 @@ public sealed class UnityTools
     [McpServerTool(Name = CMD.ExecuteCode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """
-        Immediately compiles and runs a one-off C# snippet inside the Unity editor. Works in edit mode and in play mode.
+        Immediately compiles and runs a one-off C# snippet inside the selected Unity Editor or Development player.
         Pass a snippet filename returned by an earlier invocation, such as `7.cs`, to run it again without recompiling.
         Supports top-level statements, local functions, leading using directives, leading type declarations, and leading static fields.
         You can optionally return a result value to print it in the response.
-        The generated snippet already imports System, System.Collections.Generic, System.IO, Linq, Tasks, UnityEditor, and UnityEngine; skip these namespaces.
+        The generated snippet already imports System, System.Collections.Generic, System.IO, Linq, Tasks, and UnityEngine; Editor snippets also import UnityEditor.
         It also supports object search helpers; call Search<T>("query") or SearchMany<T>("query") to resolve Unity objects,
-        supporting same query features as the `search` tool (use the help command for more search tips), as well as reflection helpers based on the `reflect` tool;
+        supporting the same loaded-object queries as the `search` tool (use the help command for more search tips), as well as reflection helpers based on the `reflect` tool;
         for example, `Type t = Reflect.Type("Camera")`, `MethodInfo[] methods = Reflect.Methods(type: "UnsafeUtility")`.
         You can also skip whitespace and other tokens that don't impact execution. Prefer extremely terse code; single-letter variable names, etc.
         Useful for testing and debugging, prototyping code, validating assumptions, and even making modifications to the project.
         """
     )]
     public static Task<string> ExecuteCode(
-        [Description("Project path")] string projectPath,
+        [Description("Project path or player selector")] string projectPath,
         [Description("C# code to execute, or a prior script filename such as 7.cs to run again")]
         string snippet,
         UnityProjectOperations operations,
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ExecuteCodeAsync(projectPath, snippet, ct));
+
+    [McpServerTool(Name = CMD.Detour, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
+    [Description(
+        """
+        Replaces a managed C# method implementation at runtime.
+        The replacement is a method-body snippet whose instance receiver is `@this` and parameters are `arg0`, `arg1`, etc.
+        Pass exactly `test` to inspect support and print the replacement signature, or `restore` to revert changes.
+        Supports managed, non-generic static and instance methods, including ref/ref readonly returns, Span, pointers, and function pointers.
+        Constructors, abstract/runtime/native methods, varargs, and signatures that C# cannot represent exactly are unsupported.
+        Runtime patching requires Windows or Linux x64 Unity Mono.
+        Use this for testing bugfixes, prototyping features, and any other scenario where changing a method's behavior is useful.
+        Use the `reflect` tool with `mode=methods` to find methods that you can replace.
+        Methods ending in `// detour-incompatible` cannot currently be replaced.
+        """
+    )]
+    public static Task<string> Detour(
+        [Description("Project path or player selector")] string projectPath,
+        [Description("Unique Type.Method selector or canonical selector returned by test")] string methodName,
+        [Description("C# replacement body, `test`, `restore`, or a prior detour source filename")]
+        string replacementBody,
+        UnityProjectOperations operations,
+        CancellationToken ct
+    ) => ToPlainTextToolResponseAsync(operations.DetourAsync(projectPath, methodName, replacementBody, ct));
 
     [McpServerTool(Name = CMD.ViewBurstAsm, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
@@ -294,10 +317,11 @@ public sealed class UnityTools
         Searches loaded assemblies for C# types and members.
         You can search for types (based on either a `type` name query or a contained `member` name query)
         or members (locally if you include the containing `type` name query or globally if you provide a `member` name query instead).
+        Method declarations ending in `// detour-incompatible` cannot currently be replaced by the `detour` tool.
         """
     )]
     public static Task<string> Reflect(
-        [Description("Project path")] string projectPath,
+        [Description("Project path or player selector")] string projectPath,
         [Description("Search mode: types/classes/structs/enums/interfaces/delegates or members/fields/properties/methods/constructors")]
         string mode,
         UnityProjectOperations operations,

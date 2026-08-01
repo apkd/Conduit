@@ -18,7 +18,7 @@ namespace Conduit.Runtime
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         static void Initialize()
         {
-            if (behaviour != null)
+            if (Application.isEditor || behaviour != null)
                 return;
 
             var gameObject = new GameObject("Conduit Player Bridge")

@@ -17,38 +17,82 @@ namespace Conduit.Runtime
         const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
 
         public static string ToJson(Object target)
-        {
-            var body = target switch
+            => target switch
             {
                 GameObject gameObject => SerializeGameObject(gameObject),
                 Transform transform => SerializeTransform(transform),
                 MonoBehaviour or ScriptableObject => JsonUtility.ToJson(target, true),
                 _ => SerializeWritableProperties(target),
             };
-            return Wrap(target.GetType().Name, body);
-        }
 
-        public static void FromJsonOverwrite(Object target, string json)
+        public static string FromJsonOverwrite(Object target, string json)
         {
             if (string.IsNullOrWhiteSpace(json))
                 throw new InvalidOperationException("JSON payload was empty.");
 
-            var body = UnwrapTarget(RuntimeJsonObject.Parse(json), target.GetType().Name);
+            var body = UnwrapTarget(RuntimeJsonObject.Parse(json), target.GetType());
+            var before = ToJson(target);
             switch (target)
             {
                 case GameObject gameObject:
                     OverwriteGameObject(gameObject, body);
-                    return;
+                    break;
                 case Transform transform:
                     OverwriteTransform(transform, body);
-                    return;
+                    break;
                 case MonoBehaviour:
                 case ScriptableObject:
                     JsonUtility.FromJsonOverwrite(body.Source, target);
-                    return;
+                    break;
                 default:
                     OverwriteWritableProperties(target, body);
-                    return;
+                    break;
+            }
+
+            return FormatChanges(before, ToJson(target));
+        }
+
+        static string FormatChanges(string before, string after)
+        {
+            var changed = new List<string>();
+            CollectChangedPaths(RuntimeJsonObject.Parse(before), RuntimeJsonObject.Parse(after), string.Empty, changed);
+            if (changed.Count == 0)
+                return "No serialized properties changed.";
+
+            changed.Sort(StringComparer.Ordinal);
+            return "Applied changes:\n- " + string.Join("\n- ", changed);
+        }
+
+        static void CollectChangedPaths(
+            RuntimeJsonObject before,
+            RuntimeJsonObject after,
+            string prefix,
+            List<string> changed)
+        {
+            var beforeMembers = before.Members.ToDictionary(static member => member.Name, StringComparer.Ordinal);
+            var afterMembers = after.Members.ToDictionary(static member => member.Name, StringComparer.Ordinal);
+            foreach (var name in beforeMembers.Keys.Concat(afterMembers.Keys).Distinct(StringComparer.Ordinal))
+            {
+                var path = prefix.Length == 0 ? name : prefix + "." + name;
+                if (!beforeMembers.TryGetValue(name, out var beforeMember)
+                    || !afterMembers.TryGetValue(name, out var afterMember))
+                {
+                    changed.Add(path);
+                    continue;
+                }
+
+                if (beforeMember.Source == afterMember.Source)
+                    continue;
+                if (beforeMember.Source.TrimStart().StartsWith("{", StringComparison.Ordinal)
+                    && afterMember.Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                    CollectChangedPaths(
+                        RuntimeJsonObject.Parse(beforeMember.Source),
+                        RuntimeJsonObject.Parse(afterMember.Source),
+                        path,
+                        changed
+                    );
+                else
+                    changed.Add(path);
             }
         }
 
@@ -294,26 +338,24 @@ namespace Conduit.Runtime
             return value;
         }
 
-        static RuntimeJsonObject UnwrapTarget(RuntimeJsonObject json, string typeName)
+        static RuntimeJsonObject UnwrapTarget(RuntimeJsonObject json, Type targetType)
         {
             if (json.Members.Count != 1
-                || !string.Equals(
-                    json.Members[0].Name,
-                    typeName,
-                    StringComparison.OrdinalIgnoreCase
-                ))
+                || json.Members[0].Name.Length == 0
+                || !char.IsUpper(json.Members[0].Name[0])
+                || !json.Members[0].Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
                 return json;
 
-            return RuntimeJsonObject.Parse(json.Members[0].Source);
-        }
+            var wrapperName = json.Members[0].Name;
+            var matches = false;
+            for (var current = targetType; current != null && current != typeof(object); current = current.BaseType)
+                matches |= string.Equals(wrapperName, current.Name, StringComparison.OrdinalIgnoreCase);
+            if (!matches)
+                throw new InvalidOperationException(
+                    $"JSON wrapper '{wrapperName}' does not match target type '{targetType.Name}'."
+                );
 
-        static string Wrap(string typeName, string body)
-        {
-            var builder = new StringBuilder();
-            builder.Append("{\n  ").Append(Quote(typeName)).Append(": ");
-            AppendIndented(builder, body, 2);
-            builder.Append("\n}");
-            return builder.ToString();
+            return RuntimeJsonObject.Parse(json.Members[0].Source);
         }
 
         static string WriteObject(params (string Name, string Json)[] values) =>

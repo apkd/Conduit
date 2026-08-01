@@ -1,11 +1,14 @@
 {
   "name": "Conduit.Tests.PlayMode",
   "references": [
-    "Conduit.Unity.Runtime"
+    "Conduit.Unity.Runtime",
+    "Conduit.Unity.Core",
+    "Conduit.Unity.Detours"
   ],
   "optionalUnityReferences": [
     "TestAssemblies"
   ],
+  "allowUnsafeCode": true,
   "defineConstraints": [
     "DEBUG",
     "CONDUIT_INCLUDE_IN_DEBUG_BUILDS",
