@@ -294,7 +294,8 @@ public sealed class UnityBridgeClient
                     return connectResult;
 
                 lastFailure = connectResult.Result;
-                if (lastFailure.FailureKind == BridgeRuntimeFailureKind.AmbiguousTarget)
+                if (lastFailure.FailureKind is BridgeRuntimeFailureKind.AmbiguousTarget
+                    or BridgeRuntimeFailureKind.ProtocolMismatch)
                     break;
                 var remaining = deadline - DateTimeOffset.UtcNow;
                 if (remaining <= TimeSpan.Zero)
@@ -395,7 +396,32 @@ public sealed class UnityBridgeClient
             }
 
             var response = BridgeProtocol.Deserialize(payload);
-            if (response?.MessageType != BridgeMessageTypes.Hello || response.Project is null)
+            if (response?.MessageType != BridgeMessageTypes.Hello)
+            {
+                await DisposeConnectionAsync(transport);
+                return (null, BridgeClientResult.Failure(
+                    handshake: null,
+                    BridgeRuntimeFailureKind.InvalidHandshake,
+                    $"Unity returned an invalid hello handshake for '{normalizedProjectPath}'. This usually means the editor is reloading.",
+                    commandSent: false
+                ));
+            }
+
+            if (response.ProtocolVersion != BridgeProtocol.Version)
+            {
+                await DisposeConnectionAsync(transport);
+                return (null, BridgeClientResult.Failure(
+                    handshake: null,
+                    BridgeRuntimeFailureKind.ProtocolMismatch,
+                    BridgeContract.FormatProtocolMismatch(
+                        BridgeProtocol.Version,
+                        response.ProtocolVersion
+                    ),
+                    commandSent: false
+                ));
+            }
+
+            if (response.Project is null)
             {
                 await DisposeConnectionAsync(transport);
                 return (null, BridgeClientResult.Failure(

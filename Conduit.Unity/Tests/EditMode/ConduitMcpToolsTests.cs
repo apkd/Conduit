@@ -2839,6 +2839,67 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void BridgeCompatibilityDiagnostics_AreDirectionalAndTerse()
+    {
+        Assert.That(
+            BridgeContract.FormatProtocolMismatch(5, 4),
+            Is.EqualTo("Unity Editor bridge protocol 4 is older than Conduit server protocol 5.")
+        );
+        Assert.That(
+            BridgeContract.FormatProtocolMismatch(5, 6),
+            Is.EqualTo("Conduit server protocol 5 is older than Unity Editor bridge protocol 6.")
+        );
+
+        var result = BridgeCommandResult.UnsupportedEditorTool("future_tool");
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Exception));
+        Assert.That(
+            result.diagnostic,
+            Is.EqualTo(
+                $"Unity Editor bridge protocol {BridgeProtocol.Version} does not support the `future_tool` tool."
+            )
+        );
+    }
+
+    [Test]
+    public async Task EditorHandshake_ReturnsItsVersionBeforeRejectingAProtocolMismatch()
+    {
+        var request = BridgeMessage.CreateHello(
+            new BridgeProjectHandshake
+            {
+                project_path = ConduitProjectIdentity.GetProjectPath(),
+            }
+        );
+        request.protocol_version = BridgeProtocol.Version - 1;
+        using var input = new MemoryStream(
+            System.Text.Encoding.UTF8.GetBytes(BridgeProtocol.Serialize(request) + "\n")
+        );
+        using var output = new MemoryStream();
+        using var connection = new EditorBridgeConnection(input, output, static () => true);
+        using var reader = new StreamReader(
+            input,
+            System.Text.Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: false,
+            bufferSize: 1024,
+            leaveOpen: true
+        );
+
+        var accepted = await ConduitConnection.TryHandshakeAsync(
+            connection,
+            reader,
+            System.Threading.CancellationToken.None
+        );
+
+        output.Position = 0;
+        using var responseReader = new StreamReader(output, System.Text.Encoding.UTF8, false, 1024, true);
+        var response = BridgeProtocol.Deserialize((await responseReader.ReadLineAsync()) ?? string.Empty);
+        Assert.That(accepted, Is.False);
+        Assert.That(response, Is.Not.Null);
+        Assert.That(response!.protocol_version, Is.EqualTo(BridgeProtocol.Version));
+        Assert.That(response.message_type, Is.EqualTo(BridgeMessageTypes.Hello));
+        Assert.That(response.project?.project_path, Is.EqualTo(ConduitProjectIdentity.GetProjectPath()));
+    }
+
+    [Test]
     public void BridgeArtifact_VerifiesProjectRelativeFilesAndRejectsTraversal()
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes("compiled");

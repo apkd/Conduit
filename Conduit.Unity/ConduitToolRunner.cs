@@ -614,11 +614,7 @@ namespace Conduit
                             break;
                         default:
                             await CompleteCurrentAsync(
-                                new()
-                                {
-                                    outcome = ToolOutcome.Exception,
-                                    diagnostic = $"Unsupported command '{operation.command_type}'.",
-                                }
+                                BridgeCommandResult.UnsupportedEditorTool(operation.command_type)
                             );
 
                             break;

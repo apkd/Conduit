@@ -306,15 +306,14 @@ namespace Conduit
         static NamedPipeServerStream CreatePipeServer(string pipeName)
             => new(pipeName, PipeDirection.InOut, MaxConcurrentClients, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
-        static async Task<bool> TryHandshakeAsync(
+        internal static async Task<bool> TryHandshakeAsync(
             EditorBridgeConnection connection,
             StreamReader reader,
             CancellationToken cancellationToken)
         {
             var payload = await ReadLineAsync(reader, cancellationToken);
             var message = BridgeProtocol.Deserialize(payload ?? string.Empty);
-            if (message?.protocol_version != BridgeProtocol.Version
-                || message.message_type != BridgeMessageTypes.Hello
+            if (message?.message_type != BridgeMessageTypes.Hello
                 || message.project == null)
             {
                 ConduitDiagnostics.Warn("Rejected MCP client because the first message was not a valid hello envelope.");
@@ -336,7 +335,16 @@ namespace Conduit
                     BridgeMessage.CreateHello(CreateHandshake(expectedProjectPath))
                 )
             );
-            return true;
+            if (message.protocol_version == BridgeProtocol.Version)
+                return true;
+
+            ConduitDiagnostics.Warn(
+                BridgeContract.FormatProtocolMismatch(
+                    message.protocol_version,
+                    BridgeProtocol.Version
+                )
+            );
+            return false;
         }
 
         static async Task ReadLoopAsync(ClientSession session, CancellationToken cancellationToken)

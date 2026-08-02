@@ -156,6 +156,20 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
+        await AssertProtocolMismatchAsync(
+            BridgeProtocol.Version - 1,
+            $"Unity Editor bridge protocol {BridgeProtocol.Version - 1} is older than Conduit server protocol {BridgeProtocol.Version}."
+        );
+
+    [Test]
+    public async Task NewerUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
+        await AssertProtocolMismatchAsync(
+            BridgeProtocol.Version + 1,
+            $"Conduit server protocol {BridgeProtocol.Version} is older than Unity Editor bridge protocol {BridgeProtocol.Version + 1}."
+        );
+
+    [Test]
     public async Task CancellingATestRequestSendsCancellationAndWaitsForUnityToFinish()
     {
         if (OperatingSystem.IsWindows())
@@ -221,6 +235,33 @@ public sealed class UnityBridgeClientTests
         await Assert.That(outcome.FinalResult).IsNull();
     }
 
+    static async Task AssertProtocolMismatchAsync(int unityProtocolVersion, string expectedDiagnostic)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-protocol-mismatch-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            handshakeProtocolVersion: unityProtocolVersion
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+
+        var result = await client.ProbeAsync(
+            projectPath,
+            processIdHint: null,
+            timeout: TimeSpan.FromSeconds(2),
+            ct: CancellationToken.None
+        );
+
+        await Assert.That(result.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ProtocolMismatch);
+        await Assert.That(result.FailureDiagnostic).IsEqualTo(expectedDiagnostic);
+        await Assert.That(result.Handshake).IsNull();
+        await Assert.That(result.CommandSent).IsFalse();
+        await Assert.That(bridge.ConnectionCount).IsEqualTo(1);
+    }
+
     sealed class FakeFifoBridge : IAsyncDisposable
     {
         static readonly UTF8Encoding Utf8NoBom = new(false);
@@ -228,21 +269,25 @@ public sealed class UnityBridgeClientTests
         readonly CancellationTokenSource cts = new();
         readonly string projectPath;
         readonly int editorProcessId;
+        readonly int handshakeProtocolVersion;
         readonly bool coalesceCommandResponses;
         readonly bool waitForCancellation;
         readonly string endpointDirectory;
         readonly Task serverTask;
         readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int connectionCount;
 
         FakeFifoBridge(
             string projectPath,
             int editorProcessId,
+            int handshakeProtocolVersion,
             bool coalesceCommandResponses,
             bool waitForCancellation,
             string endpointDirectory)
         {
             this.projectPath = projectPath;
             this.editorProcessId = editorProcessId;
+            this.handshakeProtocolVersion = handshakeProtocolVersion;
             this.coalesceCommandResponses = coalesceCommandResponses;
             this.waitForCancellation = waitForCancellation;
             this.endpointDirectory = endpointDirectory;
@@ -251,11 +296,14 @@ public sealed class UnityBridgeClientTests
 
         public Task<string?> CancelledRequestId => cancelledRequestId.Task;
 
+        public int ConnectionCount => Volatile.Read(ref connectionCount);
+
         public static Task<FakeFifoBridge> StartAsync(
             string projectPath,
             int editorProcessId,
             bool coalesceCommandResponses = false,
-            bool waitForCancellation = false)
+            bool waitForCancellation = false,
+            int handshakeProtocolVersion = BridgeProtocol.Version)
         {
             var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
                 ConduitIpcPaths.GetDiscoveryRoots()[0],
@@ -272,6 +320,7 @@ public sealed class UnityBridgeClientTests
                 new FakeFifoBridge(
                     projectPath,
                     editorProcessId,
+                    handshakeProtocolVersion,
                     coalesceCommandResponses,
                     waitForCancellation,
                     endpointDirectory
@@ -319,6 +368,7 @@ public sealed class UnityBridgeClientTests
         {
             try
             {
+                Interlocked.Increment(ref connectionCount);
                 await using var input = new FileStream(
                     Path.Combine(clientDirectory, "to-unity.fifo"),
                     FileMode.Open,
@@ -350,7 +400,7 @@ public sealed class UnityBridgeClientTests
                 await reader.ReadLineAsync(cts.Token);
                 await WritePayloadAsync(output, new JsonObject
                 {
-                    ["protocol_version"] = BridgeProtocol.Version,
+                    ["protocol_version"] = handshakeProtocolVersion,
                     ["message_type"] = "hello",
                     ["project"] = new JsonObject
                     {
@@ -362,6 +412,9 @@ public sealed class UnityBridgeClientTests
                         ["last_seen_utc"] = DateTimeOffset.UtcNow,
                     },
                 }, cts.Token);
+
+                if (handshakeProtocolVersion != BridgeProtocol.Version)
+                    return;
 
                 var commandPayload = await reader.ReadLineAsync(cts.Token);
                 var requestId = JsonNode.Parse(commandPayload!)?["request_id"]?.GetValue<string>() ?? "";

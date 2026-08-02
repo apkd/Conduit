@@ -11,6 +11,11 @@ namespace Conduit
     static class BridgeContract
     {
         public const int Version = 5;
+
+        public static string FormatProtocolMismatch(int serverVersion, int unityVersion)
+            => serverVersion < unityVersion
+                ? $"Conduit server protocol {serverVersion} is older than Unity Editor bridge protocol {unityVersion}."
+                : $"Unity Editor bridge protocol {unityVersion} is older than Conduit server protocol {serverVersion}.";
     }
 
     static class BridgeCommandTypes
@@ -310,6 +315,13 @@ namespace Conduit
             {
                 outcome = ToolOutcome.Exception,
                 diagnostic = $"The tool `{commandName}` is editor-only.",
+            };
+
+        public static BridgeCommandResult UnsupportedEditorTool(string commandName)
+            => new()
+            {
+                outcome = ToolOutcome.Exception,
+                diagnostic = $"Unity Editor bridge protocol {BridgeContract.Version} does not support the `{commandName}` tool.",
             };
 
         public static BridgeCommandResult FromException(Exception exception)

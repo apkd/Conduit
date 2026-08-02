@@ -89,6 +89,7 @@ static class UnityProjectOfflinePreflight
             return safeModeDiagnostic;
 
         if (probeExecution.FailureKind is BridgeRuntimeFailureKind.InvalidHandshake
+            or BridgeRuntimeFailureKind.ProtocolMismatch
             or BridgeRuntimeFailureKind.ProjectMismatch
             or BridgeRuntimeFailureKind.HandshakeDisconnected
             or BridgeRuntimeFailureKind.ProcessExited)

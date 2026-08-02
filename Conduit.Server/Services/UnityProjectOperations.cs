@@ -1231,6 +1231,7 @@ public sealed class UnityProjectOperations(
             return execution.Result?.Outcome is ToolOutcome.Timeout or ToolOutcome.NotConnected;
 
         return execution.FailureKind is not BridgeRuntimeFailureKind.ProcessExited
+            and not BridgeRuntimeFailureKind.ProtocolMismatch
             and not BridgeRuntimeFailureKind.ProjectMismatch;
     }
 

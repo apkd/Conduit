@@ -72,6 +72,7 @@ public enum BridgeRuntimeFailureKind
     ConnectTimedOut,
     HandshakeDisconnected,
     InvalidHandshake,
+    ProtocolMismatch,
     ProjectMismatch,
     SendFailed,
     SendTimedOut,

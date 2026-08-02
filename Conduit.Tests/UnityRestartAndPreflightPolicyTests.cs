@@ -915,6 +915,41 @@ public sealed class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task ProtocolMismatchPreservesItsCompatibilityDiagnostic()
+    {
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            "/mnt/b/src/SampleProject",
+            isUnityProject: true,
+            editorVersion: "6000.4.0f1",
+            lockfileState: UnityProjectLockfileState.Locked,
+            runningUnityProcessCount: 1,
+            matchedProcess: new(1234, @"C:\Program Files\Unity\Editor\Unity.exe", "Unity.exe -projectPath \"B:\\src\\SampleProject\"")
+        );
+        var diagnostic = BridgeContract.FormatProtocolMismatch(
+            BridgeProtocol.Version,
+            BridgeProtocol.Version - 1
+        );
+        var mismatch = BridgeClientResult.Failure(
+            handshake: null,
+            BridgeRuntimeFailureKind.ProtocolMismatch,
+            diagnostic,
+            commandSent: false
+        );
+
+        var blockedDiagnostic = UnityProjectOfflinePreflight.ResolveBlockedDiagnostic(
+            snapshot,
+            mismatch,
+            safeModeDiagnostic: null,
+            hasConduitPackageSignal: true
+        );
+
+        await Assert.That(blockedDiagnostic).IsEqualTo(diagnostic);
+        await Assert.That(
+            UnityProjectOperations.ShouldWaitForStatusProgressWindow(snapshot, mismatch)
+        ).IsFalse();
+    }
+
+    [Test]
     public async Task HasExitedReturnsTrueForExitedProcess()
     {
         using var process = StartShortLivedProcess();
