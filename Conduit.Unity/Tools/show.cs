@@ -112,12 +112,15 @@ namespace Conduit
             };
 
         public static string Show(string query)
-            => ConduitSearchUtility.Resolve(query) switch
+        {
+            var result = ConduitSearchUtility.Resolve(query) switch
             {
                 { Count: 0 }           => ConduitSearchUtility.FormatNoMatches(query),
                 { Count: 1 } matches   => DebugResolvedObject(matches[0]),
                 { Count: > 1 } matches => ConduitSearchUtility.FormatMatches(matches, includeHint: true),
             };
+            return result.Replace("\r\n", "\n");
+        }
 
         static string DebugResolvedObject(ResolvedObjectMatch match)
         {
@@ -219,8 +222,9 @@ namespace Conduit
             {
                 builder.AppendLine($"Asset: {assetPath}");
                 builder.AppendLine($"Main Object: {DescribeObject(root)}");
+                builder.AppendLine("Object IDs are omitted because prefab contents are temporary.");
                 builder.AppendLine();
-                AppendGameObjectHierarchyDetails(builder, root);
+                AppendGameObjectHierarchyDetails(builder, root, includeObjectIds: false);
 
                 using var pooledSubassets = ConduitUtility.GetPooledList<Object>(out var subassets);
                 foreach (var assetObject in AssetDatabase.LoadAllAssetsAtPath(assetPath))
@@ -494,41 +498,60 @@ namespace Conduit
             return initials.ToString();
         }
 
-        static void AppendSceneHierarchyRoot(StringBuilder builder, Transform transform, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneHierarchyRoot(
+            StringBuilder builder,
+            Transform transform,
+            IReadOnlyDictionary<Type, string> componentIdentifiers,
+            bool includeObjectIds = true)
         {
-            AppendSceneHierarchyLine(builder, transform, componentIdentifiers);
+            AppendSceneHierarchyLine(builder, transform, componentIdentifiers, includeObjectIds);
 
             for (var index = 0; index < transform.childCount; index++)
-                AppendSceneHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1, componentIdentifiers);
+                AppendSceneHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1, componentIdentifiers, includeObjectIds);
         }
 
-        static void AppendSceneHierarchyNode(StringBuilder builder, Transform transform, string prefix, bool isLast, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneHierarchyNode(
+            StringBuilder builder,
+            Transform transform,
+            string prefix,
+            bool isLast,
+            IReadOnlyDictionary<Type, string> componentIdentifiers,
+            bool includeObjectIds)
         {
             builder.Append(prefix);
             builder.Append(isLast ? "└─" : "├─");
-            AppendSceneHierarchyLine(builder, transform, componentIdentifiers);
+            AppendSceneHierarchyLine(builder, transform, componentIdentifiers, includeObjectIds);
 
             var childPrefix = prefix + (isLast ? "  " : "│ ");
             for (var index = 0; index < transform.childCount; index++)
-                AppendSceneHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers);
+                AppendSceneHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers, includeObjectIds);
         }
 
-        static void AppendSceneHierarchyLine(StringBuilder builder, Transform transform, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneHierarchyLine(
+            StringBuilder builder,
+            Transform transform,
+            IReadOnlyDictionary<Type, string> componentIdentifiers,
+            bool includeObjectIds)
         {
             var gameObject = transform.gameObject;
             builder.Append(gameObject.name);
-            builder.Append(" [");
+            var hasMetadata = false;
             if (!gameObject.activeInHierarchy)
-                builder.Append("inactive | ");
+                AppendSceneHierarchyMetadata(builder, "inactive", ref hasMetadata);
 
-            builder.Append(ConduitUtility.FormatObjectId(gameObject));
+            if (includeObjectIds)
+                AppendSceneHierarchyMetadata(builder, ConduitUtility.FormatObjectId(gameObject), ref hasMetadata);
 
-            AppendSceneComponentIdentifiers(builder, gameObject, componentIdentifiers);
+            AppendSceneComponentIdentifiers(builder, gameObject, componentIdentifiers, ref hasMetadata);
 
-            builder.AppendLine("]");
+            builder.AppendLine(hasMetadata ? "]" : string.Empty);
         }
 
-        static void AppendSceneComponentIdentifiers(StringBuilder builder, GameObject gameObject, IReadOnlyDictionary<Type, string> componentIdentifiers)
+        static void AppendSceneComponentIdentifiers(
+            StringBuilder builder,
+            GameObject gameObject,
+            IReadOnlyDictionary<Type, string> componentIdentifiers,
+            ref bool hasMetadata)
         {
             using var pooledIdentifiers = ConduitUtility.GetPooledList<ComponentIdentifierCount>(out var identifiers);
             foreach (var component in gameObject.GetComponents<Component>())
@@ -556,22 +579,24 @@ namespace Conduit
             {
                 if (identifier.Count >= 3)
                 {
-                    builder.Append(" | ");
-                    builder.Append(identifier.Identifier);
-                    builder.Append(" ×");
-                    builder.Append(identifier.Count.ToString(CultureInfo.InvariantCulture));
+                    AppendSceneHierarchyMetadata(
+                        builder,
+                        identifier.Identifier + " ×" + identifier.Count.ToString(CultureInfo.InvariantCulture),
+                        ref hasMetadata
+                    );
                     continue;
                 }
 
                 for (var index = 0; index < identifier.Count; index++)
-                    AppendSceneComponentIdentifier(builder, identifier.Identifier);
+                    AppendSceneHierarchyMetadata(builder, identifier.Identifier, ref hasMetadata);
             }
         }
 
-        static void AppendSceneComponentIdentifier(StringBuilder builder, string identifier)
+        static void AppendSceneHierarchyMetadata(StringBuilder builder, string value, ref bool hasMetadata)
         {
-            builder.Append(" | ");
-            builder.Append(identifier);
+            builder.Append(hasMetadata ? " | " : " [");
+            builder.Append(value);
+            hasMetadata = true;
         }
 
         static int FindComponentIndex(List<ComponentIdentifierCount> identifiers, Type componentType)
@@ -597,12 +622,15 @@ namespace Conduit
             }
         }
 
-        static void AppendGameObjectHierarchyDetails(StringBuilder builder, GameObject gameObject)
+        static void AppendGameObjectHierarchyDetails(
+            StringBuilder builder,
+            GameObject gameObject,
+            bool includeObjectIds = true)
         {
             if (ShouldUseCompactHierarchy(gameObject.transform))
             {
-                AppendGameObject(builder, gameObject);
-                AppendCompactGameObjectHierarchy(builder, gameObject.transform);
+                AppendGameObject(builder, gameObject, includeObjectIds);
+                AppendCompactGameObjectHierarchy(builder, gameObject.transform, includeObjectIds);
                 return;
             }
 
@@ -611,7 +639,7 @@ namespace Conduit
             builder.AppendLine();
 
             foreach (var transform in gameObject.GetComponentsInChildren<Transform>(true))
-                AppendGameObject(builder, transform.gameObject);
+                AppendGameObject(builder, transform.gameObject, includeObjectIds);
         }
 
         static bool ShouldUseCompactHierarchy(Transform transform)
@@ -633,18 +661,28 @@ namespace Conduit
             return count;
         }
 
-        static void AppendCompactGameObjectHierarchy(StringBuilder builder, Transform root)
+        static void AppendCompactGameObjectHierarchy(
+            StringBuilder builder,
+            Transform root,
+            bool includeObjectIds)
         {
             var componentIdentifiers = BuildHierarchyComponentIdentifiers(root);
             AppendComponentLegend(builder, componentIdentifiers);
 
             builder.AppendLine("Hierarchy:");
-            AppendSceneHierarchyRoot(builder, root, componentIdentifiers);
+            AppendSceneHierarchyRoot(builder, root, componentIdentifiers, includeObjectIds);
         }
 
-        static void AppendGameObject(StringBuilder builder, GameObject gameObject)
+        static void AppendGameObject(
+            StringBuilder builder,
+            GameObject gameObject,
+            bool includeObjectIds = true)
         {
-            builder.AppendLine($"GameObject: {ConduitUtility.BuildHierarchyPath(gameObject.transform)} [{ConduitUtility.FormatObjectId(gameObject)}]");
+            builder.Append("GameObject: ")
+                .Append(ConduitUtility.BuildHierarchyPath(gameObject.transform));
+            if (includeObjectIds)
+                builder.Append(" [").Append(ConduitUtility.FormatObjectId(gameObject)).Append(']');
+            builder.AppendLine();
 
             if (gameObject.GetComponents<Component>() is not { Length: > 0 } components)
             {
@@ -662,7 +700,10 @@ namespace Conduit
                     continue;
                 }
 
-                builder.AppendLine($"  - {component.GetType().FullName} [{ConduitUtility.FormatObjectId(component)}]");
+                builder.Append("  - ").Append(component.GetType().FullName);
+                if (includeObjectIds)
+                    builder.Append(" [").Append(ConduitUtility.FormatObjectId(component)).Append(']');
+                builder.AppendLine();
                 AppendSerializableFields(builder, component, 4);
                 AppendNonSerializableFields(builder, component, 4);
             }

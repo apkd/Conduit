@@ -14,6 +14,7 @@ namespace Conduit
 {
     sealed class UnityTestRunMonitor
     {
+        internal const int PlayerHeartbeatTimeoutSeconds = 30 * 60;
         readonly ToolLogCapture logCapture;
         readonly Func<BridgeCommandResult, Task> complete;
         readonly Action<BridgeCommandResult> checkpointCompletion;
@@ -97,7 +98,7 @@ namespace Conduit
 
             var settings = new ExecutionSettings(filter)
             {
-                playerHeartbeatTimeout = 30,
+                playerHeartbeatTimeout = PlayerHeartbeatTimeoutSeconds,
                 overloadTestRunSettings = playerRun
                     ? new PlayerTestRunSettings(
                         EditorUserBuildSettings.activeBuildTarget == BuildTarget.StandaloneLinux64
@@ -850,7 +851,7 @@ namespace Conduit
             if (builder.Length == 0)
                 return;
 
-            builder.AppendLine().AppendLine();
+            builder.Append("\n\n");
         }
 
         static string? CleanCommandStackTrace(BridgeCommandKind commandKind, string? stackTrace)

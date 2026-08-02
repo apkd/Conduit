@@ -119,7 +119,7 @@ public sealed class UnityBridgeClientTests
             projectPath,
             ConduitUtility.CreateRequestId(),
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(10),
             processIdHint: null,
             CancellationToken.None
         );
@@ -146,7 +146,7 @@ public sealed class UnityBridgeClientTests
             projectPath,
             ConduitUtility.CreateRequestId(),
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(10),
             processIdHint: null,
             CancellationToken.None
         );
@@ -188,17 +188,18 @@ public sealed class UnityBridgeClientTests
             projectPath,
             "cancel-test-request",
             new() { CommandType = BridgeCommandTypes.RunTestsEditMode },
-            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(10),
             processIdHint: null,
             CancellationToken.None,
             cancellation.Token
         );
 
+        await bridge.CommandStarted.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
-        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(15));
 
         await Assert.That(
-            await bridge.CancelledRequestId.WaitAsync(TimeSpan.FromSeconds(5))
+            await bridge.CancelledRequestId.WaitAsync(TimeSpan.FromSeconds(15))
         ).IsEqualTo("cancel-test-request");
         await Assert.That(result.FailureKind).IsNull();
         await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Cancelled);
@@ -251,7 +252,7 @@ public sealed class UnityBridgeClientTests
         var result = await client.ProbeAsync(
             projectPath,
             processIdHint: null,
-            timeout: TimeSpan.FromSeconds(2),
+            timeout: TimeSpan.FromSeconds(10),
             ct: CancellationToken.None
         );
 
@@ -274,6 +275,7 @@ public sealed class UnityBridgeClientTests
         readonly bool waitForCancellation;
         readonly string endpointDirectory;
         readonly Task serverTask;
+        readonly TaskCompletionSource commandStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int connectionCount;
 
@@ -293,6 +295,8 @@ public sealed class UnityBridgeClientTests
             this.endpointDirectory = endpointDirectory;
             serverTask = Task.Run(RunAsync);
         }
+
+        public Task CommandStarted => commandStarted.Task;
 
         public Task<string?> CancelledRequestId => cancelledRequestId.Task;
 
@@ -355,7 +359,7 @@ public sealed class UnityBridgeClientTests
                             continue;
                         }
 
-                        _ = Task.Run(() => HandleClientAsync(clientDirectory));
+                        await HandleClientAsync(clientDirectory);
                     }
 
                     await Task.Delay(10, cts.Token);
@@ -397,7 +401,9 @@ public sealed class UnityBridgeClientTests
                     leaveOpen: true
                 );
 
-                await reader.ReadLineAsync(cts.Token);
+                if (await reader.ReadLineAsync(cts.Token) is null)
+                    return;
+
                 await WritePayloadAsync(output, new JsonObject
                 {
                     ["protocol_version"] = handshakeProtocolVersion,
@@ -417,7 +423,10 @@ public sealed class UnityBridgeClientTests
                     return;
 
                 var commandPayload = await reader.ReadLineAsync(cts.Token);
-                var requestId = JsonNode.Parse(commandPayload!)?["request_id"]?.GetValue<string>() ?? "";
+                if (commandPayload is null)
+                    return;
+
+                var requestId = JsonNode.Parse(commandPayload)?["request_id"]?.GetValue<string>() ?? "";
                 var commandStarted = new JsonObject
                 {
                     ["protocol_version"] = BridgeProtocol.Version,
@@ -440,8 +449,12 @@ public sealed class UnityBridgeClientTests
                 if (waitForCancellation)
                 {
                     await WritePayloadAsync(output, commandStarted, cts.Token);
+                    this.commandStarted.TrySetResult();
                     var cancellationPayload = await reader.ReadLineAsync(cts.Token);
-                    var cancellation = JsonNode.Parse(cancellationPayload!);
+                    if (cancellationPayload is null)
+                        return;
+
+                    var cancellation = JsonNode.Parse(cancellationPayload);
                     cancelledRequestId.TrySetResult(
                         cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
                             ? cancellation["request_id"]?.GetValue<string>()

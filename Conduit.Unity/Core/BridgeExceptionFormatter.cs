@@ -85,7 +85,7 @@ namespace Conduit
                     }
 
                     if (builder.Length > 0)
-                        builder.AppendLine();
+                        builder.Append('\n');
                     builder.Append(frame.Text);
                     pendingSourceWrapper = frame.IsStateMachine ? frame.Identity : null;
                 }

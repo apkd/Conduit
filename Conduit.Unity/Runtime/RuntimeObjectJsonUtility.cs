@@ -32,30 +32,37 @@ namespace Conduit.Runtime
 
             var body = UnwrapTarget(RuntimeJsonObject.Parse(json), target.GetType());
             var before = ToJson(target);
+            var requestedPaths = new HashSet<string>(StringComparer.Ordinal);
             switch (target)
             {
                 case GameObject gameObject:
-                    OverwriteGameObject(gameObject, body);
+                    OverwriteGameObject(gameObject, body, requestedPaths);
                     break;
                 case Transform transform:
-                    OverwriteTransform(transform, body);
+                    OverwriteTransform(transform, body, requestedPaths);
                     break;
                 case MonoBehaviour:
                 case ScriptableObject:
+                    AddRequestedPaths(body, string.Empty, requestedPaths);
                     JsonUtility.FromJsonOverwrite(body.Source, target);
                     break;
                 default:
-                    OverwriteWritableProperties(target, body);
+                    OverwriteWritableProperties(target, body, requestedPaths);
                     break;
             }
 
-            return FormatChanges(before, ToJson(target));
+            return FormatChanges(before, ToJson(target), requestedPaths);
         }
 
-        static string FormatChanges(string before, string after)
+        static string FormatChanges(string before, string after, HashSet<string> requestedPaths)
         {
             var changed = new List<string>();
             CollectChangedPaths(RuntimeJsonObject.Parse(before), RuntimeJsonObject.Parse(after), string.Empty, changed);
+            changed.RemoveAll(path => !requestedPaths.Any(requested =>
+                string.Equals(path, requested, StringComparison.Ordinal)
+                || path.StartsWith(requested + ".", StringComparison.Ordinal)
+                || requested.StartsWith(path + ".", StringComparison.Ordinal)
+            ));
             if (changed.Count == 0)
                 return "No serialized properties changed.";
 
@@ -134,70 +141,139 @@ namespace Conduit.Runtime
             return WriteObject(values);
         }
 
-        static void OverwriteGameObject(GameObject target, RuntimeJsonObject json)
+        static void OverwriteGameObject(
+            GameObject target,
+            RuntimeJsonObject json,
+            HashSet<string> requestedPaths)
         {
+            var name = target.name;
+            var activeSelf = target.activeSelf;
+            var layer = target.layer;
+            var tag = target.tag;
+            var hideFlags = target.hideFlags;
+            var setName = false;
+            var setActiveSelf = false;
+            var setLayer = false;
+            var setTag = false;
+            var setHideFlags = false;
             foreach (var member in json.Members)
             {
                 switch (member.Name)
                 {
                     case "name":
                     case "m_Name":
-                        target.name = ParseString(member);
+                        name = ParseString(member);
+                        setName = true;
+                        requestedPaths.Add("name");
                         break;
                     case "activeSelf":
                     case "m_IsActive":
-                        target.SetActive(ParseBoolean(member));
+                        activeSelf = ParseBoolean(member);
+                        setActiveSelf = true;
+                        requestedPaths.Add("activeSelf");
                         break;
                     case "layer":
                     case "m_Layer":
-                        target.layer = ParseInt32(member);
+                        layer = ParseInt32(member);
+                        if (layer is < 0 or > 31)
+                            throw new InvalidOperationException("GameObject layer must be between 0 and 31.");
+                        setLayer = true;
+                        requestedPaths.Add("layer");
                         break;
                     case "tag":
                     case "m_TagString":
-                        target.tag = ParseString(member);
+                        tag = ParseString(member);
+                        target.CompareTag(tag); // validates the tag without mutating the object
+                        setTag = true;
+                        requestedPaths.Add("tag");
                         break;
                     case "hideFlags":
                     case "m_ObjectHideFlags":
-                        target.hideFlags = (HideFlags)ParseInt32(member);
+                        hideFlags = (HideFlags)ParseInt32(member);
+                        setHideFlags = true;
+                        requestedPaths.Add("hideFlags");
                         break;
+                    default:
+                        throw UnknownProperty(target, member.Name);
                 }
             }
+
+            if (setName)
+                target.name = name;
+            if (setActiveSelf)
+                target.SetActive(activeSelf);
+            if (setLayer)
+                target.layer = layer;
+            if (setTag)
+                target.tag = tag;
+            if (setHideFlags)
+                target.hideFlags = hideFlags;
         }
 
-        static void OverwriteTransform(Transform target, RuntimeJsonObject json)
+        static void OverwriteTransform(
+            Transform target,
+            RuntimeJsonObject json,
+            HashSet<string> requestedPaths)
         {
+            var localPosition = target.localPosition;
+            var localRotation = target.localRotation;
+            var localScale = target.localScale;
+            var setLocalPosition = false;
+            var setLocalRotation = false;
+            var setLocalScale = false;
             foreach (var member in json.Members)
             {
                 switch (member.Name)
                 {
                     case "localPosition":
                     case "m_LocalPosition":
-                        target.localPosition = ParseStruct<Vector3>(member);
+                        localPosition = ParseStruct(member, localPosition);
+                        setLocalPosition = true;
+                        AddRequestedPaths(member, "localPosition", requestedPaths);
                         break;
                     case "localRotation":
                     case "m_LocalRotation":
-                        target.localRotation = ParseStruct<Quaternion>(member);
+                        localRotation = ParseStruct(member, localRotation);
+                        setLocalRotation = true;
+                        AddRequestedPaths(member, "localRotation", requestedPaths);
                         break;
                     case "localScale":
                     case "m_LocalScale":
-                        target.localScale = ParseStruct<Vector3>(member);
+                        localScale = ParseStruct(member, localScale);
+                        setLocalScale = true;
+                        AddRequestedPaths(member, "localScale", requestedPaths);
                         break;
+                    default:
+                        throw UnknownProperty(target, member.Name);
                 }
             }
+
+            if (setLocalPosition)
+                target.localPosition = localPosition;
+            if (setLocalRotation)
+                target.localRotation = localRotation;
+            if (setLocalScale)
+                target.localScale = localScale;
         }
 
-        static void OverwriteWritableProperties(Object target, RuntimeJsonObject json)
+        static void OverwriteWritableProperties(
+            Object target,
+            RuntimeJsonObject json,
+            HashSet<string> requestedPaths)
         {
             var properties = GetWritableProperties(target.GetType())
                 .ToDictionary(static property => property.Name, StringComparer.OrdinalIgnoreCase);
+            var edits = new List<(PropertyInfo Property, object? Before, object? After)>();
             foreach (var member in json.Members)
             {
                 if (!properties.TryGetValue(member.Name, out var property))
-                    continue;
+                    throw UnknownProperty(target, member.Name);
 
                 try
                 {
-                    property.SetValue(target, ParseValue(member, property.PropertyType));
+                    var before = property.GetValue(target);
+                    edits.Add((property, before, ParseValue(member, property.PropertyType, before)));
+                    AddRequestedPaths(member, property.Name, requestedPaths);
                 }
                 catch (Exception exception)
                 {
@@ -209,7 +285,33 @@ namespace Conduit.Runtime
                     );
                 }
             }
+
+            var applied = 0;
+            try
+            {
+                foreach (var edit in edits)
+                {
+                    edit.Property.SetValue(target, edit.After);
+                    applied++;
+                }
+            }
+            catch (Exception exception)
+            {
+                for (var index = applied - 1; index >= 0; index--)
+                    edits[index].Property.SetValue(target, edits[index].Before);
+
+                var property = edits[Math.Min(applied, edits.Count - 1)].Property;
+                throw new InvalidOperationException(
+                    $"Could not overwrite runtime property '{property.Name}' on '{target.GetType().Name}'.",
+                    exception is TargetInvocationException { InnerException: { } inner }
+                        ? inner
+                        : exception
+                );
+            }
         }
+
+        static InvalidOperationException UnknownProperty(Object target, string propertyName) =>
+            new($"Runtime property '{propertyName}' does not exist or is not writable on '{target.GetType().Name}'.");
 
         static IEnumerable<PropertyInfo> GetWritableProperties(Type type) =>
             type.GetProperties(PublicInstance)
@@ -276,7 +378,7 @@ namespace Conduit.Runtime
             return json is not ("{}" or "");
         }
 
-        static object? ParseValue(RuntimeJsonMember member, Type type)
+        static object? ParseValue(RuntimeJsonMember member, Type type, object? currentValue)
         {
             if (member.IsNull)
                 return type.IsValueType ? Activator.CreateInstance(type) : null;
@@ -309,12 +411,79 @@ namespace Conduit.Runtime
             if (type.IsPrimitive || type == typeof(decimal))
                 return Convert.ChangeType(member.Source, type, CultureInfo.InvariantCulture);
 
-            return JsonUtility.FromJson(member.Source, type);
+            var source = member.Source;
+            if (currentValue != null
+                && source.TrimStart().StartsWith("{", StringComparison.Ordinal)
+                && TrySerializeValue(currentValue, type, out var currentJson)
+                && currentJson.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                source = MergeObjects(currentJson, source);
+
+            return JsonUtility.FromJson(source, type);
         }
 
-        static T ParseStruct<T>(RuntimeJsonMember member) where T : struct =>
-            (T)(JsonUtility.FromJson(member.Source, typeof(T))
+        static T ParseStruct<T>(RuntimeJsonMember member, T currentValue) where T : struct =>
+            (T)(ParseValue(member, typeof(T), currentValue)
                 ?? throw new InvalidOperationException($"JSON property '{member.Name}' was invalid."));
+
+        static string MergeObjects(string currentJson, string patchJson)
+        {
+            var current = RuntimeJsonObject.Parse(currentJson);
+            var patch = RuntimeJsonObject.Parse(patchJson);
+            var values = current.Members
+                .Select(static member => (member.Name, Json: member.Source))
+                .ToList();
+            var indexes = values
+                .Select(static (value, index) => (value.Name, Index: index))
+                .ToDictionary(static value => value.Name, static value => value.Index, StringComparer.Ordinal);
+
+            foreach (var member in patch.Members)
+            {
+                var source = member.Source;
+                if (indexes.TryGetValue(member.Name, out var index))
+                {
+                    var existing = values[index].Json;
+                    if (existing.TrimStart().StartsWith("{", StringComparison.Ordinal)
+                        && source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                        source = MergeObjects(existing, source);
+
+                    values[index] = (member.Name, source);
+                }
+                else
+                {
+                    indexes.Add(member.Name, values.Count);
+                    values.Add((member.Name, source));
+                }
+            }
+
+            return WriteObject(values);
+        }
+
+        static void AddRequestedPaths(
+            RuntimeJsonObject json,
+            string prefix,
+            HashSet<string> requestedPaths)
+        {
+            foreach (var member in json.Members)
+                AddRequestedPaths(member, prefix.Length == 0 ? member.Name : prefix + "." + member.Name, requestedPaths);
+        }
+
+        static void AddRequestedPaths(
+            RuntimeJsonMember member,
+            string path,
+            HashSet<string> requestedPaths)
+        {
+            if (member.Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                var nested = RuntimeJsonObject.Parse(member.Source);
+                if (nested.Members.Count > 0)
+                {
+                    AddRequestedPaths(nested, path, requestedPaths);
+                    return;
+                }
+            }
+
+            requestedPaths.Add(path);
+        }
 
         static string ParseString(RuntimeJsonMember member) =>
             RuntimeJsonObject.ParseString(member.Source);

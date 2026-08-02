@@ -27,7 +27,7 @@ namespace Conduit
                 foreach (var entry in entries)
                 {
                     if (builder.Length > 0)
-                        builder.AppendLine().AppendLine();
+                        builder.Append("\n\n");
 
                     BridgeLogFormatter.Append(
                         builder,
@@ -172,7 +172,7 @@ namespace Conduit
         static void AppendSeparator(StringBuilder builder)
         {
             if (builder.Length > 0)
-                builder.AppendLine().AppendLine();
+                builder.Append("\n\n");
         }
     }
 }

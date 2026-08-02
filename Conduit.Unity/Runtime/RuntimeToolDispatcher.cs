@@ -197,7 +197,7 @@ namespace Conduit.Runtime
             if (matches.Count == 0)
                 return $"No matches for '{query?.Trim() ?? string.Empty}'.";
 
-            return ConduitRuntimeSearch.FormatMatches(matches.Take(25).ToArray(), includeHint: false);
+            return ConduitRuntimeSearch.FormatMatches(matches, includeHint: false);
         }
 
         static string Show(string? query)
@@ -216,6 +216,25 @@ namespace Conduit.Runtime
                     .AppendLine(ConduitRuntimeSearch.GetHierarchyPath(gameObject));
                 AppendHierarchy(builder, gameObject.transform, string.Empty);
             }
+
+            if (target is GameObject targetGameObject)
+            {
+                builder.AppendLine("Components:");
+                foreach (var component in targetGameObject.GetComponents<Component>())
+                {
+                    builder.Append("- ");
+                    if (component == null)
+                        builder.AppendLine("Missing Component");
+                    else
+                        builder.Append(component.GetType().FullName)
+                            .Append(" [")
+                            .Append(BridgeObjectId.Format(component))
+                            .AppendLine("]");
+                }
+            }
+
+            builder.AppendLine("Properties:")
+                .AppendLine(RuntimeObjectJsonUtility.ToJson(target));
 
             AppendFields(builder, target);
             return builder.ToString().TrimEnd();
@@ -410,7 +429,6 @@ namespace Conduit.Runtime
 
         static void AppendFields(StringBuilder builder, Object target)
         {
-            builder.AppendLine("Fields:");
             var count = 0;
             for (var type = target.GetType(); type != null && type != typeof(Object); type = type.BaseType)
                 foreach (var field in type.GetFields(
@@ -424,6 +442,9 @@ namespace Conduit.Runtime
                         continue;
                     if (count++ >= 100)
                         return;
+
+                    if (count == 1)
+                        builder.AppendLine("Fields:");
 
                     object? value;
                     try

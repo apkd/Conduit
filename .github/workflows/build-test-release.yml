@@ -575,7 +575,8 @@ jobs:
           "UNITY_ROOT=$env:RUNNER_TEMP\Unity" >> $env:GITHUB_ENV
           "UNITY_INSTALLER=$env:RUNNER_TEMP\UnitySetup64.exe" >> $env:GITHUB_ENV
           "PROJECT=$env:RUNNER_TEMP\ConduitEditorCI" >> $env:GITHUB_ENV
-          "TEST_RESULTS=$env:RUNNER_TEMP\test-results\Edit mode tests.xml" >> $env:GITHUB_ENV
+          "TEST_RESULTS=$env:GITHUB_WORKSPACE\test-results\unity-editmode-windows.xml" >> $env:GITHUB_ENV
+          "CONDUIT_REPO_ROOT=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
           "CONDUIT_SERVER_EXECUTABLE=$env:RUNNER_TEMP\conduit-server\conduit-win-x64.exe" >> $env:GITHUB_ENV
 
       - uses: actions/cache@v5
@@ -691,7 +692,7 @@ jobs:
         with:
           name: Unity EditMode Test Results (Windows)
           reporter: dotnet-nunit
-          path: "${{ runner.temp }}/test-results/Edit mode tests.xml"
+          path: test-results/unity-editmode-windows.xml
           fail-on-error: false
 
       - name: Validate required Windows coverage

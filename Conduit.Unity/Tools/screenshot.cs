@@ -311,6 +311,7 @@ namespace Conduit
                 camera.allowHDR = false;
                 camera.allowMSAA = true;
                 camera.targetTexture = renderTexture;
+                camera.overrideSceneCullingMask = EditorSceneManager.GetSceneCullingMask(scene);
 
                 if (topDown)
                     ConfigureTopDownCamera(camera, bounds, (float)width / height);
@@ -483,7 +484,9 @@ namespace Conduit
             window.Repaint();
             await WaitForNextEditorUpdateAsync();
             if (EditorWindow.focusedWindow != window)
-                throw new InvalidOperationException($"Editor window '{ConduitSearchUtility.GetEditorWindowDisplayName(window)}' could not be focused for capture.");
+                throw new InvalidOperationException(
+                    $"Editor window '{ConduitSearchUtility.GetEditorWindowDisplayName(window)}' resolved, but Unity did not grant it focus; no reliable image is available."
+                );
 
             var renderSize = GetWindowRenderSize(window.position);
             var renderTexture = new RenderTexture(
@@ -693,6 +696,9 @@ namespace Conduit
 
         static bool ShouldFlipGameViewTexture()
         {
+            if (SystemInfo.graphicsUVStartsAtTop)
+                return true;
+
             // hdrp's final game view blit stores an inverted target for the editor presentation path
             for (var type = GraphicsSettings.currentRenderPipeline?.GetType(); type != null; type = type.BaseType)
                 if (string.Equals(type.FullName, HdrpAssetTypeName, StringComparison.Ordinal))

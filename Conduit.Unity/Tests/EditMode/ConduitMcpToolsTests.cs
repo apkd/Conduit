@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -135,6 +136,58 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(output, Does.Contain("Multiple objects match your query."));
         Assert.That(output, Does.Contain($"Rerun with {objectId[..prefixLength]}<number> to select a specific match."));
+    }
+
+    [Test]
+    public void SearchReportsWhenResultsAreTruncated()
+    {
+        var name = "Conduit Search Truncation " + Guid.NewGuid().ToString("N");
+        var objects = new List<GameObject>();
+        try
+        {
+            for (var index = 0; index < 30; index++)
+                objects.Add(new GameObject(name));
+
+            var output = ConduitSearchUtility.Search("/" + name);
+
+            Assert.That(output, Does.Contain("Showing the first 25 results; additional matches were omitted."));
+        }
+        finally
+        {
+            foreach (var gameObject in objects)
+                UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void PrefabShowOmitsTemporaryObjectIds()
+    {
+        var output = show.Show(TestAssetsRoot + "/MissingScriptFixture.prefab");
+
+        Assert.That(output, Does.Contain("Object IDs are omitted because prefab contents are temporary."));
+        Assert.That(output, Does.Not.Contain("eid:"));
+        Assert.That(output, Does.Not.Contain("id:"));
+    }
+
+    [Test]
+    public void SceneObjectOverwriteIsRejectedBeforeMutationInPlayMode()
+    {
+        var gameObject = new GameObject("Conduit Play Mode Overwrite Guard");
+        try
+        {
+            Assert.That(
+                ConduitObjectJsonUtility.ShouldRejectSceneObjectOverwrite(true, gameObject),
+                Is.True
+            );
+            Assert.That(
+                ConduitObjectJsonUtility.ShouldRejectSceneObjectOverwrite(false, gameObject),
+                Is.False
+            );
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
     }
 
     [Test]
@@ -327,6 +380,33 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public async Task ProfilerCapture_RestrictsHistoryToRequestedFrameCount()
+    {
+        var result = await profiler.RecordAsync(
+            new[]
+            {
+                "action=capture",
+                "target=edit_mode",
+                "frames=1",
+                "delay_seconds=0",
+            }
+        );
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(result.return_value, Is.EqualTo("Profile captured!\nFrame count: 1"));
+        Assert.That(profiler.GetAvailableFrameCountForTest(), Is.EqualTo(1));
+    }
+
+    [Test]
+    public void ProfilerCapturePath_RejectsRelativeParentTraversal()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            profiler.ResolveCapturePathForTest("../outside.data", allocateDefault: false));
+
+        Assert.That(exception!.Message, Does.Contain("contains parent traversal"));
+    }
+
+    [Test]
     public void ProfilerFrameRange_UsesAvailableFrameOrdinalsAndClampsLargeRanges()
     {
         var frames = profiler.ResolveFrameRangeForTest(10, "0..^1", out var warnings);
@@ -340,6 +420,15 @@ public sealed class ConduitMcpToolsTests
         Assert.That(clamped[0], Is.EqualTo(1500));
         Assert.That(clamped[^1], Is.EqualTo(3499));
         Assert.That(warnings, Does.Contain("frame_range_clamped_to_latest_2000"));
+    }
+
+    [Test]
+    public void ProfilerFrameRange_RejectsMalformedEndpoints()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            profiler.ResolveFrameRangeForTest(10, "banana", out _));
+        Assert.Throws<InvalidOperationException>(() =>
+            profiler.ResolveFrameRangeForTest(10, "nonsense..garbage", out _));
     }
 
     [Test]
@@ -870,6 +959,26 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmNoMatch_ReportsOmittedCandidates()
+    {
+        var targets = Enumerable.Range(0, 12)
+            .Select(index => new BurstTarget($"Target {index}", "Execute", "", ""))
+            .ToArray();
+        var match = view_burst_asm.MatchTarget(string.Empty, targets);
+
+        var diagnostic = view_burst_asm.NoMatchDiagnostic(
+            string.Empty,
+            targets,
+            match.CandidateIndexes,
+            match.CandidateCount
+        );
+
+        Assert.That(match.CandidateCount, Is.EqualTo(12));
+        Assert.That(match.CandidateIndexes, Has.Length.EqualTo(10));
+        Assert.That(diagnostic, Does.Contain("2 additional candidates were omitted."));
+    }
+
+    [Test]
     public void ViewBurstAsmOptions_UseInspectorDefaults()
     {
         var fixture = new BurstInspectorOptionsFixture();
@@ -1057,7 +1166,7 @@ public sealed class ConduitMcpToolsTests
         Assert.That(output, Does.Contain("- Vector width hints: xmm=1, ymm=2, zmm=0, neon/simd=0, sve=0"));
         Assert.That(output, Does.Contain("call=1"));
         Assert.That(output, Does.Contain("vaddps=1"));
-        Assert.That(output, Does.Not.Contain("Analyzed:"));
+        Assert.That(output, Does.Contain("- Analyzed function: `JobStruct<MoveJob>.Execute(ref MoveJob data) -> void`"));
         Assert.That(output, Does.Not.Contain("Top source lines:"));
     }
 
@@ -2124,10 +2233,34 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void Search_TestQuery_PlayModeFilterListsRuntimeBridgeTests()
     {
+        if (Type.GetType("RuntimeBridgeTests, Conduit.Tests.PlayMode") == null)
+            Assert.Ignore("The opt-in runtime test assembly is not enabled in this project.");
+
         var result = ConduitSearchUtility.Search("t:test playmode");
 
         Assert.That(result, Does.Contain("RuntimeBridgeTests.ArtifactTransferRejectsModifiedChunks | PlayMode"));
         Assert.That(result, Does.Not.Contain(" | EditMode"));
+    }
+
+    [Test]
+    public void Search_TestDiscoveryAcceptsProjectAssembliesOutsideTestNamedFolders()
+    {
+        Assert.That(
+            ConduitSearchUtility.IsDiscoverableProjectSourceFile(
+                "Assets/Features/PlayerProbe/LunaConduitPlayerProbe.cs"
+            ),
+            Is.True
+        );
+        Assert.That(
+            ConduitSearchUtility.IsDiscoverableProjectSourceFile(
+                @"Assets\Features\PlayerProbe\LunaConduitPlayerProbe.cs"
+            ),
+            Is.True
+        );
+        Assert.That(
+            ConduitSearchUtility.IsDiscoverableProjectSourceFile("Library/Generated/Probe.cs"),
+            Is.False
+        );
     }
 
     [Test]
@@ -2236,6 +2369,16 @@ public sealed class ConduitMcpToolsTests
         Assert.That(SceneManager.GetActiveScene().isDirty, Is.False);
         Assert.That(result, Does.Contain("Discarded scene changes:"));
         Assert.That(result, Does.Contain(SceneAsset));
+    }
+
+    [Test]
+    public void DiscardScenes_SpecifiedSoleActiveSceneRetainsItsPathInTheResult()
+    {
+        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+
+        var result = ConduitSceneCommandUtility.DiscardScenes(SceneAsset);
+
+        Assert.That(result, Is.EqualTo($"Discarded scene changes: {SceneAsset}"));
     }
 
     [Test]
@@ -2903,7 +3046,12 @@ public sealed class ConduitMcpToolsTests
     public void BridgeArtifact_VerifiesProjectRelativeFilesAndRejectsTraversal()
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes("compiled");
-        var path = Path.Combine(ConduitProjectIdentity.GetProjectPath(), "Temp", "ConduitTests", "artifact.dll");
+        var path = Path.Combine(
+            ConduitAssetPathUtility.GetProjectRootPath(),
+            "Temp",
+            "ConduitTests",
+            "artifact.dll"
+        );
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         File.WriteAllBytes(path, bytes);
         try
@@ -3275,6 +3423,29 @@ public sealed class ConduitMcpToolsTests
         Assert.That(run_tests.BuildTestNameRegexPattern("Resolve_*"), Is.EqualTo("^Resolve_.*$"));
         Assert.That(run_tests.BuildTestNameRegexPattern("Foo?Bar"), Is.EqualTo("^Foo.Bar$"));
     }
+
+    [Test]
+    public void TestCompletionSummary_ReportsMixedPassAndSkipCountsWithTheSkipReason()
+    {
+        var summary = run_tests.BuildCompletionCategorySummary(
+            passCount: 8,
+            failCount: 0,
+            skipCount: 3,
+            inconclusiveCount: 0,
+            skippedMessage: "OneTimeSetUp: bridge client attached."
+        );
+
+        Assert.That(
+            summary,
+            Is.EqualTo(
+                "Passed 8 tests. Skipped 3 tests.\n\nOneTimeSetUp: bridge client attached."
+            )
+        );
+    }
+
+    [Test]
+    public void PlayerTestHeartbeatMatchesTheDocumentedCommandWindow()
+        => Assert.That(UnityTestRunMonitor.PlayerHeartbeatTimeoutSeconds, Is.EqualTo(30 * 60));
 
     [Test]
     public void FilteredTestDiagnostic_IncludesStartedTests()

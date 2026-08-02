@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -29,6 +30,13 @@ namespace Conduit
             @"^(?:Worker|Job Worker) (?<index>\d+)$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant
         );
+        static readonly MethodInfo? setMaxFrameHistoryLengthMethod = typeof(ProfilerDriver).GetMethod(
+            "SetMaxFrameHistoryLength",
+            BindingFlags.Static | BindingFlags.NonPublic
+        );
+        static readonly PropertyInfo? configuredFrameHistoryLengthProperty = Type
+            .GetType("UnityEditor.Profiling.ProfilerUserSettings,UnityEditor.CoreModule")
+            ?.GetProperty("frameCount", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
         public static string BuildStatusLine()
         {
@@ -216,38 +224,75 @@ namespace Conduit
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
 
             var previousProfileEditor = ProfilerDriver.profileEditor;
+            var previousFrameHistoryLength = GetConfiguredFrameHistoryLength();
+            var outputPath = string.IsNullOrWhiteSpace(fileName)
+                ? (CapturePath?)null
+                : ResolveCapturePath(fileName, allocateDefault: false);
+            var boundedCapturePath = outputPath?.AbsolutePath
+                ?? Path.Combine(
+                    ConduitAssetPathUtility.GetProjectRootPath(),
+                    CaptureDirectory,
+                    $".capture_{Guid.NewGuid():N}.data"
+                );
+            var capturedFrames = 0;
             try
             {
-                ProfilerDriver.enabled = false;
-                ProfilerDriver.profileEditor = target == "edit_mode";
-                ProfilerDriver.ClearAllFrames();
-                ProfilerDriver.enabled = true;
+                try
+                {
+                    ProfilerDriver.enabled = false;
+                    ProfilerDriver.profileEditor = target == "edit_mode";
+                    SetMaxFrameHistoryLength(frames);
+                    ProfilerDriver.ClearAllFrames();
+                    ProfilerDriver.enabled = true;
 
-                var deadlineUtc = DateTime.UtcNow + BuildCaptureTimeout(frames);
-                while (CountAvailableFrames() < frames && DateTime.UtcNow < deadlineUtc)
-                    await Task.Delay(50);
+                    var deadlineUtc = DateTime.UtcNow + BuildCaptureTimeout(frames);
+                    while (CountAvailableFrames() < frames && DateTime.UtcNow < deadlineUtc)
+                        await Task.Delay(50);
+
+                    ProfilerDriver.enabled = false;
+                    capturedFrames = CountAvailableFrames();
+                    if (capturedFrames >= frames)
+                        SaveProfile(boundedCapturePath);
+                }
+                finally
+                {
+                    ProfilerDriver.enabled = false;
+                    ProfilerDriver.profileEditor = previousProfileEditor;
+                    SetMaxFrameHistoryLength(previousFrameHistoryLength);
+                }
+
+                if (capturedFrames < frames)
+                    return Failure("Unable to capture profile.", $"Captured {capturedFrames} of {frames} requested frames before the internal capture deadline.", null);
+
+                if (!ProfilerDriver.LoadProfile(boundedCapturePath, false))
+                    return Failure("Unable to capture profile.", "Unity could not restore the bounded profiler history.", outputPath?.DisplayPath);
+
+                capturedFrames = CountAvailableFrames();
+                if (outputPath is { } path)
+                {
+                    return Success(
+                        $"Profile captured and saved!\nFrame count: {capturedFrames.ToString(CultureInfo.InvariantCulture)}\nFile: {path.DisplayPath}"
+                    );
+                }
+
+                return Success(
+                    $"Profile captured!\nFrame count: {capturedFrames.ToString(CultureInfo.InvariantCulture)}"
+                );
             }
             finally
             {
-                ProfilerDriver.enabled = false;
-                ProfilerDriver.profileEditor = previousProfileEditor;
+                if (outputPath is null && File.Exists(boundedCapturePath))
+                    File.Delete(boundedCapturePath);
             }
-
-            var capturedFrames = CountAvailableFrames();
-            if (capturedFrames < frames)
-                return Failure("Unable to capture profile.", $"Captured {capturedFrames} of {frames} requested frames before the internal capture deadline.", null);
-
-            if (!string.IsNullOrWhiteSpace(fileName))
-            {
-                var path = ResolveCapturePath(fileName, allocateDefault: false);
-                SaveProfile(path.AbsolutePath);
-                return Success(
-                    $"Profile captured and saved!\nFrame count: {capturedFrames.ToString(CultureInfo.InvariantCulture)}\nFile: {path.DisplayPath}"
-                );
-            }
-
-            return Success($"Profile captured!\nFrame count: {capturedFrames.ToString(CultureInfo.InvariantCulture)}");
         }
+
+        static int GetConfiguredFrameHistoryLength()
+            => configuredFrameHistoryLengthProperty?.GetValue(null) is int frameCount
+                ? frameCount
+                : MaxScanFrameCount;
+
+        static void SetMaxFrameHistoryLength(int frameCount)
+            => setMaxFrameHistoryLengthMethod?.Invoke(null, new object[] { frameCount });
 
         static BridgeCommandResult Save(Dictionary<string, string> options)
         {
@@ -847,11 +892,30 @@ namespace Conduit
             endpoint = endpoint.Trim();
             if (endpoint.StartsWith("^", StringComparison.Ordinal))
             {
-                var distance = ParseInt(endpoint[1..], 1);
+                if (!int.TryParse(
+                        endpoint.AsSpan(1),
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out var distance
+                    ))
+                    throw new InvalidOperationException(
+                        $"Frame selector '{endpoint}' did not match an available profiler frame."
+                    );
+
                 return frameCount - distance;
             }
 
-            return ParseInt(endpoint, 0);
+            if (int.TryParse(
+                    endpoint,
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var ordinal
+                ))
+                return ordinal;
+
+            throw new InvalidOperationException(
+                $"Frame selector '{endpoint}' did not match an available profiler frame."
+            );
         }
 
         static bool TryGetSelectedFrame(List<int> frames, out int selectedFrame)
@@ -983,6 +1047,12 @@ namespace Conduit
 
             if (Path.GetExtension(value).Length == 0)
                 value += ".data";
+
+            if (!Path.IsPathRooted(value)
+                && Array.IndexOf(value.Split('/', '\\'), "..") >= 0)
+                throw new InvalidOperationException(
+                    $"Relative profiler capture path '{value}' contains parent traversal."
+                );
 
             string absolutePath;
             if (Path.IsPathRooted(value))
@@ -1488,6 +1558,8 @@ namespace Conduit
 
         internal static CapturePath ResolveCapturePathForTest(string? fileName, bool allocateDefault)
             => ResolveCapturePath(fileName, allocateDefault);
+
+        internal static int GetAvailableFrameCountForTest() => CountAvailableFrames();
 
         internal static List<int> ResolveFrameRangeForTest(int frameCount, string frameRange, out List<string> warnings)
         {

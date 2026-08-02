@@ -6,6 +6,7 @@ namespace Conduit;
 public sealed class UnityPlayerDiscovery
 {
     static readonly TimeSpan leaseLifetime = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan ResolutionRetryDelay = TimeSpan.FromMilliseconds(25);
     readonly TimeProvider timeProvider;
     readonly Func<string[]> getDiscoveryRoots;
 
@@ -77,6 +78,18 @@ public sealed class UnityPlayerDiscovery
             1 => PlayerEndpointResolution.Found(matches[0]),
             _ => PlayerEndpointResolution.Ambiguous(selector, matches),
         };
+    }
+
+    internal async Task<PlayerEndpointResolution> ResolveAsync(
+        PlayerSelector selector,
+        CancellationToken ct)
+    {
+        var resolution = Resolve(selector);
+        if (resolution.Endpoint is not null || resolution.IsAmbiguous)
+            return resolution;
+
+        await Task.Delay(ResolutionRetryDelay, timeProvider, ct);
+        return Resolve(selector);
     }
 
     internal async Task<BridgeEndpointDescriptor?> WaitForHandoffAsync(

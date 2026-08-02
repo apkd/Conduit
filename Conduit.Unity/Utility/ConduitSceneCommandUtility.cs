@@ -53,8 +53,9 @@ namespace Conduit
             if (!scene.isDirty)
                 return $"Scene already clean: {scene.path}";
 
+            var scenePath = scene.path;
             DiscardSingleScene(scene);
-            return $"Discarded scene changes: {scene.path}";
+            return $"Discarded scene changes: {scenePath}";
         }
 
         public static string BuildDirtySceneDiagnostic(string commandType)

@@ -101,6 +101,16 @@ public sealed class UnityProjectOperations(
     async Task<string> StatusPlayerAsync(PlayerSelector selector, CT ct)
     {
         var target = selector.ToString();
+        var resolution = await playerDiscovery.ResolveAsync(selector, ct);
+        if (resolution.Endpoint is null)
+            return ToolResponseFormatter.Format(
+                new()
+                {
+                    Outcome = ToolOutcome.NotConnected,
+                    Diagnostic = resolution.Diagnostic,
+                }
+            );
+
         var execution = await bridgeClient.ExecuteCommandAsync(
             target,
             ConduitUtility.CreateRequestId(),
@@ -346,7 +356,7 @@ public sealed class UnityProjectOperations(
             result = await EnqueueAsync(target, command, ct);
         else
         {
-            var resolution = playerDiscovery.Resolve(selector);
+            var resolution = await playerDiscovery.ResolveAsync(selector, ct);
             if (resolution.Endpoint is not { } endpoint)
                 return new()
                 {
@@ -590,7 +600,7 @@ public sealed class UnityProjectOperations(
         var selector = PlayerSelector.TryParse(playerTarget, out var parsed)
             ? parsed
             : default;
-        var resolution = playerDiscovery.Resolve(selector);
+        var resolution = await playerDiscovery.ResolveAsync(selector, ct);
         if (resolution.Endpoint is not { } endpoint)
             return ToolExecutionResult.NotConnected(
                 playerTarget,
@@ -649,6 +659,17 @@ public sealed class UnityProjectOperations(
         BridgeCommand command,
         CT ct)
     {
+        var selector = PlayerSelector.TryParse(playerTarget, out var parsedSelector)
+            ? parsedSelector
+            : throw new InvalidOperationException($"Player target '{playerTarget}' is invalid.");
+        var resolution = await playerDiscovery.ResolveAsync(selector, ct);
+        if (resolution.Endpoint is null)
+            return new()
+            {
+                Outcome = ToolOutcome.NotConnected,
+                Diagnostic = resolution.Diagnostic,
+            };
+
         var session = playerSessions.GetOrAdd(playerTarget, static target => new(target));
         var queue = queues.GetOrAdd(
             playerTarget,

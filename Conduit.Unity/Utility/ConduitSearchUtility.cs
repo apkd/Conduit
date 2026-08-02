@@ -2,7 +2,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using System.Text;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEditor.Search;
@@ -38,7 +40,7 @@ namespace Conduit
             "UnityEngine.TestTools.UnityTestAttribute",
         };
 
-        public static List<ResolvedObjectMatch> Resolve(string query, int maxResults = MaxResults)
+        public static List<ResolvedObjectMatch> Resolve(string query, int maxResults = MaxResults + 1)
             => Resolve(query, maxResults, includeAllSearchResults: false);
 
         internal static List<ResolvedObjectMatch> ResolveAll(string query)
@@ -102,7 +104,7 @@ namespace Conduit
             if (TryParseTestSearch(normalizedQuery, out var testSearch))
                 return SearchTests(normalizedQuery, testSearch);
 
-            var matches = Resolve(normalizedQuery, MaxResults);
+            var matches = Resolve(normalizedQuery, MaxResults + 1);
             return matches.Count == 0
                 ? FormatNoMatches(normalizedQuery)
                 : FormatMatches(matches, includeHint: false);
@@ -141,8 +143,13 @@ namespace Conduit
                 return FormatEditorWindowMatches(matches, includeHint);
 
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            foreach (var match in matches)
+            for (var index = 0; index < Math.Min(matches.Count, MaxResults); index++)
+            {
+                var match = matches[index];
                 builder.AppendLine($"- {match.Name} | {match.Location} | {ConduitUtility.FormatObjectId(match.ObjectId)}");
+            }
+
+            AppendTruncationNotice(builder, matches.Count);
 
 #if UNITY_6000_2_OR_NEWER
             const string objectIdExample = "eid:<number>";
@@ -459,54 +466,25 @@ namespace Conduit
         static bool TryGetTestAssemblyMode(UnityEditor.Compilation.Assembly assembly, out TestSearchMode mode)
         {
             mode = default;
-            var hasProjectTestSource = false;
-            var hasEditModeSource = false;
-            var hasPlayModeSource = false;
-
-            foreach (var sourceFile in assembly.sourceFiles)
-            {
-                if (!IsProjectTestSourceFile(sourceFile))
-                    continue;
-
-                hasProjectTestSource = true;
-                if (ContainsIgnoreCase(sourceFile, "/Tests/EditMode/"))
-                    hasEditModeSource = true;
-
-                if (ContainsIgnoreCase(sourceFile, "/Tests/PlayMode/"))
-                    hasPlayModeSource = true;
-            }
-
-            if (!hasProjectTestSource)
+            if (!assembly.assemblyReferences.Any(static reference =>
+                    reference.name is "UnityEngine.TestRunner" or "UnityEditor.TestRunner"
+                )
+                || !assembly.sourceFiles.Any(IsDiscoverableProjectSourceFile))
                 return false;
 
-            if (!hasEditModeSource && !hasPlayModeSource)
-            {
-                if (ContainsIgnoreCase(assembly.name, "EditMode"))
-                    hasEditModeSource = true;
-                else if (ContainsIgnoreCase(assembly.name, "PlayMode"))
-                    hasPlayModeSource = true;
-            }
-
-            mode = (hasEditModeSource, hasPlayModeSource) switch
-            {
-                (true, false) => TestSearchMode.EditMode,
-                (false, true) => TestSearchMode.PlayMode,
-                _             => TestSearchMode.Any,
-            };
+            mode = (assembly.flags & UnityEditor.Compilation.AssemblyFlags.EditorAssembly) != 0
+                ? TestSearchMode.EditMode
+                : TestSearchMode.PlayMode;
             return true;
         }
 
-        static bool IsProjectTestSourceFile(string sourceFile)
+        internal static bool IsDiscoverableProjectSourceFile(string sourceFile)
         {
+            sourceFile = sourceFile.Replace('\\', '/');
             if (sourceFile.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                return ContainsIgnoreCase(sourceFile, "/Tests/")
-                       || ContainsIgnoreCase(sourceFile, "/Test/");
+                return true;
 
             if (!sourceFile.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (!ContainsIgnoreCase(sourceFile, "/Tests/")
-                && !ContainsIgnoreCase(sourceFile, "/Test/"))
                 return false;
 
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssetPath(sourceFile);
@@ -673,12 +651,17 @@ namespace Conduit
         static string FormatEditorWindowMatches(IReadOnlyList<ResolvedObjectMatch> matches, bool includeHint)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            foreach (var match in matches)
+            for (var index = 0; index < Math.Min(matches.Count, MaxResults); index++)
+            {
+                var match = matches[index];
                 builder.AppendLine(
                     match.ObjectId != 0
                         ? $"- {match.Name} | {match.Location} | {ConduitUtility.FormatObjectId(match.ObjectId)}"
                         : $"- {match.Name} | {match.Location}"
                 );
+            }
+
+            AppendTruncationNotice(builder, matches.Count);
 
             if (includeHint && matches.Count > 1)
             {
@@ -688,6 +671,16 @@ namespace Conduit
             }
 
             return builder.TrimEnd().ToString();
+        }
+
+        static void AppendTruncationNotice(StringBuilder builder, int resultCount)
+        {
+            if (resultCount <= MaxResults)
+                return;
+
+            builder.AppendLine();
+            builder.AppendLine($"Showing the first {MaxResults} results; additional matches were omitted.");
+            builder.AppendLine("More specific queries return a narrower result set.");
         }
 
         static void CollectImportableAssetPaths(ResolvedObjectMatch match, HashSet<string> assetPaths)

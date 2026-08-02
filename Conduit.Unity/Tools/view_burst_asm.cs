@@ -43,8 +43,8 @@ namespace Conduit
                 return match.Kind switch
                 {
                     BurstAsmTargetMatchKind.Matched   => Compile(targets[match.SelectedIndex]),
-                    BurstAsmTargetMatchKind.Ambiguous => Ambiguous(targetName, targets, match.CandidateIndexes),
-                    _                                 => NoMatch(targetName, targets, match.CandidateIndexes),
+                    BurstAsmTargetMatchKind.Ambiguous => Ambiguous(targetName, targets, match),
+                    _                                 => NoMatch(targetName, targets, match),
                 };
             }
             catch (Exception exception)
@@ -240,7 +240,7 @@ namespace Conduit
         {
             var text = query?.Trim() ?? string.Empty;
             if (text.Length == 0)
-                return BurstAsmTargetMatch.None(FirstIndexes(targets));
+                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Count);
 
             var matches = Find(targets, target => EqualsAny(target, text));
             if (matches.Count == 1)
@@ -256,7 +256,7 @@ namespace Conduit
 
             var scored = Score(text, targets);
             if (scored.Count == 0)
-                return BurstAsmTargetMatch.None(FirstIndexes(targets));
+                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Count);
 
             scored.Sort((left, right) =>
             {
@@ -273,7 +273,7 @@ namespace Conduit
             var minimumScore = scored[0].Score - ClearMatchGap + 1;
             foreach (var candidate in scored)
             {
-                if (candidate.Score < minimumScore || candidates.Count == MaxCandidates)
+                if (candidate.Score < minimumScore)
                     break;
 
                 candidates.Add(candidate.Index);
@@ -362,7 +362,9 @@ namespace Conduit
                 return AnalyzeLines(lines, 0, lines.Length);
 
             var selected = SelectMainBlock(target, blocks);
-            return AnalyzeLines(lines, selected.Start, selected.End);
+            var stats = AnalyzeLines(lines, selected.Start, selected.End);
+            stats.AnalyzedFunction = selected.Label.Trim('"');
+            return stats;
         }
 
         static List<BurstAsmFunctionBlock> GetFunctionBlocks(string[] lines)
@@ -732,6 +734,8 @@ namespace Conduit
             var branches = stats.ConditionalBranchCount + stats.UnconditionalBranchCount;
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.Append($"- Instructions: {stats.InstructionCount}\n");
+            if (stats.AnalyzedFunction.Length > 0)
+                builder.Append($"- Analyzed function: `{stats.AnalyzedFunction}`\n");
             builder.Append($"- Vector instructions: {stats.VectorInstructionCount} ({Percent(stats.VectorInstructionCount, stats.InstructionCount)})\n");
             builder.Append($"- Control flow: branches={branches}, conditional={stats.ConditionalBranchCount}, unconditional={stats.UnconditionalBranchCount}, calls={stats.CallCount}, returns={stats.ReturnCount}\n");
             builder.Append($"- Memory operands: {stats.MemoryOperandInstructionCount} ({Percent(stats.MemoryOperandInstructionCount, stats.InstructionCount)}); stack/frame operands: {stats.StackFrameOperandInstructionCount}\n");
@@ -1539,31 +1543,50 @@ namespace Conduit
                 diagnostic = diagnostic,
             };
 
-        static BridgeCommandResult Ambiguous(string query, IReadOnlyList<BurstTarget> targets, int[] indexes) =>
+        static BridgeCommandResult Ambiguous(
+            string query,
+            IReadOnlyList<BurstTarget> targets,
+            BurstAsmTargetMatch match) =>
             new()
             {
                 outcome = ToolOutcome.AmbiguousTarget,
                 diagnostic = Candidates(
-                    $"Multiple Burst compile targets match '{query?.Trim() ?? string.Empty}'. Rerun with a more specific target name.",
+                    $"Multiple Burst compile targets match '{query?.Trim() ?? string.Empty}'.",
                     targets,
-                    indexes
+                    match.CandidateIndexes,
+                    match.CandidateCount
                 ),
             };
 
-        static BridgeCommandResult NoMatch(string query, IReadOnlyList<BurstTarget> targets, int[] indexes) =>
-            Error(NoMatchDiagnostic(query, targets, indexes));
+        static BridgeCommandResult NoMatch(
+            string query,
+            IReadOnlyList<BurstTarget> targets,
+            BurstAsmTargetMatch match) =>
+            Error(NoMatchDiagnostic(query, targets, match.CandidateIndexes, match.CandidateCount));
 
         internal static string NoMatchDiagnostic(string query, IReadOnlyList<BurstTarget> targets, int[] indexes)
+            => NoMatchDiagnostic(query, targets, indexes, indexes.Length);
+
+        internal static string NoMatchDiagnostic(
+            string query,
+            IReadOnlyList<BurstTarget> targets,
+            int[] indexes,
+            int candidateCount)
         {
             var trimmed = query?.Trim() ?? string.Empty;
             return Candidates(
                 trimmed.Length == 0 ? string.Empty : $"No Burst compile target matched '{trimmed}'.",
                 targets,
-                indexes
+                indexes,
+                candidateCount
             );
         }
 
-        static string Candidates(string header, IReadOnlyList<BurstTarget> targets, int[] indexes)
+        static string Candidates(
+            string header,
+            IReadOnlyList<BurstTarget> targets,
+            int[] indexes,
+            int candidateCount)
         {
             var builder = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header))
@@ -1575,6 +1598,13 @@ namespace Conduit
             builder.AppendLine("Candidates:");
             foreach (var index in indexes)
                 builder.AppendLine($"- {targets[index].DisplayName}");
+
+            if (candidateCount > indexes.Length)
+            {
+                builder.AppendLine();
+                builder.AppendLine($"{candidateCount - indexes.Length} additional candidates were omitted.");
+                builder.AppendLine("More specific target names return a narrower candidate set.");
+            }
 
             return builder.ToString().TrimEnd();
         }
@@ -1630,22 +1660,28 @@ namespace Conduit
         public readonly BurstAsmTargetMatchKind Kind;
         public readonly int SelectedIndex;
         public readonly int[] CandidateIndexes;
+        public readonly int CandidateCount;
 
-        BurstAsmTargetMatch(BurstAsmTargetMatchKind kind, int selectedIndex, int[] candidateIndexes)
+        BurstAsmTargetMatch(
+            BurstAsmTargetMatchKind kind,
+            int selectedIndex,
+            int[] candidateIndexes,
+            int candidateCount)
         {
             Kind = kind;
             SelectedIndex = selectedIndex;
             CandidateIndexes = candidateIndexes;
+            CandidateCount = candidateCount;
         }
 
         public static BurstAsmTargetMatch Matched(int index) =>
-            new(BurstAsmTargetMatchKind.Matched, index, Array.Empty<int>());
+            new(BurstAsmTargetMatchKind.Matched, index, Array.Empty<int>(), 0);
 
         public static BurstAsmTargetMatch Ambiguous(IReadOnlyList<int> indexes) =>
-            new(BurstAsmTargetMatchKind.Ambiguous, -1, Copy(indexes));
+            new(BurstAsmTargetMatchKind.Ambiguous, -1, Copy(indexes), indexes.Count);
 
-        public static BurstAsmTargetMatch None(IReadOnlyList<int> indexes) =>
-            new(BurstAsmTargetMatchKind.None, -1, Copy(indexes));
+        public static BurstAsmTargetMatch None(IReadOnlyList<int> indexes, int? candidateCount = null) =>
+            new(BurstAsmTargetMatchKind.None, -1, Copy(indexes), candidateCount ?? indexes.Count);
 
         static int[] Copy(IReadOnlyList<int> indexes)
         {
@@ -1690,6 +1726,7 @@ namespace Conduit
     sealed class BurstAsmStats
     {
         public readonly Dictionary<string, int> InstructionCounts = new(StringComparer.Ordinal);
+        public string AnalyzedFunction = string.Empty;
         public int InstructionCount;
         public int VectorInstructionCount;
         public int ConditionalBranchCount;

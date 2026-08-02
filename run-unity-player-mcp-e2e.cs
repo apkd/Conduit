@@ -100,10 +100,20 @@ try
         {
             ["projectPath"] = endpoint.Selector,
             ["query"] = "/Main Camera",
-            ["json"] = "{}",
+            ["json"] = "{\"name\":\"Updated Main Camera\"}",
         }
     );
-    RequireContains(overwrite, "Updated Main Camera", "player JSON overwrite");
+    RequireContains(overwrite, "- name", "player JSON overwrite");
+
+    var updatedCamera = await client.CallAsync(
+        "show",
+        new()
+        {
+            ["projectPath"] = endpoint.Selector,
+            ["query"] = "/Updated Main Camera",
+        }
+    );
+    RequireContains(updatedCamera, "/Updated Main Camera", "updated player object");
 
     var reflection = await client.CallAsync(
         "reflect",

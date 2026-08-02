@@ -325,7 +325,7 @@ public sealed class UnityBridgeClient
             BridgeEndpointDescriptor? endpoint = null;
             if (PlayerSelector.TryParse(normalizedProjectPath, out var playerSelector))
             {
-                var resolution = playerDiscovery.Resolve(playerSelector);
+                var resolution = await playerDiscovery.ResolveAsync(playerSelector, ct);
                 if (resolution.Endpoint is null)
                     return (null, BridgeClientResult.Failure(
                         handshake: null,

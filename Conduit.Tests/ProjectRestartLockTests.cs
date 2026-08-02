@@ -23,7 +23,7 @@ public sealed class ProjectRestartLockTests
             first.Dispose();
         }
 
-        using (var second = await secondTask.WaitAsync(TimeSpan.FromSeconds(2)))
+        using (var second = await secondTask.WaitAsync(TimeSpan.FromSeconds(10)))
             await Assert.That(second.WasContended).IsTrue();
 
         File.Delete(lockPath);

@@ -17,7 +17,7 @@ static class HelpTool
                 - exact {entity} ID: `{eid}:12345`
                 - exact asset path: `Assets/Foo.prefab`, `Assets/Materials/My Material.mat`
                 - exact hierarchy path: `/Root GameObject/Child (1)` for a scene object
-                - list project NUnit tests: `t:test`, `t:test editmode`, ``t:test SomeModule`
+                - list project NUnit tests: `t:test`, `t:test editmode`, `t:test SomeModule`
 
                 # Unity Search fallback
 
@@ -43,6 +43,9 @@ static class HelpTool
                 - references: `ref=Assets/HelpValidation/HelpMaterial.mat`
                 - file filters: `dir=Assets/HelpValidation`, `ext=mat`, `name=HelpMaterial`, `is:subasset`, `size>0`
                 - `+noResultsLimit`
+
+                Fallback project queries index `Assets/`. Package assets resolve by exact `Packages/...` path;
+                `UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages()` exposes package roots inside `execute_code`.
 
                 # `execute_code` search and reflection utilities
 

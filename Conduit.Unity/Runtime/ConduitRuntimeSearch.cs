@@ -12,6 +12,8 @@ namespace Conduit.Runtime
     /// <summary>Finds loaded player objects for generated execute_code snippets.</summary>
     public static class ConduitRuntimeSearch
     {
+        const int MaxFormattedResults = 25;
+
         /// <summary>Finds exactly one loaded Unity object.</summary>
         public static Object Search(string query)
             => SelectSingle<Object>(query, ResolveMany(query));
@@ -86,8 +88,18 @@ namespace Conduit.Runtime
         internal static string FormatMatches(IReadOnlyList<Object> matches, bool includeHint)
         {
             var lines = new List<string>(matches.Count + 3);
-            foreach (var match in matches)
-                lines.Add($"- {match.name} | {GetLocation(match)} | {BridgeObjectId.Format(match)}");
+            for (var index = 0; index < Math.Min(matches.Count, MaxFormattedResults); index++)
+            {
+                var match = matches[index];
+                lines.Add($"- {match.name} ({match.GetType().Name}) | {GetLocation(match)} | {BridgeObjectId.Format(match)}");
+            }
+
+            if (matches.Count > MaxFormattedResults)
+            {
+                lines.Add(string.Empty);
+                lines.Add($"Showing the first {MaxFormattedResults} results; additional matches were omitted.");
+                lines.Add("More specific queries return a narrower result set.");
+            }
 
             if (includeHint && matches.Count > 1)
             {
@@ -140,7 +152,7 @@ namespace Conduit.Runtime
             if (!enumerator.MoveNext())
                 return value;
 
-            var matches = values.Cast<Object>().Take(25).ToArray();
+            var matches = values.Cast<Object>().Take(MaxFormattedResults + 1).ToArray();
             throw new InvalidOperationException(FormatMatches(matches, includeHint: true));
         }
 
@@ -158,7 +170,7 @@ namespace Conduit.Runtime
             value = Resources.FindObjectsOfTypeAll<Object>()
                 .FirstOrDefault(candidate =>
                     candidate != null
-                    && IsInspectable(candidate)
+                    && IsSupportedType(candidate)
                     && BridgeObjectId.Get(candidate) == objectId
                 );
             return true;
@@ -248,8 +260,10 @@ namespace Conduit.Runtime
         }
 
         static bool IsInspectable(Object candidate) =>
-            (candidate.hideFlags & HideFlags.HideAndDontSave) == 0
-            && candidate is GameObject
+            (candidate.hideFlags & HideFlags.HideAndDontSave) == 0 && IsSupportedType(candidate);
+
+        static bool IsSupportedType(Object candidate) =>
+            candidate is GameObject
             or Component
             or ScriptableObject
             or Texture

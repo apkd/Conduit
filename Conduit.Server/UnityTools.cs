@@ -44,14 +44,15 @@ public sealed class UnityTools
     [Description(
         """
         Captures an image and saves it into Temp/screenshot.
-        Supported targets include: editor, game_view, scene_view, a scene camera eid, an object eid/path/guid for preview capture,
+        Supported targets include: game_view, scene_view, window:<name>, a scene camera eid, an object eid/path/guid for preview capture,
         or a scene path/guid for top-down scene capture.
+        A window:<name> capture is available only when Unity can focus the resolved window.
         Useful for debugging and validation. Always use the view_image tool to view the captured image.
         """
     )]
     public static Task<string> Screenshot(
         [Description("Project path")] string projectPath,
-        [Description("Capture target. Examples: editor, game_view, scene_view, eid:12345, Assets/Foo.prefab, /Main Camera")]
+        [Description("Capture target. Examples: game_view, scene_view, window:Inspector, eid:12345, Assets/Foo.prefab, /Main Camera")]
         string target,
         UnityProjectOperations operations,
         CancellationToken ct

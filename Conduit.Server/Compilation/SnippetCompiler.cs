@@ -294,7 +294,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             return BridgeArtifact.FromBytes(name, mediaType, bytes);
 
         var relativePath = Path.Combine("Temp", "execute_code", name);
-        var path = Path.Combine(target, relativePath);
+        var path = Path.Combine(ProjectPathNormalizer.ToPlatformPath(target), relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllBytesAsync(path, bytes, ct);
         return BridgeArtifact.FromProjectFile(name, mediaType, relativePath, bytes);
@@ -315,6 +315,9 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         {
             if (TryParseSnippetFileName(source, out var fileName))
             {
+                if (cache.DetoursByName.TryGetValue(fileName, out var cachedArtifact))
+                    return SourceArtifactResult.Succeeded(cachedArtifact);
+
                 var sourcePath = snippetRoot is null ? null : Path.Combine(snippetRoot, fileName);
                 var kindPath = snippetRoot is null ? null : Path.Combine(snippetRoot, Path.ChangeExtension(fileName, ".kind"));
                 if (sourcePath is null || !File.Exists(sourcePath))
@@ -323,9 +326,13 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     || File.ReadAllText(kindPath).Trim() != "detour")
                     return SourceArtifactResult.Failed(CompileError($"Source '{source}' is not a detour artifact."));
 
-                return SourceArtifactResult.Succeeded(
-                    new(fileName[..^3], fileName, await File.ReadAllTextAsync(sourcePath, ct))
+                var artifact = new SourceArtifact(
+                    fileName[..^3],
+                    fileName,
+                    await File.ReadAllTextAsync(sourcePath, ct)
                 );
+                cache.DetoursByName[fileName] = artifact;
+                return SourceArtifactResult.Succeeded(artifact);
             }
 
             var artifactId = (++cache.NextArtifactId).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -337,7 +344,9 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 await File.WriteAllTextAsync(Path.Combine(snippetRoot, artifactId + ".kind"), "detour\n", ct);
             }
 
-            return SourceArtifactResult.Succeeded(new(artifactId, sourceFileName, source));
+            var sourceArtifact = new SourceArtifact(artifactId, sourceFileName, source);
+            cache.DetoursByName[sourceFileName] = sourceArtifact;
+            return SourceArtifactResult.Succeeded(sourceArtifact);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -534,7 +543,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     static string? GetSnippetRoot(string target) =>
         PlayerSelector.TryParse(target, out _)
             ? null
-            : Path.Combine(target, "Temp", "execute_code");
+            : Path.Combine(ProjectPathNormalizer.ToPlatformPath(target), "Temp", "execute_code");
 
     static int GetHighestArtifactId(string? snippetRoot)
     {
@@ -969,6 +978,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         internal int NextArtifactId { get; set; } = nextArtifactId;
         internal Dictionary<string, CompiledSnippet> BySource { get; } = new(StringComparer.Ordinal);
         internal Dictionary<string, CompiledSnippet> ByName { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, SourceArtifact> DetoursByName { get; } = new(StringComparer.Ordinal);
     }
 
     internal readonly record struct CompilationOutput(

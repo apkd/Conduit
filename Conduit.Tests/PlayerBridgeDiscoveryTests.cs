@@ -26,6 +26,14 @@ public sealed class PlayerBridgeDiscoveryTests
     }
 
     [Test]
+    public async Task MalformedPlayerSelectorDoesNotFallThroughToAProjectPath()
+    {
+        await Assert.That(() => BridgeTarget.Normalize("player:not-a-process"))
+            .Throws<ArgumentException>()
+            .WithMessage("Player selector 'player:not-a-process' is malformed; player process IDs are positive integers.");
+    }
+
+    [Test]
     public async Task DiscoveryRejectsStaleMalformedAndNonPlayerEndpoints()
     {
         var now = new DateTimeOffset(2026, 7, 31, 10, 0, 0, TimeSpan.Zero);
@@ -94,6 +102,30 @@ public sealed class PlayerBridgeDiscoveryTests
             await Assert.That(resolution.Endpoint).IsNull();
             await Assert.That(resolution.IsAmbiguous).IsTrue();
             await Assert.That(resolution.Diagnostic).Contains("2 live player sessions");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task ResolutionRetriesATransientlyMissingEndpoint()
+    {
+        var now = new DateTimeOffset(2026, 7, 31, 10, 0, 0, TimeSpan.Zero);
+        var time = new FakeTimeProvider(now);
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var discovery = new UnityPlayerDiscovery(time, () => [root]);
+            var resolutionTask = discovery.ResolveAsync(new(3910489), CancellationToken.None);
+
+            await Assert.That(resolutionTask.IsCompleted).IsFalse();
+            WriteEndpoint(root, "appeared", Endpoint(3910489, "appeared", now));
+            time.Advance(UnityPlayerDiscovery.ResolutionRetryDelay);
+
+            var resolution = await resolutionTask;
+            await Assert.That(resolution.Endpoint?.ProcessId).IsEqualTo(3910489);
         }
         finally
         {

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -101,6 +102,149 @@ public sealed class RuntimeBridgeTests
                 ),
                 Is.SameAs(gameObject.GetComponent<Camera>())
             );
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void SearchResultsIdentifyGameObjectsAndComponentTypes()
+    {
+        var gameObject = new GameObject("Conduit Runtime Typed Match");
+        try
+        {
+            var matches = ConduitRuntimeSearch.ResolveMany("Conduit Runtime Typed Match");
+            var formatted = ConduitRuntimeSearch.FormatMatches(matches, includeHint: false);
+
+            Assert.That(formatted, Does.Contain("Conduit Runtime Typed Match (GameObject)"));
+            Assert.That(formatted, Does.Contain("Conduit Runtime Typed Match (Transform)"));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void ExactIdResolvesHiddenRuntimeObject()
+    {
+        var gameObject = new GameObject("Conduit Hidden Runtime Object")
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+        };
+        try
+        {
+            var matches = ConduitRuntimeSearch.ResolveMany(BridgeObjectId.Format(gameObject));
+
+            Assert.That(matches, Is.EqualTo(new UnityEngine.Object[] { gameObject }));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void RuntimeSearchReportsTruncatedResults()
+    {
+        var objects = new List<GameObject>();
+        try
+        {
+            for (var index = 0; index < 30; index++)
+                objects.Add(new GameObject("Conduit Runtime Truncation"));
+
+            var matches = ConduitRuntimeSearch.ResolveMany("Conduit Runtime Truncation");
+            var output = ConduitRuntimeSearch.FormatMatches(matches, includeHint: false);
+
+            Assert.That(matches.Count, Is.GreaterThanOrEqualTo(30));
+            Assert.That(output, Does.Contain("Showing the first 25 results; additional matches were omitted."));
+        }
+        finally
+        {
+            foreach (var gameObject in objects)
+                UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void RuntimeTransformPatchPreservesOmittedVectorMembers()
+    {
+        var gameObject = new GameObject("Conduit Runtime Transform Patch");
+        try
+        {
+            gameObject.transform.localPosition = new(0f, 1f, -10f);
+
+            var result = RuntimeObjectJsonUtility.FromJsonOverwrite(
+                gameObject.transform,
+                "{\"Transform\":{\"localPosition\":{\"x\":5.0}}}"
+            );
+
+            Assert.That(gameObject.transform.localPosition, Is.EqualTo(new Vector3(5f, 1f, -10f)));
+            Assert.That(result, Is.EqualTo("Applied changes:\n- localPosition.x"));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public void RuntimePropertyPatchValidatesBeforeMutationAndRejectsUnknownMembers()
+    {
+        var gameObject = new GameObject("Conduit Runtime Camera Patch");
+        var camera = gameObject.AddComponent<Camera>();
+        try
+        {
+            camera.fieldOfView = 62f;
+            camera.depth = -1f;
+
+            Assert.Throws<InvalidOperationException>(() => RuntimeObjectJsonUtility.FromJsonOverwrite(
+                camera,
+                "{\"Camera\":{\"depth\":4.0,\"fieldOfView\":\"bad\"}}"
+            ));
+            Assert.That(camera.depth, Is.EqualTo(-1f));
+
+            Assert.Throws<InvalidOperationException>(() => RuntimeObjectJsonUtility.FromJsonOverwrite(
+                camera,
+                "{\"Camera\":{\"fieldOfView\":63.0,\"definitelyMissing\":1}}"
+            ));
+            Assert.That(camera.fieldOfView, Is.EqualTo(62f));
+
+            var result = RuntimeObjectJsonUtility.FromJsonOverwrite(
+                camera,
+                "{\"Camera\":{\"fieldOfView\":61.0}}"
+            );
+            Assert.That(result, Is.EqualTo("Applied changes:\n- fieldOfView"));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    [Test]
+    public async Task RuntimeShowIncludesComponentsAndWritableProperties()
+    {
+        var gameObject = new GameObject("Conduit Runtime Show State");
+        var camera = gameObject.AddComponent<Camera>();
+        try
+        {
+            var result = await RuntimeToolDispatcher.ExecuteAsync(
+                new BridgeCommand
+                {
+                    command_type = BridgeCommandTypes.Show,
+                    target = BridgeObjectId.Format(gameObject),
+                },
+                CancellationToken.None
+            );
+
+            Assert.That(result.return_value, Does.Contain("Components:"));
+            Assert.That(result.return_value, Does.Contain(typeof(Camera).FullName));
+            Assert.That(result.return_value, Does.Contain(BridgeObjectId.Format(camera)));
+            Assert.That(result.return_value, Does.Contain("Properties:"));
+            Assert.That(result.return_value, Does.Contain("activeSelf"));
         }
         finally
         {

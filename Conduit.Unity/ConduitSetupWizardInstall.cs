@@ -608,9 +608,16 @@ namespace Conduit
         {
             try
             {
+                string normalizedPath = path.Replace('\\', '/');
+                if (IsManagedPath(normalizedPath))
+                    return true;
+
                 string fullPath = Path.GetFullPath(path).Replace('\\', '/');
-                return fullPath.StartsWith("/nix/store/", StringComparison.Ordinal)
-                       || fullPath.StartsWith("/run/current-system/", StringComparison.Ordinal);
+                return IsManagedPath(fullPath);
+
+                static bool IsManagedPath(string candidate)
+                    => candidate.StartsWith("/nix/store/", StringComparison.Ordinal)
+                       || candidate.StartsWith("/run/current-system/", StringComparison.Ordinal);
             }
             catch
             {

@@ -117,24 +117,55 @@ namespace Conduit
 
         internal static string BuildCompletionSummary(ITestResultAdaptor result)
         {
-            if (result.FailCount > 0)
-                return BuildFailureSummary(result);
+            var skipCount = result.SkipCount > 0
+                ? result.SkipCount
+                : result.TestStatus == TestStatus.Skipped ? 1 : 0;
+            var summary = BuildCompletionCategorySummary(
+                result.PassCount,
+                result.FailCount,
+                skipCount,
+                result.InconclusiveCount,
+                TryFindSkippedMessage(result)
+            );
+            if (result.FailCount <= 0
+                || BuildFailureSummary(result) is not { Length: > 0 } failureSummary)
+                return summary;
 
-            if (result.PassCount > 0)
-                return $"Passed {result.PassCount} tests.";
+            return $"{summary}\n\n{failureSummary}";
+        }
 
-            if (result.SkipCount > 0 || result.TestStatus == TestStatus.Skipped)
+        internal static string BuildCompletionCategorySummary(
+            int passCount,
+            int failCount,
+            int skipCount,
+            int inconclusiveCount,
+            string? skippedMessage)
+        {
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            AppendCategory("Passed", passCount);
+            AppendCategory("Failed", failCount);
+            AppendCategory("Skipped", skipCount);
+            AppendCategory("Inconclusive", inconclusiveCount);
+            if (builder.Length == 0)
+                return "No tests ran.";
+
+            if (skipCount > 0 && !string.IsNullOrWhiteSpace(skippedMessage))
+                builder.Append("\n\n").Append(skippedMessage);
+
+            return builder.ToString();
+
+            void AppendCategory(string label, int count)
             {
-                var summary = $"Skipped {Math.Max(result.SkipCount, 1)} tests.";
-                return TryFindSkippedMessage(result) is { Length: > 0 } message
-                    ? $"{summary}\n\n{message}"
-                    : summary;
+                if (count <= 0)
+                    return;
+
+                if (builder.Length > 0)
+                    builder.Append(' ');
+                builder.Append(label);
+                builder.Append(' ');
+                builder.Append(count);
+                builder.Append(" tests.");
             }
-
-            if (result.InconclusiveCount > 0)
-                return $"Inconclusive {result.InconclusiveCount} tests.";
-
-            return "No tests ran.";
         }
 
         internal static void RecordStartedFilteredTest(ITestAdaptor test)

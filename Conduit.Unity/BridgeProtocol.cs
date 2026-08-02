@@ -22,7 +22,7 @@ namespace Conduit
             if (Path.IsPathRooted(relativePath))
                 throw new InvalidOperationException($"Artifact '{relativePath}' must use a project-relative path.");
 
-            var projectRoot = Path.GetFullPath(ConduitProjectIdentity.GetProjectPath());
+            var projectRoot = ConduitAssetPathUtility.GetProjectRootPath();
             var path = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
             var normalized = Path.GetRelativePath(projectRoot, path);
             // the server may only reference artifacts it wrote inside this Unity project.

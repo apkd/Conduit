@@ -112,6 +112,36 @@ public sealed class SnippetCompilerTests
     }
 
     [Test]
+    public async Task ParserAcceptsSearchHelperInsideInterpolation()
+    {
+        var parsed = ConduitCodeParser.Parse(
+            "return $\"{SearchMany<GameObject>(\"ConduitDirtySave\").Length}\";"
+        );
+
+        await Assert.That(parsed.Body.Text)
+            .IsEqualTo("return $\"{SearchMany<GameObject>(\"ConduitDirtySave\").Length}\";");
+    }
+
+    [Test]
+    public async Task PlayerDetourSourceFilenameCanBeReusedFromMemory()
+    {
+        var compiler = new SnippetCompiler(null!);
+        var first = await compiler.PrepareDetourArtifactAsync(
+            "player:12345",
+            "return 7;",
+            CancellationToken.None
+        );
+        var second = await compiler.PrepareDetourArtifactAsync(
+            "player:12345",
+            first.Artifact!.Value.FileName,
+            CancellationToken.None
+        );
+
+        await Assert.That(second.Failure).IsNull();
+        await Assert.That(second.Artifact).IsEqualTo(first.Artifact);
+    }
+
+    [Test]
     public async Task BareReturnRecoveryRewritesOnlyTheGeneratedEntryPointBody()
     {
         var parsed = ConduitCodeParser.Parse(

@@ -67,6 +67,11 @@ namespace Conduit
                 return ConduitSearchUtility.FormatMatches(matches, includeHint: true);
 
             var target = matches[0].Target;
+            if (ShouldRejectSceneObjectOverwrite(EditorApplication.isPlaying, target))
+                throw new InvalidOperationException(
+                    "`from_json_overwrite` cannot modify Editor scene objects during play mode."
+                );
+
             var normalizedJson = NormalizeOverwriteJson(target, json);
             var beforeJson = EditorJsonUtility.ToJson(target, true);
             var beforeOwningGameObjectName = GetComparableOwningGameObjectName(target, normalizedJson);
@@ -77,6 +82,11 @@ namespace Conduit
             AddOwningGameObjectNameChangeIfNeeded(updatedTarget, beforeOwningGameObjectName, changedPaths);
             return FormatChangedPathList(changedPaths);
         }
+
+        internal static bool ShouldRejectSceneObjectOverwrite(bool isPlaying, Object target) =>
+            isPlaying
+            && target is GameObject or Component
+            && !EditorUtility.IsPersistent(target);
 
         static string NormalizeOverwriteJson(Object target, string json)
         {
