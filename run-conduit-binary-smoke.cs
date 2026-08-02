@@ -1,12 +1,21 @@
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 
-if (args.Length != 1)
-    throw new ArgumentException("Usage: dotnet run --file run-conduit-binary-smoke.cs -- <conduit-executable>");
+if (args.Length != 3
+    || args[0] != "--transport"
+    || args[1] is not ("stdio" or "http"))
+    throw new ArgumentException(
+        "Usage: dotnet run --file run-conduit-binary-smoke.cs -- " +
+        "--transport <stdio|http> <conduit-executable>"
+    );
 
-var conduitExecutable = Path.GetFullPath(args[0]);
+var transport = args[1];
+var conduitExecutable = Path.GetFullPath(args[2]);
 var projectPath = Path.Combine(Path.GetTempPath(), $"conduit-smoke-{Environment.ProcessId}");
 var previousIpcRoot = Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT");
 Environment.SetEnvironmentVariable(
@@ -28,11 +37,13 @@ try
     """);
 
     await using var bridge = await FakeBridge.StartAsync(projectPath);
-    var statusText = await RunStatusAsync(conduitExecutable, projectPath);
+    var statusText = transport == "stdio"
+        ? await RunStdioStatusAsync(conduitExecutable, projectPath)
+        : await RunHttpStatusAsync(conduitExecutable, projectPath);
     if (!statusText.Contains("Unity 6000.3.10f1", StringComparison.Ordinal))
         throw new InvalidOperationException($"Binary smoke failed. Unexpected status response:\n{statusText}");
 
-    Console.WriteLine("Binary smoke passed.");
+    Console.WriteLine($"Binary {transport} smoke passed.");
 }
 finally
 {
@@ -45,7 +56,10 @@ finally
     catch { }
 }
 
-static async Task<string> RunStatusAsync(string conduitExecutable, string projectPath)
+static async Task<string> RunStdioStatusAsync(
+    string conduitExecutable,
+    string projectPath
+)
 {
     using var process = new Process
     {
@@ -64,7 +78,7 @@ static async Task<string> RunStatusAsync(string conduitExecutable, string projec
     try
     {
         var requestId = 0;
-        await RequestAsync(process, ++requestId, "initialize", new JsonObject
+        await RequestStdioAsync(process, ++requestId, "initialize", new JsonObject
         {
             ["protocolVersion"] = "2025-03-26",
             ["capabilities"] = new JsonObject(),
@@ -78,15 +92,20 @@ static async Task<string> RunStatusAsync(string conduitExecutable, string projec
             ["params"] = new JsonObject(),
         });
 
-        await RequestAsync(process, ++requestId, "tools/list", new JsonObject(), TimeSpan.FromSeconds(10));
-        var status = await RequestAsync(process, ++requestId, "tools/call", new JsonObject
+        await RequestStdioAsync(
+            process,
+            ++requestId,
+            "tools/list",
+            new JsonObject(),
+            TimeSpan.FromSeconds(10)
+        );
+        var status = await RequestStdioAsync(process, ++requestId, "tools/call", new JsonObject
         {
             ["name"] = "status",
             ["arguments"] = new JsonObject { ["projectPath"] = projectPath },
         }, TimeSpan.FromSeconds(20));
 
-        return status["result"]?["content"]?[0]?["text"]?.GetValue<string>()
-               ?? throw new InvalidOperationException($"Status response did not contain text content: {status}");
+        return ReadStatusText(status);
     }
     catch
     {
@@ -105,6 +124,271 @@ static async Task<string> RunStatusAsync(string conduitExecutable, string projec
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { await process.WaitForExitAsync(cts.Token); } catch { try { process.Kill(); } catch { } }
     }
+}
+
+static async Task<string> RunHttpStatusAsync(
+    string conduitExecutable,
+    string projectPath
+)
+{
+    var port = ReserveLoopbackPort();
+    using var process = new Process
+    {
+        StartInfo = new(conduitExecutable)
+        {
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        },
+    };
+    process.StartInfo.ArgumentList.Add("--http");
+    process.StartInfo.ArgumentList.Add("--port");
+    process.StartInfo.ArgumentList.Add(port.ToString());
+
+    process.Start();
+    var stderrTask = CaptureStandardErrorAsync(process);
+
+    try
+    {
+        await WaitForHttpServerAsync(process, port, TimeSpan.FromSeconds(10));
+        using var client = new HttpClient(
+            new SocketsHttpHandler { UseProxy = false }
+        )
+        {
+            BaseAddress = new($"http://127.0.0.1:{port}/"),
+        };
+
+        var requestId = 0;
+        await RequestHttpAsync(client, ++requestId, "initialize", new JsonObject
+        {
+            ["protocolVersion"] = "2025-03-26",
+            ["capabilities"] = new JsonObject(),
+            ["clientInfo"] = new JsonObject
+            {
+                ["name"] = "conduit-binary-smoke",
+                ["version"] = "0",
+            },
+        }, TimeSpan.FromSeconds(10));
+
+        await SendHttpNotificationAsync(
+            client,
+            "notifications/initialized",
+            new JsonObject(),
+            TimeSpan.FromSeconds(10)
+        );
+        await RequestHttpAsync(
+            client,
+            ++requestId,
+            "tools/list",
+            new JsonObject(),
+            TimeSpan.FromSeconds(10)
+        );
+        var status = await RequestHttpAsync(client, ++requestId, "tools/call", new JsonObject
+        {
+            ["name"] = "status",
+            ["arguments"] = new JsonObject { ["projectPath"] = projectPath },
+        }, TimeSpan.FromSeconds(20));
+
+        return ReadStatusText(status);
+    }
+    catch
+    {
+        StopProcess(process);
+        var stderr = await ReadCapturedStandardErrorAsync(stderrTask);
+        if (process.HasExited)
+            Console.Error.WriteLine($"Server exit code: {process.ExitCode}");
+
+        if (!string.IsNullOrWhiteSpace(stderr))
+            Console.Error.WriteLine(stderr);
+
+        throw;
+    }
+    finally
+    {
+        StopProcess(process);
+    }
+}
+
+static string ReadStatusText(JsonObject status)
+    => status["result"]?["content"]?[0]?["text"]?.GetValue<string>()
+       ?? throw new InvalidOperationException(
+           $"Status response did not contain text content: {status}"
+       );
+
+static int ReserveLoopbackPort()
+{
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    try
+    {
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+    finally
+    {
+        listener.Stop();
+    }
+}
+
+static async Task WaitForHttpServerAsync(
+    Process process,
+    int port,
+    TimeSpan timeout
+)
+{
+    using var cts = new CancellationTokenSource(timeout);
+    while (true)
+    {
+        if (process.HasExited)
+            throw new InvalidOperationException(
+                $"The HTTP server exited during startup with code {process.ExitCode}."
+            );
+
+        try
+        {
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+            return;
+        }
+        catch (SocketException) when (!cts.IsCancellationRequested)
+        {
+            await Task.Delay(50, cts.Token);
+        }
+    }
+}
+
+static async Task<JsonObject> RequestHttpAsync(
+    HttpClient client,
+    int requestId,
+    string method,
+    JsonObject parameters,
+    TimeSpan timeout
+)
+{
+    var payload = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"] = requestId,
+        ["method"] = method,
+        ["params"] = parameters,
+    };
+    using var response = await SendHttpAsync(client, payload, timeout);
+    var body = await response.Content.ReadAsStringAsync();
+    var result = ParseHttpResponse(
+        response.Content.Headers.ContentType?.MediaType,
+        body,
+        requestId
+    );
+    if (result["error"] is not null)
+        throw new InvalidOperationException(
+            $"HTTP MCP request {requestId} returned an error: {result}"
+        );
+
+    return result;
+}
+
+static async Task SendHttpNotificationAsync(
+    HttpClient client,
+    string method,
+    JsonObject parameters,
+    TimeSpan timeout
+)
+{
+    var payload = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["method"] = method,
+        ["params"] = parameters,
+    };
+    using var response = await SendHttpAsync(client, payload, timeout);
+}
+
+static async Task<HttpResponseMessage> SendHttpAsync(
+    HttpClient client,
+    JsonObject payload,
+    TimeSpan timeout
+)
+{
+    using var request = new HttpRequestMessage(HttpMethod.Post, "")
+    {
+        Content = new StringContent(
+            payload.ToJsonString(new() { WriteIndented = false }),
+            Encoding.UTF8,
+            "application/json"
+        ),
+    };
+    request.Headers.Accept.Add(
+        new MediaTypeWithQualityHeaderValue("application/json")
+    );
+    request.Headers.Accept.Add(
+        new MediaTypeWithQualityHeaderValue("text/event-stream")
+    );
+
+    using var cts = new CancellationTokenSource(timeout);
+    var response = await client.SendAsync(
+        request,
+        HttpCompletionOption.ResponseHeadersRead,
+        cts.Token
+    );
+    try
+    {
+        response.EnsureSuccessStatusCode();
+        if (response.Headers.Contains("Mcp-Session-Id"))
+            throw new InvalidOperationException(
+                "The stateless HTTP server returned an MCP session ID."
+            );
+
+        return response;
+    }
+    catch
+    {
+        response.Dispose();
+        throw;
+    }
+}
+
+static JsonObject ParseHttpResponse(
+    string? mediaType,
+    string body,
+    int requestId
+)
+{
+    if (mediaType == "text/event-stream")
+    {
+        foreach (var line in body.Split('\n'))
+        {
+            var value = line.TrimEnd('\r');
+            if (!value.StartsWith("data:", StringComparison.Ordinal))
+                continue;
+
+            if (JsonNode.Parse(value[5..].TrimStart()) is JsonObject candidate
+                && candidate["id"]?.GetValue<int>() == requestId)
+                return candidate;
+        }
+
+        throw new InvalidOperationException(
+            $"SSE response did not contain JSON-RPC response {requestId}: {body}"
+        );
+    }
+
+    if (JsonNode.Parse(body) is JsonObject response
+        && response["id"]?.GetValue<int>() == requestId)
+        return response;
+
+    throw new InvalidOperationException(
+        $"HTTP response did not contain JSON-RPC response {requestId}: {body}"
+    );
+}
+
+static void StopProcess(Process process)
+{
+    if (process.HasExited)
+        return;
+
+    try
+    {
+        process.Kill(entireProcessTree: true);
+        process.WaitForExit(5000);
+    }
+    catch { }
 }
 
 static async Task<List<string>> CaptureStandardErrorAsync(Process process)
@@ -130,7 +414,13 @@ static async Task<string> ReadCapturedStandardErrorAsync(Task<List<string>> stde
     }
 }
 
-static async Task<JsonObject> RequestAsync(Process process, int requestId, string method, JsonObject parameters, TimeSpan timeout)
+static async Task<JsonObject> RequestStdioAsync(
+    Process process,
+    int requestId,
+    string method,
+    JsonObject parameters,
+    TimeSpan timeout
+)
 {
     await SendAsync(process, new JsonObject
     {
@@ -295,10 +585,18 @@ sealed class FakeBridge : IAsyncDisposable
                 leaveOpen: true
             );
 
-            await reader.ReadLineAsync(cts.Token);
+            var serverHello = await reader.ReadLineAsync(cts.Token)
+                              ?? throw new IOException(
+                                  "Conduit closed before sending its handshake."
+                              );
+            var protocolVersion = JsonNode.Parse(serverHello)?["protocol_version"]
+                                      ?.GetValue<int>()
+                                  ?? throw new InvalidOperationException(
+                                      $"Conduit handshake did not contain a protocol version: {serverHello}"
+                                  );
             await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 3,
+                ["protocol_version"] = protocolVersion,
                 ["message_type"] = "hello",
                 ["project"] = new JsonObject
                 {
@@ -317,13 +615,13 @@ sealed class FakeBridge : IAsyncDisposable
 
             await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 3,
+                ["protocol_version"] = protocolVersion,
                 ["message_type"] = "command_started",
                 ["request_id"] = requestId,
             });
             await WriteAsync(output, new JsonObject
             {
-                ["protocol_version"] = 3,
+                ["protocol_version"] = protocolVersion,
                 ["message_type"] = "command_result",
                 ["request_id"] = requestId,
                 ["result"] = new JsonObject

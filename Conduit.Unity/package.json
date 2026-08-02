@@ -5,6 +5,7 @@
   "unity": "6000.0",
   "description": "Unity bridge for the Conduit MCP server.",
   "dependencies": {
+    "com.unity.test-framework": "1.6.0",
     "com.unity.modules.imgui": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0",
     "com.unity.modules.unitywebrequest": "1.0.0"

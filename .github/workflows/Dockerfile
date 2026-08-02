@@ -8,6 +8,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG UNITY_VERSION
 ARG PROJECT
 ARG PROJECT_MANIFEST=test
+ARG CONDUIT_RUNTIME_DEFINE=1
 
 ENV INSTALL_ROOT=/opt/unity \
     UNITY_HOME=/opt/unity \
@@ -22,6 +23,7 @@ RUN \
 --mount=type=cache,target=/var/lib/apt/lists,id=apt-lists-builder,sharing=locked \
 --mount=type=bind,source=.github/workflows/test-manifest.json,target=/tmp/test-manifest.json,readonly \
 --mount=type=bind,source=.github/workflows/player-manifest.json,target=/tmp/player-manifest.json,readonly \
+--mount=type=bind,source=.github/workflows/consumer-manifest.json,target=/tmp/consumer-manifest.json,readonly \
 \
 #========================
 <<'BUILDER_SETUP_SCRIPT'
@@ -109,8 +111,17 @@ download_and_extract "$EDITOR_URL" "/tmp/unity_editor.tar.xz"
 PROJECT_TEMPLATE="$(find "$DEST/Editor/Data/Resources/PackageManager/ProjectTemplates" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
 test -n "$PROJECT_TEMPLATE"
 tar -xOzf "$PROJECT_TEMPLATE" 'package/ProjectData~/ProjectSettings/ProjectSettings.asset' > /tmp/ProjectSettings.asset
-grep -q '^  scriptingDefineSymbols: {}$' /tmp/ProjectSettings.asset
-sed -i 's/^  scriptingDefineSymbols: {}$/  scriptingDefineSymbols:\n    Standalone: CONDUIT_INCLUDE_IN_DEBUG_BUILDS/' /tmp/ProjectSettings.asset
+case "$CONDUIT_RUNTIME_DEFINE" in
+  0) ;;
+  1)
+    grep -q '^  scriptingDefineSymbols: {}$' /tmp/ProjectSettings.asset
+    sed -i 's/^  scriptingDefineSymbols: {}$/  scriptingDefineSymbols:\n    Standalone: CONDUIT_INCLUDE_IN_DEBUG_BUILDS/' /tmp/ProjectSettings.asset
+    ;;
+  *)
+    echo "CONDUIT_RUNTIME_DEFINE must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
 
 # strip editor
 rm -f "$TMPHTML"

@@ -81,6 +81,13 @@ namespace Conduit
 
         /// <summary>Builds the development Mono player used by transport E2E jobs.</summary>
         public static void BuildPlayer()
+            => BuildPlayer(includeRuntime: true);
+
+        /// <summary>Builds a production Mono player and verifies that the opt-in runtime bridge is excluded.</summary>
+        public static void BuildConsumerPlayer()
+            => BuildPlayer(includeRuntime: false);
+
+        static void BuildPlayer(bool includeRuntime)
         {
             var exitCode = 1;
             var previousBackend = PlayerSettings.GetScriptingBackend(
@@ -116,6 +123,9 @@ namespace Conduit
                     ScriptingImplementation.Mono2x
                 );
                 PlayerSettings.SplashScreen.show = false;
+                if (!includeRuntime)
+                    EnsureRuntimeOptInDisabled();
+
                 var report = BuildPipeline.BuildPlayer(
                     new BuildPlayerOptions
                     {
@@ -125,17 +135,21 @@ namespace Conduit
                         },
                         locationPathName = output,
                         target = target,
-                        options = BuildOptions.Development,
-                        extraScriptingDefines = new[]
-                        {
-                            "CONDUIT_INCLUDE_IN_DEBUG_BUILDS",
-                        },
+                        options = includeRuntime
+                            ? BuildOptions.Development
+                            : BuildOptions.None,
+                        extraScriptingDefines = includeRuntime
+                            ? new[] { "CONDUIT_INCLUDE_IN_DEBUG_BUILDS" }
+                            : Array.Empty<string>(),
                     }
                 );
                 if (report.summary.result != BuildResult.Succeeded)
                     throw new BuildFailedException(
                         $"Player build failed with {report.summary.totalErrors} error(s)."
                     );
+
+                if (!includeRuntime)
+                    EnsureRuntimeAssemblyExcluded(output);
 
                 Console.WriteLine(
                     $"Built {targetName} player: {Path.GetFullPath(output)}"
@@ -154,6 +168,42 @@ namespace Conduit
                 );
                 PlayerSettings.SplashScreen.show = previousSplash;
                 EditorApplication.Exit(exitCode);
+            }
+        }
+
+        static void EnsureRuntimeOptInDisabled()
+        {
+            var defines = PlayerSettings.GetScriptingDefineSymbols(
+                NamedBuildTarget.Standalone
+            );
+            foreach (var define in defines.Split(';'))
+                if (define.Trim() == "CONDUIT_INCLUDE_IN_DEBUG_BUILDS")
+                    throw new BuildFailedException(
+                        "The production consumer project enables CONDUIT_INCLUDE_IN_DEBUG_BUILDS."
+                    );
+        }
+
+        static void EnsureRuntimeAssemblyExcluded(string output)
+        {
+            var projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var roots = new[]
+            {
+                Path.Combine(projectRoot, "Library", "ScriptAssemblies"),
+                Path.GetDirectoryName(Path.GetFullPath(output))!,
+            };
+            foreach (var root in roots)
+            {
+                if (!Directory.Exists(root))
+                    continue;
+
+                foreach (var assemblyPath in Directory.EnumerateFiles(
+                             root,
+                             "Conduit.Unity.Runtime.dll",
+                             SearchOption.AllDirectories
+                         ))
+                    throw new BuildFailedException(
+                        $"Production build contains the runtime bridge assembly: {assemblyPath}"
+                    );
             }
         }
 

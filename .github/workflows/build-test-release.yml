@@ -188,6 +188,7 @@ jobs:
 
   test-server-binary:
     needs: build
+    name: server binary smoke (${{ matrix.platform }}, ${{ matrix.transport }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     strategy:
@@ -195,11 +196,25 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            platform: linux-x64
             artifact: conduit-linux-x64
             executable: conduit-linux-x64
+            transport: stdio
+          - os: ubuntu-latest
+            platform: linux-x64
+            artifact: conduit-linux-x64
+            executable: conduit-linux-x64
+            transport: http
           - os: windows-latest
+            platform: win-x64
             artifact: conduit-win-x64
             executable: conduit-win-x64.exe
+            transport: stdio
+          - os: windows-latest
+            platform: win-x64
+            artifact: conduit-win-x64
+            executable: conduit-win-x64.exe
+            transport: http
 
     steps:
       - uses: actions/checkout@v6
@@ -219,7 +234,56 @@ jobs:
           executable="$RUNNER_TEMP/conduit-server/${{ matrix.executable }}"
           if [[ "${{ runner.os }}" == "Linux" ]]; then chmod +x "$executable"; fi
           "$executable" --version
-          dotnet run --file run-conduit-binary-smoke.cs -- "$executable"
+          dotnet run --file run-conduit-binary-smoke.cs -- \
+            --transport "${{ matrix.transport }}" \
+            "$executable"
+
+  test-server-binary-musl:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-musl-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - name: Run musl binary smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/musl-smoke"
+          mkdir -p "$work"
+          cp "$RUNNER_TEMP/conduit-server/conduit-linux-musl-x64" "$work/"
+          chmod +x "$work/conduit-linux-musl-x64"
+
+          dotnet publish run-conduit-binary-smoke.cs \
+            -c Release \
+            -r linux-musl-x64 \
+            --self-contained \
+            -p:PublishAot=false \
+            -p:PublishSingleFile=true \
+            -p:InvariantGlobalization=true \
+            -p:DebugType=none \
+            -p:DebugSymbols=false \
+            -o "$work/runner"
+
+          docker run --rm \
+            -v "$work:/work" \
+            -w /work \
+            alpine:3.22 \
+            sh -c \
+              'apk add --no-cache libgcc libstdc++ zlib >/dev/null && \
+               /work/runner/run-conduit-binary-smoke \
+                 --transport stdio \
+                 /work/conduit-linux-musl-x64'
 
   test-server:
     needs: version
@@ -410,6 +474,248 @@ jobs:
 
       - name: Fail on Unity test errors
         if: steps.unity-tests.outcome == 'failure' || steps.unity-test-results.outputs.found != 'true'
+        run: exit 1
+
+  test-unity-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROJECT: /ConduitConsumerCI
+      UNITY_VERSION: 6000.0.78f1
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image variables
+        shell: bash
+        run: |
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_TAG=ghcr.io/$repo_lc/unity-consumer-ci:${{ github.sha }}-$UNITY_VERSION" >> "$GITHUB_ENV"
+          echo "CACHE_REF=ghcr.io/$repo_lc/unity-consumer-ci:cache-$UNITY_VERSION" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          file: ./.github/workflows/Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            UNITY_VERSION=${{ env.UNITY_VERSION }}
+            PROJECT=${{ env.PROJECT }}
+            PROJECT_MANIFEST=consumer
+            CONDUIT_RUNTIME_DEFINE=0
+          outputs: type=docker
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
+
+      - name: Build minimal production consumer
+        shell: bash
+        env:
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+          UNITY_USER: ${{ secrets.UNITY_USER }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in UNITY_SERIAL UNITY_USER UNITY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || { echo "$name is not configured."; exit 1; }
+          done
+
+          mkdir -p \
+            "$RUNNER_TEMP/unity-license" \
+            "$RUNNER_TEMP/unity-secrets" \
+            "$RUNNER_TEMP/consumer-player"
+          printf '%s' "$UNITY_SERIAL" > "$RUNNER_TEMP/unity-secrets/unity_serial"
+          printf '%s' "$UNITY_USER" > "$RUNNER_TEMP/unity-secrets/unity_user"
+          printf '%s' "$UNITY_PASSWORD" > "$RUNNER_TEMP/unity-secrets/unity_password"
+          chmod 600 "$RUNNER_TEMP"/unity-secrets/*
+
+          docker run --rm \
+            --shm-size=8g \
+            -v "$GITHUB_WORKSPACE/Conduit.Unity:$PROJECT/Packages/dev.tryfinally.conduit" \
+            -v "$RUNNER_TEMP/consumer-player:$PROJECT/player-output" \
+            -v "$RUNNER_TEMP/unity-license:/root/.local/share/unity3d" \
+            -v "$RUNNER_TEMP/unity-secrets:/run/secrets:ro" \
+            -w "$PROJECT" \
+            "$IMAGE_TAG" \
+            unity-editor \
+              -login \
+              -projectPath "$PROJECT" \
+              -executeMethod Conduit.CI.BuildConsumerPlayer \
+              -conduitPlayerTarget linux \
+              -conduitPlayerOutput "$PROJECT/player-output/conduit-player"
+
+  test-unity-editor-windows:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      UNITY_VERSION: 6000.4.12f1
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-win-x64
+          path: ${{ runner.temp }}/conduit-server
+
+      - name: Configure paths
+        shell: pwsh
+        run: |
+          "UNITY_ROOT=$env:RUNNER_TEMP\Unity" >> $env:GITHUB_ENV
+          "UNITY_INSTALLER=$env:RUNNER_TEMP\UnitySetup64.exe" >> $env:GITHUB_ENV
+          "PROJECT=$env:RUNNER_TEMP\ConduitEditorCI" >> $env:GITHUB_ENV
+          "TEST_RESULTS=$env:RUNNER_TEMP\test-results\Edit mode tests.xml" >> $env:GITHUB_ENV
+          "CONDUIT_SERVER_EXECUTABLE=$env:RUNNER_TEMP\conduit-server\conduit-win-x64.exe" >> $env:GITHUB_ENV
+
+      - uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}\UnitySetup64.exe
+          key: unity-windows-installer-v1-${{ env.UNITY_VERSION }}
+
+      - name: Install Unity Editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path $env:UNITY_INSTALLER)) {
+            $release = (Invoke-WebRequest "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION").Content
+            $escaped = [regex]::Escape($env:UNITY_VERSION)
+            $match = [regex]::Match(
+              $release,
+              "https://download\.unity3d\.com/download_unity/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escaped\.exe"
+            )
+            if (-not $match.Success) {
+              throw "Could not find the Windows Unity installer for $env:UNITY_VERSION."
+            }
+
+            Invoke-WebRequest $match.Value -OutFile $env:UNITY_INSTALLER
+          }
+
+          $process = Start-Process $env:UNITY_INSTALLER -Wait -PassThru -ArgumentList @(
+            "/S",
+            "/D=$env:UNITY_ROOT"
+          )
+          if ($process.ExitCode -ne 0) {
+            throw "Unity installer exited with code $($process.ExitCode)."
+          }
+
+      - name: Prepare Unity project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force "$env:PROJECT\Packages" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROJECT\ProjectSettings" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROJECT\Assets" | Out-Null
+          New-Item -ItemType Directory -Force (Split-Path $env:TEST_RESULTS) | Out-Null
+          Copy-Item -Recurse -Force "$env:GITHUB_WORKSPACE\Conduit.Unity" "$env:PROJECT\Packages\dev.tryfinally.conduit"
+          Copy-Item "$env:GITHUB_WORKSPACE\.github\workflows\test-manifest.json" "$env:PROJECT\Packages\manifest.json"
+          @"
+          m_EditorVersion: $env:UNITY_VERSION
+          "@ | Set-Content "$env:PROJECT\ProjectSettings\ProjectVersion.txt"
+
+      - name: Run Windows EditMode tests
+        id: windows-unity-tests
+        continue-on-error: true
+        shell: pwsh
+        env:
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+          UNITY_USER: ${{ secrets.UNITY_USER }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("UNITY_SERIAL", "UNITY_USER", "UNITY_PASSWORD")) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "env:$name").Value)) {
+              throw "$name is not configured."
+            }
+          }
+
+          $unity = @(
+            "$env:UNITY_ROOT\Editor\Unity.exe",
+            "$env:UNITY_ROOT\Unity.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $unity) {
+            throw "Unity.exe was not found under $env:UNITY_ROOT."
+          }
+
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Unity\Caches" | Out-Null
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Unity\licenses" | Out-Null
+          New-Item -ItemType Directory -Force "$env:APPDATA\Unity" | Out-Null
+          New-Item -ItemType Directory -Force "$env:PROGRAMDATA\Unity" | Out-Null
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new($unity)
+          $startInfo.UseShellExecute = $false
+          $startInfo.WorkingDirectory = $env:PROJECT
+          foreach ($argument in @(
+            "-batchmode",
+            "-nographics",
+            "-silent-crashes",
+            "-logFile", "-",
+            "-serial", $env:UNITY_SERIAL,
+            "-username", $env:UNITY_USER,
+            "-password", $env:UNITY_PASSWORD,
+            "-projectPath", $env:PROJECT,
+            "-executeMethod", "Conduit.CI.RunFilteredEditModeTestsFromCommandLine",
+            "-conduitTestResults", $env:TEST_RESULTS
+          )) {
+            $startInfo.ArgumentList.Add($argument)
+          }
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) {
+            throw "Unity EditMode tests exited with code $($process.ExitCode)."
+          }
+
+      - name: Locate Windows Unity test results
+        id: windows-unity-test-results
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if (Test-Path $env:TEST_RESULTS) {
+            "found=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "found=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::notice::Unity exited before producing a test report."
+          }
+
+      - uses: dorny/test-reporter@v3
+        if: ${{ !cancelled() && steps.windows-unity-test-results.outputs.found == 'true' }}
+        with:
+          name: Unity EditMode Test Results (Windows)
+          reporter: dotnet-nunit
+          path: "${{ runner.temp }}/test-results/Edit mode tests.xml"
+          fail-on-error: false
+
+      - name: Validate required Windows coverage
+        if: ${{ !cancelled() && steps.windows-unity-test-results.outputs.found == 'true' }}
+        shell: pwsh
+        run: |
+          [xml]$report = Get-Content -Raw $env:TEST_RESULTS
+          $testCases = @($report.SelectNodes("//test-case"))
+          $required = @(
+            "ConduitMcpEndToEndTests.Initialize_Succeeds",
+            "ConduitSetupWizardTests.ExistingConfigWithWindowsWslPathCountsAsDownloadedAndConfigured"
+          )
+          foreach ($fullName in $required) {
+            $matchingTests = @($testCases | Where-Object {
+              $testName = [string]$_.fullname
+              $testName -eq $fullName -or $testName.EndsWith(".$fullName")
+            })
+            if ($matchingTests.Count -ne 1 -or $matchingTests[0].result -ne "Passed") {
+              throw "Required Windows test '$fullName' did not pass."
+            }
+          }
+
+      - name: Fail on Windows Unity test errors
+        if: steps.windows-unity-tests.outcome == 'failure' || steps.windows-unity-test-results.outputs.found != 'true'
         run: exit 1
 
   build-player-linux:
@@ -736,7 +1042,18 @@ jobs:
 
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
-    needs: [version, build, test-server, test-server-binary, test-unity, test-player-linux, test-player-windows, test-player-proton]
+    needs:
+      - version
+      - build
+      - test-server
+      - test-server-binary
+      - test-server-binary-musl
+      - test-unity
+      - test-unity-consumer
+      - test-unity-editor-windows
+      - test-player-linux
+      - test-player-windows
+      - test-player-proton
     permissions:
       contents: write
     runs-on: ubuntu-latest
