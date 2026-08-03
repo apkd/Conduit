@@ -22,7 +22,7 @@ A Unity MCP server that stays out of the way of your coding agent.
 - Robust: survives crashes, restarts, assembly reloads, and handles multiple agents and Unity instances.
 - Context-efficient: conserves the agent's context window and saves tokens. Small number of versatile tools.
 - Simple setup: one Unity package, one server exe, automated setup wizard. No dependencies, no pollution.
-- Supports Linux and Windows.
+- Supports Linux and Windows, both in the editor and in development builds.
 
 > [!WARNING]
 > **Granting an AI agent access to Unity indirectly gives them escalated access to your machine.**
@@ -239,7 +239,7 @@ url = "http://127.0.0.1:5080"
 <details>
   <summary><b>Manual build instructions</b></summary>
 
-Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and the [Native AOT prerequisites](https://learn.microsoft.com/dotnet/core/deploying/native-aot/#prerequisites) for your operating system.
+Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) for your operating system.
 Then clone this repository and publish the server:
 
 ```bash
@@ -1362,7 +1362,7 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 
 ## Available tools
 
-#### The basics:
+#### Prototyping basics:
 These core tools that cover most situations.
 In particular, `execute_code` is vital, as it can run arbitrary C# code without an assembly reload.
 It returns the result, logs, exceptions, and compilation errors.
@@ -1374,6 +1374,7 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 - ***`refresh_asset_database`***: imports modified assets, recompiles code
 - ***`reimport_assets`***: forces matching assets to reimport
 - ***`execute_code`***: runs ad hoc C# code
+- ***`detour`***: replaces managed C# method implementations at runtime
 - ***`reflect`***: searches loaded C# types and members
 - ***`restart`***: starts or restarts Unity Editor
 
