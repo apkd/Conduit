@@ -6,12 +6,6 @@ using UnityEngine;
 namespace Conduit
 {
     [Serializable]
-    sealed class BridgeMessageHeader
-    {
-        public string message_type = string.Empty;
-    }
-
-    [Serializable]
     sealed class BridgeHelloEnvelope
     {
         public int protocol_version = BridgeContract.Version;
@@ -26,14 +20,6 @@ namespace Conduit
             message_type = message.message_type;
             project = message.project;
         }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                project = project,
-            };
     }
 
     [Serializable]
@@ -53,15 +39,6 @@ namespace Conduit
             request_id = message.request_id ?? string.Empty;
             command = message.command;
         }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-                command = command,
-            };
     }
 
     [Serializable]
@@ -79,14 +56,6 @@ namespace Conduit
             message_type = message.message_type;
             request_id = message.request_id ?? string.Empty;
         }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-            };
     }
 
     [Serializable]
@@ -106,15 +75,6 @@ namespace Conduit
             request_id = message.request_id ?? string.Empty;
             result = message.result;
         }
-
-        public BridgeMessage ToMessage()
-            => new()
-            {
-                protocol_version = protocol_version,
-                message_type = message_type,
-                request_id = request_id,
-                result = result,
-            };
     }
 
     /// <summary>Serializes bridge envelopes with Unity's field-based JSON serializer.</summary>
@@ -130,7 +90,7 @@ namespace Conduit
                 BridgeMessageTypes.CancelCommand  => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
                 BridgeMessageTypes.CommandStarted => JsonUtility.ToJson(new BridgeCommandStartedEnvelope(message)),
                 BridgeMessageTypes.CommandResult  => JsonUtility.ToJson(new BridgeCommandResultEnvelope(message)),
-                _                                 => JsonUtility.ToJson(new BridgeMessageHeader { message_type = message.message_type }),
+                _                                 => JsonUtility.ToJson(message),
             };
 
         public static BridgeMessage? Deserialize(string payload)
@@ -140,16 +100,34 @@ namespace Conduit
 
             try
             {
-                var header = JsonUtility.FromJson<BridgeMessageHeader>(payload);
-                return header?.message_type switch
+                var message = JsonUtility.FromJson<BridgeMessage>(payload);
+                if (message == null)
+                    return null;
+
+                switch (message.message_type)
                 {
-                    BridgeMessageTypes.Hello          => JsonUtility.FromJson<BridgeHelloEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.Command        => JsonUtility.FromJson<BridgeCommandEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CancelCommand  => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CommandStarted => JsonUtility.FromJson<BridgeCommandStartedEnvelope>(payload)?.ToMessage(),
-                    BridgeMessageTypes.CommandResult  => JsonUtility.FromJson<BridgeCommandResultEnvelope>(payload)?.ToMessage(),
-                    _                                 => null,
-                };
+                    case BridgeMessageTypes.Hello:
+                        message.request_id = null;
+                        message.command = null;
+                        message.result = null;
+                        return message;
+                    case BridgeMessageTypes.Command:
+                        message.project = null;
+                        message.result = null;
+                        return message;
+                    case BridgeMessageTypes.CancelCommand:
+                    case BridgeMessageTypes.CommandStarted:
+                        message.project = null;
+                        message.command = null;
+                        message.result = null;
+                        return message;
+                    case BridgeMessageTypes.CommandResult:
+                        message.project = null;
+                        message.command = null;
+                        return message;
+                    default:
+                        return null;
+                }
             }
             catch (ArgumentException)
             {

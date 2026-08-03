@@ -38,7 +38,6 @@ namespace Conduit.Runtime
             Directory.CreateDirectory(Path.Combine(endpointDirectory, "clients"));
             RuntimeIpcPaths.TryRestrictDirectory(endpointDirectory);
 
-            var capabilities = RuntimeToolDispatcher.Capabilities;
             handshake = new()
             {
                 display_name = Application.productName,
@@ -51,7 +50,6 @@ namespace Conduit.Runtime
                 company_name = Application.companyName,
                 product_name = Application.productName,
                 can_monitor_process = !wine,
-                capabilities = capabilities,
                 session_instance_id = sessionId,
                 handoff_token = Environment.GetEnvironmentVariable("CONDUIT_HANDOFF_TOKEN") ?? string.Empty,
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
@@ -75,7 +73,6 @@ namespace Conduit.Runtime
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
                 can_monitor_process = !wine,
                 is_test_player = Environment.GetEnvironmentVariable("CONDUIT_TEST_PLAYER") == "1",
-                capabilities = capabilities,
             };
         }
 
@@ -252,6 +249,7 @@ namespace Conduit.Runtime
                 session = new(
                     Interlocked.Increment(ref nextSessionId),
                     connection,
+                    endpointDirectory,
                     endpointToken
                 );
                 sessions[session.Id] = session;
@@ -275,6 +273,21 @@ namespace Conduit.Runtime
                         continue;
 
                     await session.SendAsync(BridgeMessage.CreateCommandStarted(message.request_id));
+                    try
+                    {
+                        session.ResolveArtifacts(message.command.artifacts);
+                    }
+                    catch (Exception exception)
+                    {
+                        await session.SendAsync(
+                            BridgeMessage.CreateCommandResult(
+                                message.request_id,
+                                BridgeCommandResult.FromException(exception)
+                            )
+                        );
+                        continue;
+                    }
+
                     RuntimeBridgeDispatcher.Enqueue(session, message.request_id, message.command);
                 }
             }
@@ -372,16 +385,19 @@ namespace Conduit.Runtime
     sealed class RuntimeBridgeSession : IDisposable
     {
         readonly RuntimeDuplexConnection connection;
+        readonly string endpointDirectory;
         readonly CancellationToken endpointToken;
         readonly ConcurrentDictionary<string, CancellationTokenSource> requests = new();
 
         public RuntimeBridgeSession(
             int id,
             RuntimeDuplexConnection connection,
+            string endpointDirectory,
             CancellationToken endpointToken)
         {
             Id = id;
             this.connection = connection;
+            this.endpointDirectory = endpointDirectory;
             this.endpointToken = endpointToken;
         }
 
@@ -409,10 +425,42 @@ namespace Conduit.Runtime
         }
 
         public Task SendAsync(BridgeMessage message)
-            => connection.WriteAsync(
+        {
+            if (message.result?.artifacts is { } artifacts)
+            {
+                try
+                {
+                    foreach (var artifact in artifacts)
+                        if (artifact.Content != null)
+                            artifact.MaterializeInEndpoint(endpointDirectory);
+                        else
+                            artifact.ResolveInEndpoint(endpointDirectory);
+                }
+                catch (Exception exception) when (
+                    exception is IOException
+                        or UnauthorizedAccessException
+                        or InvalidOperationException
+                        or ArgumentException
+                        or NotSupportedException)
+                {
+                    message = BridgeMessage.CreateCommandResult(
+                        message.request_id!,
+                        BridgeCommandResult.FromException(exception)
+                    );
+                }
+            }
+
+            return connection.WriteAsync(
                 BridgeProtocol.Serialize(message),
                 endpointToken
             );
+        }
+
+        public void ResolveArtifacts(BridgeArtifact[] artifacts)
+        {
+            foreach (var artifact in artifacts)
+                artifact.ResolveInEndpoint(endpointDirectory);
+        }
 
         public void Dispose()
         {
@@ -491,24 +539,6 @@ namespace Conduit.Runtime
                 chmod(path, 0x1c0); // 0700
             }
             catch (Exception) { }
-        }
-
-        public static string ResolveRelativePath(string relativePath)
-        {
-            if (Path.IsPathRooted(relativePath))
-                throw new InvalidOperationException("A Conduit artifact path must be relative to its IPC root.");
-
-            var root = Path.GetFullPath(GetRoot(RuntimePlatformUtility.IsWine()));
-            var path = Path.GetFullPath(Path.Combine(root, relativePath));
-            var rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                             + Path.DirectorySeparatorChar;
-            var comparison = Application.platform == RuntimePlatform.WindowsPlayer
-                ? StringComparison.OrdinalIgnoreCase
-                : StringComparison.Ordinal;
-            if (!path.StartsWith(rootPrefix, comparison))
-                throw new InvalidOperationException("A Conduit artifact path escaped its IPC root.");
-
-            return path;
         }
 
         static string ToWinePath(string path)

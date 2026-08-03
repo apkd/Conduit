@@ -10,7 +10,7 @@ namespace Conduit
     /// <summary>Defines the bridge wire version shared by the server, Editor, and player.</summary>
     static class BridgeContract
     {
-        public const int Version = 5;
+        public const int Version = 6;
 
         public static string FormatProtocolMismatch(int serverVersion, int unityVersion)
             => serverVersion < unityVersion
@@ -212,7 +212,7 @@ namespace Conduit
             => new() { message_type = BridgeMessageTypes.CommandResult, request_id = requestId, result = result };
     }
 
-    /// <summary>Identifies a connected Unity Editor or player process and its bridge capabilities.</summary>
+    /// <summary>Identifies a connected Unity Editor or player process.</summary>
     [Serializable]
     public sealed class BridgeProjectHandshake
     {
@@ -228,7 +228,6 @@ namespace Conduit
         public string company_name = string.Empty;
         public string product_name = string.Empty;
         public bool can_monitor_process = true;
-        public string[] capabilities = Array.Empty<string>();
         public bool preserve_snippets;
         public string editor_log_path = string.Empty;
         public string session_instance_id = string.Empty;
@@ -247,7 +246,6 @@ namespace Conduit
         public string CompanyName { get => company_name; set => company_name = value; }
         public string ProductName { get => product_name; set => product_name = value; }
         public bool CanMonitorProcess { get => can_monitor_process; set => can_monitor_process = value; }
-        public string[] Capabilities { get => capabilities; set => capabilities = value; }
         public bool PreserveSnippets { get => preserve_snippets; set => preserve_snippets = value; }
         public string EditorLogPath { get => editor_log_path; set => editor_log_path = value; }
         public string SessionInstanceId { get => session_instance_id; set => session_instance_id = value; }
@@ -341,38 +339,30 @@ namespace Conduit
     [Serializable]
     sealed class BridgeArtifact
     {
-        const int EncodedChunkSize = 48 * 1024;
-
         public string name = string.Empty;
         public string media_type = "application/octet-stream";
         public string sha256 = string.Empty;
+        public long length;
         public string? relative_path;
-        public string[] chunks = Array.Empty<string>();
 
         public string Name { get => name; set => name = value; }
         public string MediaType { get => media_type; set => media_type = value; }
         public string Sha256 { get => sha256; set => sha256 = value; }
+        public long Length { get => length; set => length = value; }
         public string? RelativePath { get => relative_path; set => relative_path = value; }
-        public string[] Chunks { get => chunks; set => chunks = value; }
+
+        internal byte[]? Content { get; set; }
+        internal string? ResolvedPath { get; set; }
 
         public static BridgeArtifact FromBytes(string name, string mediaType, byte[] bytes)
-        {
-            var encoded = Convert.ToBase64String(bytes);
-            var chunks = new string[Math.Max(1, (encoded.Length + EncodedChunkSize - 1) / EncodedChunkSize)];
-            for (var index = 0; index < chunks.Length; index++)
-            {
-                var start = index * EncodedChunkSize;
-                chunks[index] = encoded.Substring(start, Math.Min(EncodedChunkSize, encoded.Length - start));
-            }
-
-            return new()
+            => new()
             {
                 name = name,
                 media_type = mediaType,
                 sha256 = ComputeSha256(bytes),
-                chunks = chunks,
+                length = bytes.LongLength,
+                Content = bytes,
             };
-        }
 
         public static BridgeArtifact FromProjectFile(string name, string mediaType, string relativePath, byte[] bytes)
             => new()
@@ -380,26 +370,163 @@ namespace Conduit
                 name = name,
                 media_type = mediaType,
                 sha256 = ComputeSha256(bytes),
+                length = bytes.LongLength,
                 relative_path = relativePath.Replace(Path.DirectorySeparatorChar, '/'),
             };
 
-        internal byte[] DecodeChunks()
+        internal void MaterializeInEndpoint(string endpointDirectory)
         {
-            var bytes = Convert.FromBase64String(string.Concat(chunks));
+            if (Content is not { } bytes)
+                throw new InvalidOperationException($"Artifact '{name}' has no content to materialize.");
+
+            Verify(bytes);
+            var directory = Path.Combine(endpointDirectory, "artifacts");
+            Directory.CreateDirectory(directory);
+            RejectLink(directory);
+            var fileName = sha256 + GetSafeExtension(name);
+            var path = Path.Combine(directory, fileName);
+            WriteAtomically(path, bytes, sha256);
+            // endpoint-relative paths survive host/container path translation in pressure-vessel.
+            relative_path = "artifacts/" + fileName;
+            ResolvedPath = path;
+            Content = null;
+        }
+
+        internal void ResolveInEndpoint(string endpointDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(relative_path) || Path.IsPathRooted(relative_path))
+                throw new InvalidDataException($"Artifact '{name}' must use an endpoint-relative path.");
+            if (length < 0 || sha256.Length != 64)
+                throw new InvalidDataException($"Artifact '{name}' has invalid verification metadata.");
+
+            foreach (var character in sha256)
+                if (!Uri.IsHexDigit(character))
+                    throw new InvalidDataException($"Artifact '{name}' has an invalid SHA-256 value.");
+
+            var fileName = sha256.ToLowerInvariant() + GetSafeExtension(name);
+            var normalizedRelativePath = relative_path.Replace('/', Path.DirectorySeparatorChar);
+            var expectedRelativePath = Path.Combine("artifacts", fileName);
+            if (!string.Equals(
+                    normalizedRelativePath,
+                    expectedRelativePath,
+                    StringComparison.Ordinal
+                ))
+                throw new InvalidDataException($"Artifact '{name}' has an unexpected endpoint path.");
+
+            var artifactRoot = Path.GetFullPath(Path.Combine(endpointDirectory, "artifacts"));
+            RejectLink(artifactRoot);
+            ResolvedPath = Path.Combine(artifactRoot, fileName);
+        }
+
+        internal void ResolveInProject(string projectDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(relative_path) || Path.IsPathRooted(relative_path))
+                throw new InvalidDataException($"Artifact '{name}' must use a project-relative path.");
+
+            var projectRoot = Path.GetFullPath(projectDirectory);
+            var path = Path.GetFullPath(Path.Combine(projectRoot, relative_path));
+            var normalized = Path.GetRelativePath(projectRoot, path);
+            if (Path.IsPathRooted(normalized)
+                || normalized == ".."
+                || normalized.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidDataException($"Artifact '{name}' escaped its Unity project.");
+
+            ResolvedPath = path;
+        }
+
+        internal byte[] ReadVerified()
+        {
+            byte[] bytes;
+            if (Content is { } content)
+                bytes = content;
+            else if (ResolvedPath is { } path)
+            {
+                RejectLink(path);
+                bytes = File.ReadAllBytes(path);
+            }
+            else
+                throw new InvalidOperationException($"Artifact '{name}' has no resolved content.");
+
             Verify(bytes);
             return bytes;
         }
 
         internal void Verify(byte[] bytes)
         {
+            if (bytes.LongLength != length)
+                throw new InvalidDataException($"Artifact '{name}' failed length verification.");
             if (!string.Equals(ComputeSha256(bytes), sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"Artifact '{name}' failed SHA-256 verification.");
+        }
+
+        static string GetSafeExtension(string artifactName)
+        {
+            var extension = Path.GetExtension(Path.GetFileName(artifactName));
+            if (extension.Length is 0 or > 16)
+                return string.Empty;
+
+            for (var index = 1; index < extension.Length; index++)
+                if (!char.IsLetterOrDigit(extension[index]))
+                    return string.Empty;
+
+            return extension.ToLowerInvariant();
+        }
+
+        static void WriteAtomically(string path, byte[] bytes, string expectedSha256)
+        {
+            if (File.Exists(path))
+            {
+                VerifyFile(path, bytes.LongLength, expectedSha256);
+                return;
+            }
+
+            var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(temporaryPath, bytes);
+                try
+                {
+                    File.Move(temporaryPath, path);
+                }
+                catch (IOException) when (File.Exists(path))
+                {
+                    // another connection may have staged the same content-addressed artifact.
+                    VerifyFile(path, bytes.LongLength, expectedSha256);
+                }
+            }
+            finally
+            {
+                try { File.Delete(temporaryPath); } catch { }
+            }
+        }
+
+        static void VerifyFile(string path, long expectedLength, string expectedSha256)
+        {
+            RejectLink(path);
+            if (new FileInfo(path).Length != expectedLength)
+                throw new InvalidDataException($"Shared artifact '{path}' has an unexpected length.");
+
+            using var stream = File.OpenRead(path);
+            using var algorithm = SHA256.Create();
+            var actualSha256 = FormatSha256(algorithm.ComputeHash(stream));
+            if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Shared artifact '{path}' failed SHA-256 verification.");
+        }
+
+        static void RejectLink(string path)
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"Shared artifact path '{path}' cannot be a symbolic link.");
         }
 
         internal static string ComputeSha256(byte[] bytes)
         {
             using var algorithm = SHA256.Create();
-            var hash = algorithm.ComputeHash(bytes);
+            return FormatSha256(algorithm.ComputeHash(bytes));
+        }
+
+        static string FormatSha256(byte[] hash)
+        {
             var characters = new char[hash.Length * 2];
             const string alphabet = "0123456789abcdef";
             for (var index = 0; index < hash.Length; index++)
@@ -445,7 +572,6 @@ namespace Conduit
         public string last_seen_utc = string.Empty;
         public bool can_monitor_process;
         public bool is_test_player;
-        public string[] capabilities = Array.Empty<string>();
 
         public int ProtocolVersion { get => protocol_version; set => protocol_version = value; }
         public string EndpointKind { get => endpoint_kind; set => endpoint_kind = value; }
@@ -465,7 +591,6 @@ namespace Conduit
         public string LastSeenUtc { get => last_seen_utc; set => last_seen_utc = value; }
         public bool CanMonitorProcess { get => can_monitor_process; set => can_monitor_process = value; }
         public bool IsTestPlayer { get => is_test_player; set => is_test_player = value; }
-        public string[] Capabilities { get => capabilities; set => capabilities = value; }
 
         internal string EndpointDirectoryPath { get; set; } = string.Empty;
         internal string Selector => $"player:{process_id.ToString(CultureInfo.InvariantCulture)}";

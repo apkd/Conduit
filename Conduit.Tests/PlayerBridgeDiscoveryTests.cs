@@ -177,7 +177,7 @@ public sealed class PlayerBridgeDiscoveryTests
     }
 
     [Test]
-    public async Task ArtifactChunksRoundTripAndRejectTampering()
+    public async Task InMemoryArtifactRoundTripsAndRejectsTampering()
     {
         var bytes = Enumerable.Range(0, 200_000)
             .Select(static value => (byte)(value % 251))
@@ -188,11 +188,9 @@ public sealed class PlayerBridgeDiscoveryTests
             bytes
         );
 
-        await Assert.That(artifact.Chunks.Length).IsGreaterThan(1);
         await Assert.That(artifact.Decode()).IsEquivalentTo(bytes);
 
-        artifact.Chunks[0] = (artifact.Chunks[0][0] == 'A' ? "B" : "A")
-                             + artifact.Chunks[0][1..];
+        artifact.Content![0] ^= 1;
         await Assert.That(artifact.Decode).Throws<InvalidDataException>();
     }
 

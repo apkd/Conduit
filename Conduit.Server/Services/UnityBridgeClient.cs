@@ -49,6 +49,8 @@ public sealed class UnityBridgeClient
             gateAcquired = true;
             if (cacheEntry.TryGetActive(out _, out var cachedHandshake))
                 return BridgeClientResult.Connected(cachedHandshake!);
+            if (cacheEntry.Connection is not null || cacheEntry.Handshake is not null)
+                await cacheEntry.DisposeConnectionAsync();
 
             var connectResult = await TryConnectUntilReadyAsync(
                 normalizedProjectPath,
@@ -93,16 +95,15 @@ public sealed class UnityBridgeClient
     {
         var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         var cacheEntry = connectionCache.GetOrAdd(normalizedProjectPath, static _ => new());
+        BridgeClientConnection connection;
+        BridgeProjectHandshake handshake;
 
         await cacheEntry.Gate.WaitAsync(ct);
         try
         {
-            var connection = cacheEntry.Connection;
-            var handshake = cacheEntry.Handshake;
-            var reusedConnection = connection is not null && handshake is not null && connection.IsConnected;
-            if (!reusedConnection)
+            if (!cacheEntry.TryGetActive(out var activeConnection, out var activeHandshake))
             {
-                if (connection is not null || handshake is not null)
+                if (cacheEntry.Connection is not null || cacheEntry.Handshake is not null)
                     await cacheEntry.DisposeConnectionAsync();
 
                 var effectiveInitialWindow = timeout < initialConnectWindow ? timeout : initialConnectWindow;
@@ -119,32 +120,47 @@ public sealed class UnityBridgeClient
                 if (connectResult.Connection is not { } newConnection || connectResult.Result.Handshake is not { } newHandshake)
                     return connectResult.Result;
 
-                connection = newConnection;
-                handshake = newHandshake;
+                cacheEntry.Set(newConnection, newHandshake);
+                activeConnection = newConnection;
+                activeHandshake = newHandshake;
             }
 
-            var result = await WaitForCommandResultAsync(
-                connection!,
-                handshake!,
-                requestId,
-                command.CommandType,
-                timeout,
-                ct,
-                command,
-                commandCancellation
-            );
-
-            if (result.FailureKind is null && connection!.IsConnected)
-                cacheEntry.Set(connection, handshake!);
-            else
-                await cacheEntry.DisposeConnectionAsync(connection);
-
-            return result;
+            connection = activeConnection!;
+            handshake = activeHandshake!;
         }
         finally
         {
             cacheEntry.Gate.Release();
         }
+
+        var result = await WaitForCommandResultAsync(
+            connection,
+            handshake,
+            requestId,
+            command.CommandType,
+            timeout,
+            ct,
+            command,
+            commandCancellation
+        );
+
+        if (!connection.IsConnected
+            || result.FailureKind is BridgeRuntimeFailureKind.ProcessExited
+                or BridgeRuntimeFailureKind.SendFailed
+                or BridgeRuntimeFailureKind.SendTimedOut)
+        {
+            await cacheEntry.Gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                await cacheEntry.DisposeConnectionAsync(connection);
+            }
+            finally
+            {
+                cacheEntry.Gate.Release();
+            }
+        }
+
+        return result;
     }
 
     internal bool TryGetLiveHandshake(string projectPath, out BridgeProjectHandshake? handshake)
@@ -159,6 +175,40 @@ public sealed class UnityBridgeClient
         return cacheEntry.TryGetActive(out _, out handshake);
     }
 
+    internal async Task<BridgeClientResult> ExecuteIdempotentCommandAsync(
+        string projectPath,
+        string requestId,
+        BridgeCommand command,
+        TimeSpan timeout,
+        CancellationToken ct)
+    {
+        var result = await ExecuteCommandAsync(
+            projectPath,
+            requestId,
+            command,
+            timeout,
+            processIdHint: null,
+            ct
+        );
+        if (result.Handshake is null
+            || result.FailureKind is not (BridgeRuntimeFailureKind.SendFailed
+                or BridgeRuntimeFailureKind.SendTimedOut
+                or BridgeRuntimeFailureKind.StartAckDisconnected
+                or BridgeRuntimeFailureKind.StartAckTimedOut
+                or BridgeRuntimeFailureKind.ResultDisconnected
+                or BridgeRuntimeFailureKind.ResultTimedOut))
+            return result;
+
+        return await ExecuteCommandAsync(
+            projectPath,
+            requestId,
+            command,
+            timeout,
+            processIdHint: null,
+            ct
+        );
+    }
+
     async Task<BridgeClientResult> WaitForCommandResultAsync(
         BridgeClientConnection connection,
         BridgeProjectHandshake handshake,
@@ -166,7 +216,7 @@ public sealed class UnityBridgeClient
         string commandType,
         TimeSpan timeout,
         CancellationToken ct,
-        BridgeCommand? commandToSend,
+        BridgeCommand command,
         CancellationToken commandCancellation
     )
     {
@@ -174,42 +224,41 @@ public sealed class UnityBridgeClient
         timeoutCts.CancelAfter(timeout);
         using var cancellationMonitorCts = new CancellationTokenSource();
         var effectiveToken = timeoutCts.Token;
-        var commandSent = commandToSend is null;
+        var commandSent = false;
         var cancellationTask = Task.CompletedTask;
+        var pending = connection.RegisterRequest(requestId, commandType);
 
         try
         {
-            if (commandToSend is not null)
+            if (await connection.SendCommandAsync(requestId, command, effectiveToken) is { } sendFailure)
+                return sendFailure;
+
+            commandSent = true;
+            pending.MarkSent();
+            cancellationTask = SendCancellationWhenRequestedAsync(
+                connection,
+                requestId,
+                commandType,
+                commandCancellation,
+                cancellationMonitorCts.Token
+            );
+
+            var startWaitTask = connection.WaitForCommandStartedAsync(pending, commandStartTimeout, effectiveToken, ct);
+            if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
             {
-                if (await connection.SendCommandAsync(requestId, commandToSend, effectiveToken) is { } sendFailure)
-                    return sendFailure;
-
-                commandSent = true;
-                cancellationTask = SendCancellationWhenRequestedAsync(
-                    connection,
-                    requestId,
-                    commandType,
-                    commandCancellation,
-                    cancellationMonitorCts.Token
-                );
-
-                var startWaitTask = connection.WaitForCommandStartedAsync(requestId, commandType, commandSent, commandStartTimeout, effectiveToken, ct);
-                if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
-                {
-                    var completedStartTask = await Task.WhenAny(startWaitTask, processExitStartTask);
-                    if (ReferenceEquals(completedStartTask, processExitStartTask) && await processExitStartTask is { } processFailure)
-                        return processFailure;
-                }
-
-                var startOutcome = await startWaitTask;
-                if (startOutcome.Failure is { } startFailure)
-                    return startFailure;
-
-                if (startOutcome.FinalResult is { } earlyResult)
-                    return earlyResult;
+                var completedStartTask = await Task.WhenAny(startWaitTask, processExitStartTask);
+                if (ReferenceEquals(completedStartTask, processExitStartTask) && await processExitStartTask is { } processFailure)
+                    return processFailure;
             }
 
-            var waitForResultTask = connection.WaitForResultAsync(requestId, commandType, timeout, commandSent, effectiveToken, ct);
+            var startOutcome = await startWaitTask;
+            if (startOutcome.Failure is { } startFailure)
+                return startFailure;
+
+            if (startOutcome.FinalResult is { } earlyResult)
+                return earlyResult;
+
+            var waitForResultTask = connection.WaitForResultAsync(pending, timeout, effectiveToken, ct);
             if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitResultTask)
             {
                 var completedTask = await Task.WhenAny((Task)waitForResultTask, processExitResultTask);
@@ -237,6 +286,7 @@ public sealed class UnityBridgeClient
         }
         finally
         {
+            connection.RemoveRequest(requestId, pending);
             if (!commandCancellation.IsCancellationRequested)
                 cancellationMonitorCts.Cancel();
 
@@ -463,7 +513,15 @@ public sealed class UnityBridgeClient
                 ));
             }
 
-            return (new(transport, response.Project, logger), BridgeClientResult.Connected(response.Project));
+            return (
+                new(
+                    transport,
+                    response.Project,
+                    logger,
+                    endpoint?.EndpointDirectoryPath
+                ),
+                BridgeClientResult.Connected(response.Project)
+            );
         }
         catch (TimeoutException)
         {
@@ -595,9 +653,9 @@ public sealed class UnityBridgeClient
         const string DotNetUnixPipePrefix = "CoreFxPipe_";
         const int ErrorAgain = 11;
         const int ErrorInterrupted = 4;
-        bool disposed;
+        int disposed;
 
-        public bool IsConnected => !disposed && isConnected();
+        public bool IsConnected => Volatile.Read(ref disposed) == 0 && isConnected();
 
         public static async Task<BridgeTransport> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken ct)
         {
@@ -631,10 +689,9 @@ public sealed class UnityBridgeClient
 
         public async ValueTask DisposeAsync()
         {
-            if (disposed)
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
                 return;
 
-            disposed = true;
             await disposeAsync();
         }
 
@@ -1167,237 +1224,335 @@ public sealed class UnityBridgeClient
         }
     }
 
-    internal sealed class BridgeClientConnection(
-        BridgeTransport transport,
-        BridgeProjectHandshake handshake,
-        ILogger<UnityBridgeClient> logger) : IAsyncDisposable
+    internal sealed class BridgeClientConnection : IAsyncDisposable
     {
-        BridgeProjectHandshake Handshake { get; } = handshake;
+        readonly BridgeTransport transport;
+        readonly BridgeProjectHandshake handshake;
+        readonly ILogger<UnityBridgeClient> logger;
+        readonly string? endpointDirectory;
+        readonly ConcurrentDictionary<string, PendingRequest> pendingRequests = new(StringComparer.Ordinal);
+        readonly SemaphoreSlim writeGate = new(1, 1);
+        readonly CancellationTokenSource receiveCts = new();
+        readonly Task receiveTask;
+        int disconnected;
+        int disposed;
 
-        public bool IsConnected => transport.IsConnected;
+        internal BridgeClientConnection(
+            BridgeTransport transport,
+            BridgeProjectHandshake handshake,
+            ILogger<UnityBridgeClient> logger,
+            string? endpointDirectory = null)
+        {
+            this.transport = transport;
+            this.handshake = handshake;
+            this.logger = logger;
+            this.endpointDirectory = endpointDirectory;
+            receiveTask = ReceiveAsync();
+        }
+
+        public bool IsConnected => Volatile.Read(ref disconnected) == 0;
 
         string DescribeRequest(string requestId, string commandType, string phase)
-            => $"{phase} for request '{requestId}' ({commandType}) on pid {Handshake.EffectiveProcessId}, session {Handshake.SessionInstanceId}";
+            => $"{phase} for request '{requestId}' ({commandType}) on pid {handshake.EffectiveProcessId}, session {handshake.SessionInstanceId}";
 
-        public async Task<BridgeClientResult?> SendCommandAsync(string requestId, BridgeCommand command, CancellationToken ct)
+        internal PendingRequest RegisterRequest(string requestId, string commandType)
+        {
+            var pending = new PendingRequest(handshake, commandType);
+            if (!pendingRequests.TryAdd(requestId, pending))
+                throw new InvalidOperationException($"Bridge request '{requestId}' is already pending.");
+
+            if (!IsConnected)
+            {
+                RemoveRequest(requestId, pending);
+                pending.Disconnect();
+            }
+
+            return pending;
+        }
+
+        internal void RemoveRequest(string requestId, PendingRequest pending)
+        {
+            if (pendingRequests.TryGetValue(requestId, out var current)
+                && ReferenceEquals(current, pending))
+                pendingRequests.TryRemove(requestId, out _);
+        }
+
+        public async Task<BridgeClientResult?> SendCommandAsync(
+            string requestId,
+            BridgeCommand command,
+            CancellationToken ct)
         {
             try
             {
-                await transport.WritePayloadAsync(BridgeProtocol.Serialize(BridgeMessage.CreateCommand(requestId, command)), ct);
+                await WriteMessageAsync(BridgeMessage.CreateCommand(requestId, command), ct);
                 return null;
             }
             catch (IOException exception)
             {
                 logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
-                return BridgeClientResult.Failure(
-                    Handshake,
-                    BridgeRuntimeFailureKind.SendFailed,
-                    $"The Unity connection closed while sending '{command.CommandType}'.",
-                    commandSent: false
-                );
+                Disconnect();
+                return SendFailure();
             }
             catch (ObjectDisposedException exception)
             {
                 logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, command.CommandType, BridgeMessageTypes.Command)}.", exception);
-                return BridgeClientResult.Failure(
-                    Handshake,
-                    BridgeRuntimeFailureKind.SendFailed,
-                    $"The Unity connection closed while sending '{command.CommandType}'.",
-                    commandSent: false
-                );
+                Disconnect();
+                return SendFailure();
             }
+
+            BridgeClientResult SendFailure() => BridgeClientResult.Failure(
+                handshake,
+                BridgeRuntimeFailureKind.SendFailed,
+                $"The Unity connection closed while sending '{command.CommandType}'.",
+                commandSent: false
+            );
         }
 
         public async Task SendCancelCommandAsync(string requestId, string commandType, CancellationToken ct)
         {
             try
             {
-                await transport.WritePayloadAsync(
-                    BridgeProtocol.Serialize(BridgeMessage.CreateCancelCommand(requestId)),
-                    ct
-                );
+                await WriteMessageAsync(BridgeMessage.CreateCancelCommand(requestId), ct);
             }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException or OperationCanceledException)
             {
+                if (exception is IOException or ObjectDisposedException)
+                    Disconnect();
                 logger.ZLogDebug($"Could not send cancellation for {DescribeRequest(requestId, commandType, BridgeMessageTypes.CancelCommand)}.", exception);
             }
         }
 
-        public async Task<CommandStartOutcome> WaitForCommandStartedAsync(
-            string requestId,
-            string commandType,
-            bool commandSent,
-            TimeSpan timeout,
-            CancellationToken ct,
-            CancellationToken callerToken
-        )
+        async Task WriteMessageAsync(BridgeMessage message, CancellationToken ct)
         {
+            await writeGate.WaitAsync(ct);
             try
             {
-                using var startTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                startTimeoutCts.CancelAfter(timeout);
+                if (!IsConnected)
+                    throw new IOException("The Unity bridge connection is closed.");
 
-                while (!startTimeoutCts.IsCancellationRequested)
-                {
-                    var payload = await transport.ReadLineAsync(startTimeoutCts.Token);
-                    if (payload is null)
-                    {
-                        return new(
-                            FinalResult: null,
-                            BridgeClientResult.Failure(
-                                Handshake,
-                                BridgeRuntimeFailureKind.StartAckDisconnected,
-                                $"The Unity connection closed before '{commandType}' acknowledged starting.",
-                                commandSent
-                            )
-                        );
-                    }
+                await transport.WritePayloadAsync(BridgeProtocol.Serialize(message), ct);
+            }
+            finally
+            {
+                writeGate.Release();
+            }
+        }
 
-                    var response = BridgeProtocol.Deserialize(payload);
-                    if (response?.RequestId != requestId)
-                        continue;
-
-                    if (response?.MessageType == BridgeMessageTypes.CommandStarted)
-                        return new(null, null);
-
-                    // Reconnect replay may deliver the cached terminal result before a fresh
-                    // command_started arrives. Accepting it here preserves single-completion
-                    // semantics across transient disconnects.
-                    if (response is { MessageType: BridgeMessageTypes.CommandResult, Result: not null })
-                        return new(
-                            BridgeClientResult.Success(
-                                Handshake,
-                                response.Result.ToToolExecutionResult(),
-                                commandSent,
-                                response.Result.Artifacts
-                            ),
-                            null
-                        );
-                }
-
-                if (startTimeoutCts.IsCancellationRequested && callerToken.IsCancellationRequested)
-                    callerToken.ThrowIfCancellationRequested();
-
+        public async Task<CommandStartOutcome> WaitForCommandStartedAsync(
+            PendingRequest pending,
+            TimeSpan timeout,
+            CancellationToken ct,
+            CancellationToken callerToken)
+        {
+            using var startTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            startTimeoutCts.CancelAfter(timeout);
+            try
+            {
+                return await pending.Started.WaitAsync(startTimeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+            {
                 return new(
                     null,
                     BridgeClientResult.Failure(
-                        Handshake,
-                        startTimeoutCts.IsCancellationRequested
+                        handshake,
+                        IsConnected
                             ? BridgeRuntimeFailureKind.StartAckTimedOut
                             : BridgeRuntimeFailureKind.StartAckDisconnected,
-                        startTimeoutCts.IsCancellationRequested
-                            ? $"Unity did not acknowledge starting '{commandType}' within {timeout}."
-                            : $"The Unity connection closed before '{commandType}' acknowledged starting.",
-                        commandSent
-                    )
-                );
-            }
-            catch (IOException exception)
-            {
-                logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
-                return new(
-                    null,
-                    BridgeClientResult.Failure(
-                        Handshake,
-                        BridgeRuntimeFailureKind.StartAckDisconnected,
-                        $"The Unity connection closed before '{commandType}' acknowledged starting.",
-                        commandSent
-                    )
-                );
-            }
-            catch (ObjectDisposedException exception)
-            {
-                logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandStarted)}.", exception);
-                return new(
-                    null,
-                    BridgeClientResult.Failure(
-                        Handshake,
-                        BridgeRuntimeFailureKind.StartAckDisconnected,
-                        $"The Unity connection closed before '{commandType}' acknowledged starting.",
-                        commandSent
+                        IsConnected
+                            ? $"Unity did not acknowledge starting '{pending.CommandType}' within {timeout}."
+                            : $"The Unity connection closed before '{pending.CommandType}' acknowledged starting.",
+                        pending.CommandSent
                     )
                 );
             }
         }
 
         public async Task<BridgeClientResult> WaitForResultAsync(
-            string requestId,
-            string commandType,
+            PendingRequest pending,
             TimeSpan timeout,
-            bool commandSent,
             CancellationToken ct,
-            CancellationToken callerToken
-        )
+            CancellationToken callerToken)
         {
             try
             {
-                while (!ct.IsCancellationRequested)
-                {
-                    var payload = await transport.ReadLineAsync(ct);
-                    if (payload is null)
-                    {
-                        return BridgeClientResult.Failure(
-                            Handshake,
-                            BridgeRuntimeFailureKind.ResultDisconnected,
-                            $"The Unity connection closed before '{commandType}' reported completion.",
-                            commandSent
-                        );
-                    }
-
-                    var response = BridgeProtocol.Deserialize(payload);
-                    if (response?.MessageType != BridgeMessageTypes.CommandResult || response.Result is null)
-                        continue;
-
-                    if (response.RequestId != requestId)
-                        continue;
-
-                    return BridgeClientResult.Success(
-                        Handshake,
-                        response.Result.ToToolExecutionResult(),
-                        commandSent,
-                        response.Result.Artifacts
-                    );
-                }
-
-                if (ct.IsCancellationRequested && callerToken.IsCancellationRequested)
-                    callerToken.ThrowIfCancellationRequested();
-
+                return await pending.Result.WaitAsync(ct);
+            }
+            catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+            {
                 return BridgeClientResult.Failure(
-                    Handshake,
-                    ct.IsCancellationRequested
+                    handshake,
+                    IsConnected
                         ? BridgeRuntimeFailureKind.ResultTimedOut
                         : BridgeRuntimeFailureKind.ResultDisconnected,
-                    ct.IsCancellationRequested
-                        ? $"Unity did not report completion for '{commandType}' within {timeout}."
-                        : $"The Unity connection closed before '{commandType}' reported completion.",
-                    commandSent
-                );
-            }
-            catch (IOException exception)
-            {
-                logger.ZLogDebug($"Unity connection disconnected during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
-                return BridgeClientResult.Failure(
-                    Handshake,
-                    BridgeRuntimeFailureKind.ResultDisconnected,
-                    $"The Unity connection closed before '{commandType}' reported completion.",
-                    commandSent
-                );
-            }
-            catch (ObjectDisposedException exception)
-            {
-                logger.ZLogDebug($"Unity connection disposed the pipe during {DescribeRequest(requestId, commandType, BridgeMessageTypes.CommandResult)}.", exception);
-                return BridgeClientResult.Failure(
-                    Handshake,
-                    BridgeRuntimeFailureKind.ResultDisconnected,
-                    $"The Unity connection closed before '{commandType}' reported completion.",
-                    commandSent
+                    IsConnected
+                        ? $"Unity did not report completion for '{pending.CommandType}' within {timeout}."
+                        : $"The Unity connection closed before '{pending.CommandType}' reported completion.",
+                    pending.CommandSent
                 );
             }
         }
 
+        async Task ReceiveAsync()
+        {
+            try
+            {
+                while (!receiveCts.IsCancellationRequested)
+                {
+                    var payload = await transport.ReadLineAsync(receiveCts.Token);
+                    if (payload is null)
+                        break;
+
+                    var message = BridgeProtocol.Deserialize(payload);
+                    if (message?.RequestId is not { Length: > 0 } requestId
+                        || !pendingRequests.TryGetValue(requestId, out var pending))
+                        continue;
+
+                    if (message.MessageType == BridgeMessageTypes.CommandStarted)
+                    {
+                        pending.MarkStarted();
+                        continue;
+                    }
+
+                    if (message is not { MessageType: BridgeMessageTypes.CommandResult, Result: not null })
+                        continue;
+
+                    pending.Complete(CreateResult(message.Result));
+                    RemoveRequest(requestId, pending);
+                }
+            }
+            catch (OperationCanceledException) when (receiveCts.IsCancellationRequested) { }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                logger.ZLogDebug($"Unity bridge receive loop disconnected from pid {handshake.EffectiveProcessId}, session {handshake.SessionInstanceId}.", exception);
+            }
+            finally
+            {
+                Disconnect();
+                await transport.DisposeAsync();
+            }
+
+            BridgeClientResult CreateResult(BridgeCommandResult result)
+            {
+                try
+                {
+                    if (result.Artifacts.Length > 0 && handshake.IsPlayer)
+                    {
+                        if (string.IsNullOrWhiteSpace(endpointDirectory))
+                            throw new InvalidDataException("The player endpoint directory is unavailable.");
+
+                        foreach (var artifact in result.Artifacts)
+                            artifact.ResolveInEndpoint(endpointDirectory);
+                    }
+                    else if (result.Artifacts.Length > 0)
+                        foreach (var artifact in result.Artifacts)
+                            artifact.ResolveInProject(
+                                ProjectPathNormalizer.ToPlatformPath(handshake.ProjectPath)
+                            );
+
+                    return BridgeClientResult.Success(
+                        handshake,
+                        result.ToToolExecutionResult(),
+                        commandSent: true,
+                        result.Artifacts
+                    );
+                }
+                catch (Exception exception) when (
+                    exception is IOException
+                        or UnauthorizedAccessException
+                        or ArgumentException
+                        or NotSupportedException)
+                {
+                    return BridgeClientResult.Success(
+                        handshake,
+                        ToolExecutionResult.FromException(
+                            exception,
+                            result.Logs,
+                            "Unity returned an invalid shared artifact."
+                        ),
+                        commandSent: true,
+                        []
+                    );
+                }
+            }
+        }
+
+        void Disconnect()
+        {
+            if (Interlocked.Exchange(ref disconnected, 1) != 0)
+                return;
+
+            foreach (var pending in pendingRequests.Values)
+                pending.Disconnect();
+        }
+
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+                return;
+
+            receiveCts.Cancel();
+            Disconnect();
             await transport.DisposeAsync();
+            try
+            {
+                await receiveTask;
+            }
+            catch (OperationCanceledException) { }
+
+            receiveCts.Dispose();
+            writeGate.Dispose();
+        }
+
+        internal sealed class PendingRequest(
+            BridgeProjectHandshake handshake,
+            string commandType)
+        {
+            readonly TaskCompletionSource<CommandStartOutcome> started
+                = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            readonly TaskCompletionSource<BridgeClientResult> result
+                = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            int commandSent;
+            int commandStarted;
+
+            internal string CommandType { get; } = commandType;
+            internal bool CommandSent => Volatile.Read(ref commandSent) != 0;
+            internal Task<CommandStartOutcome> Started => started.Task;
+            internal Task<BridgeClientResult> Result => result.Task;
+
+            internal void MarkSent() => Volatile.Write(ref commandSent, 1);
+
+            internal void MarkStarted()
+            {
+                Volatile.Write(ref commandStarted, 1);
+                started.TrySetResult(new(null, null));
+            }
+
+            internal void Complete(BridgeClientResult finalResult)
+            {
+                Volatile.Write(ref commandSent, 1);
+                // replayed results can arrive before command_started after a reconnect.
+                if (Interlocked.Exchange(ref commandStarted, 1) == 0)
+                    started.TrySetResult(new(finalResult, null));
+                result.TrySetResult(finalResult);
+            }
+
+            internal void Disconnect()
+            {
+                var wasStarted = Volatile.Read(ref commandStarted) != 0;
+                var failure = BridgeClientResult.Failure(
+                    handshake,
+                    wasStarted
+                        ? BridgeRuntimeFailureKind.ResultDisconnected
+                        : BridgeRuntimeFailureKind.StartAckDisconnected,
+                    wasStarted
+                        ? $"The Unity connection closed before '{CommandType}' reported completion."
+                        : $"The Unity connection closed before '{CommandType}' acknowledged starting.",
+                    CommandSent
+                );
+                started.TrySetResult(new(null, failure));
+                result.TrySetResult(failure);
+            }
         }
 
         public readonly record struct CommandStartOutcome(BridgeClientResult? FinalResult, BridgeClientResult? Failure);

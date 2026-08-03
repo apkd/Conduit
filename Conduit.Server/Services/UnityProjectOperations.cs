@@ -1562,11 +1562,10 @@ public sealed class UnityProjectOperations(
             );
             Directory.CreateDirectory(directory);
             var extension = Path.GetExtension(artifact.Name);
-            var fileName = artifact.Sha256[..Math.Min(16, artifact.Sha256.Length)]
+            var fileName = artifact.Sha256
                            + (string.IsNullOrWhiteSpace(extension) ? ".bin" : extension);
             var path = Path.Combine(directory, fileName);
-            if (!File.Exists(path))
-                File.WriteAllBytes(path, artifact.Decode());
+            File.WriteAllBytes(path, artifact.Decode());
 
             return new()
             {

@@ -1,7 +1,6 @@
 #nullable enable
 
 using System;
-using System.IO;
 
 namespace Conduit
 {
@@ -9,29 +8,10 @@ namespace Conduit
     {
         public static byte[] Decode(this BridgeArtifact artifact)
         {
-            if (string.IsNullOrWhiteSpace(artifact.relative_path))
-                return artifact.DecodeChunks();
+            if (artifact.Content == null && artifact.ResolvedPath == null)
+                artifact.ResolveInProject(ConduitAssetPathUtility.GetProjectRootPath());
 
-            var bytes = ReadProjectFile(artifact.relative_path!);
-            artifact.Verify(bytes);
-            return bytes;
-        }
-
-        static byte[] ReadProjectFile(string relativePath)
-        {
-            if (Path.IsPathRooted(relativePath))
-                throw new InvalidOperationException($"Artifact '{relativePath}' must use a project-relative path.");
-
-            var projectRoot = ConduitAssetPathUtility.GetProjectRootPath();
-            var path = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
-            var normalized = Path.GetRelativePath(projectRoot, path);
-            // the server may only reference artifacts it wrote inside this Unity project.
-            if (Path.IsPathRooted(normalized)
-                || normalized == ".."
-                || normalized.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-                throw new InvalidOperationException($"Artifact '{relativePath}' resolves outside the Unity project.");
-
-            return File.ReadAllBytes(path);
+            return artifact.ReadVerified();
         }
     }
 

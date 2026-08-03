@@ -28,7 +28,7 @@ static class BridgeCommandResultExtensions
 
 static class ServerBridgeArtifactExtensions
 {
-    public static byte[] Decode(this BridgeArtifact artifact) => artifact.DecodeChunks();
+    public static byte[] Decode(this BridgeArtifact artifact) => artifact.ReadVerified();
 }
 
 static class BridgeProtocol

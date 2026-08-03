@@ -2238,7 +2238,7 @@ public sealed class ConduitMcpToolsTests
 
         var result = ConduitSearchUtility.Search("t:test playmode");
 
-        Assert.That(result, Does.Contain("RuntimeBridgeTests.ArtifactTransferRejectsModifiedChunks | PlayMode"));
+        Assert.That(result, Does.Contain("RuntimeBridgeTests.ArtifactTransferRejectsModifiedContent | PlayMode"));
         Assert.That(result, Does.Not.Contain(" | EditMode"));
     }
 
@@ -2982,6 +2982,42 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void BridgeProtocol_RoundTripsEveryEnvelopeWithOneDeserializer()
+    {
+        var messages = new[]
+        {
+            BridgeMessage.CreateHello(new() { project_path = "/tmp/project" }),
+            BridgeMessage.CreateCommand(
+                "command",
+                new() { command_type = BridgeCommandTypes.Status }
+            ),
+            BridgeMessage.CreateCancelCommand("cancel"),
+            BridgeMessage.CreateCommandStarted("started"),
+            BridgeMessage.CreateCommandResult(
+                "result",
+                BridgeCommandResult.Success("done")
+            ),
+        };
+
+        foreach (var expected in messages)
+        {
+            var actual = BridgeProtocol.Deserialize(BridgeProtocol.Serialize(expected));
+            Assert.That(actual, Is.Not.Null);
+            Assert.That(actual!.message_type, Is.EqualTo(expected.message_type));
+            Assert.That(actual.request_id, Is.EqualTo(expected.request_id));
+            Assert.That(actual.project != null, Is.EqualTo(expected.project != null));
+            Assert.That(actual.command != null, Is.EqualTo(expected.command != null));
+            Assert.That(actual.result != null, Is.EqualTo(expected.result != null));
+        }
+
+        Assert.That(BridgeProtocol.Deserialize("{"), Is.Null);
+        Assert.That(
+            BridgeProtocol.Deserialize("{\"message_type\":\"future\"}"),
+            Is.Null
+        );
+    }
+
+    [Test]
     public void BridgeCompatibilityDiagnostics_AreDirectionalAndTerse()
     {
         Assert.That(
@@ -3056,14 +3092,22 @@ public sealed class ConduitMcpToolsTests
         File.WriteAllBytes(path, bytes);
         try
         {
-            var artifact = BridgeArtifact.FromBytes("artifact.dll", "application/octet-stream", bytes);
-            artifact.relative_path = "Temp/ConduitTests/artifact.dll";
-            artifact.chunks = Array.Empty<string>();
+            var artifact = BridgeArtifact.FromProjectFile(
+                "artifact.dll",
+                "application/octet-stream",
+                "Temp/ConduitTests/artifact.dll",
+                bytes
+            );
 
             Assert.That(artifact.Decode(), Is.EqualTo(bytes));
 
-            artifact.relative_path = "../artifact.dll";
-            Assert.Throws<InvalidOperationException>(() => artifact.Decode());
+            var traversal = BridgeArtifact.FromProjectFile(
+                "artifact.dll",
+                "application/octet-stream",
+                "../artifact.dll",
+                bytes
+            );
+            Assert.Throws<InvalidDataException>(() => traversal.Decode());
         }
         finally
         {
