@@ -1031,6 +1031,8 @@ jobs:
           PROTONPATH: UMU-Proton
           WINEPREFIX: ${{ runner.temp }}/umu-prefix
           XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
+          # pressure-vessel shares the runner's home, while its /tmp can be isolated.
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
           mkdir -p "$XDG_RUNTIME_DIR"
