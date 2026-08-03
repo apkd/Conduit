@@ -332,6 +332,34 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task CachedCompilationReferencesRefreshHandshakeMetadata()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-reference-handshake-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            preserveSnippetsAfterReconnect: true
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var compiler = new SnippetCompiler(client);
+
+        var first = await compiler.GetReferencePathsAsync(projectPath, CancellationToken.None);
+        await Assert.That(first.Failure).IsNull();
+        await Assert.That(first.PreserveSnippets).IsFalse();
+        for (var attempt = 0; attempt < 100
+             && client.TryGetLiveHandshake(projectPath, out _); attempt++)
+            await Task.Delay(10);
+
+        var second = await compiler.GetReferencePathsAsync(projectPath, CancellationToken.None);
+        await Assert.That(second.Failure).IsNull();
+        await Assert.That(second.PreserveSnippets).IsTrue();
+        await Assert.That(bridge.CommandCount).IsEqualTo(2);
+    }
+
+    [Test]
     public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
         await AssertProtocolMismatchAsync(
             BridgeProtocol.Version - 1,
@@ -466,6 +494,7 @@ public sealed class UnityBridgeClientTests
         readonly bool multiplexCommands;
         readonly bool disconnectFirstCommand;
         readonly bool changeSessionOnReconnect;
+        readonly bool preserveSnippetsAfterReconnect;
         readonly string endpointDirectory;
         readonly Task serverTask;
         readonly TaskCompletionSource commandStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -484,6 +513,7 @@ public sealed class UnityBridgeClientTests
             bool multiplexCommands,
             bool disconnectFirstCommand,
             bool changeSessionOnReconnect,
+            bool preserveSnippetsAfterReconnect,
             string endpointDirectory)
         {
             this.projectPath = projectPath;
@@ -494,6 +524,7 @@ public sealed class UnityBridgeClientTests
             this.multiplexCommands = multiplexCommands;
             this.disconnectFirstCommand = disconnectFirstCommand;
             this.changeSessionOnReconnect = changeSessionOnReconnect;
+            this.preserveSnippetsAfterReconnect = preserveSnippetsAfterReconnect;
             this.endpointDirectory = endpointDirectory;
             serverTask = Task.Run(RunAsync);
         }
@@ -517,6 +548,7 @@ public sealed class UnityBridgeClientTests
             bool multiplexCommands = false,
             bool disconnectFirstCommand = false,
             bool changeSessionOnReconnect = false,
+            bool preserveSnippetsAfterReconnect = false,
             int handshakeProtocolVersion = BridgeProtocol.Version)
         {
             var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
@@ -540,6 +572,7 @@ public sealed class UnityBridgeClientTests
                     multiplexCommands,
                     disconnectFirstCommand,
                     changeSessionOnReconnect,
+                    preserveSnippetsAfterReconnect,
                     endpointDirectory
                 )
             );
@@ -630,6 +663,8 @@ public sealed class UnityBridgeClientTests
                         ["session_instance_id"] = changeSessionOnReconnect
                             ? "fake-bridge-" + connectionNumber
                             : "fake-bridge",
+                        ["preserve_snippets"] = preserveSnippetsAfterReconnect
+                            && connectionNumber > 1,
                         ["last_seen_utc"] = DateTimeOffset.UtcNow,
                     },
                 }, cts.Token);

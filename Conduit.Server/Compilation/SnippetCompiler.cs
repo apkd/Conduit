@@ -30,6 +30,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
 
     readonly ConcurrentDictionary<string, TargetSessionCache> sessionCaches
         = new(StringComparer.Ordinal);
+    readonly ConcurrentDictionary<string, ReferenceFlight> referenceFlights
+        = new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, string> downloadedReferences
         = new(StringComparer.OrdinalIgnoreCase);
 
@@ -378,89 +380,61 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 : new(sessionInstanceId)
         );
 
-    async Task<HandshakeResult> GetHandshakeAsync(string target, CancellationToken ct)
-    {
-        if (bridgeClient.TryGetLiveHandshake(target, out var cachedHandshake))
-            return HandshakeResult.Succeeded(cachedHandshake!);
-
-        var connection = await bridgeClient.ProbeAsync(
-            target,
-            processIdHint: null,
-            timeout: referenceCommandTimeout,
-            ct: ct
-        );
-        return connection.Handshake is { } handshake
-            ? HandshakeResult.Succeeded(handshake)
-            : HandshakeResult.Failed(
-                connection.Result
-                ?? UnityProjectOperations.ToToolExecutionResult(
-                    target,
-                    BridgeCommandTypes.CompilationReferences,
-                    connection,
-                    referenceCommandTimeout
-                )
-            );
-    }
-
     async Task<ReferenceSetResult> GetReferencesAsync(
         string target,
         CancellationToken ct)
     {
-        var handshakeResult = await GetHandshakeAsync(target, ct);
-        if (handshakeResult.Failure is { } handshakeFailure)
-            return ReferenceSetResult.Failed(handshakeFailure);
+        var flight = referenceFlights.GetOrAdd(target, static _ => new());
+        Task<ReferenceSetResult> task;
+        lock (flight)
+            task = flight.Task is { IsCompleted: false } active
+                ? active
+                : flight.Task = GetReferencesCoreAsync(target, CancellationToken.None);
 
-        var handshake = handshakeResult.Handshake!;
-        if (string.IsNullOrWhiteSpace(handshake.SessionInstanceId))
-            return ReferenceSetResult.Failed(
-                CompileError("Unity omitted its session identity from the compilation reference handshake.")
-            );
+        return await task.WaitAsync(ct);
+    }
 
+    async Task<ReferenceSetResult> GetReferencesCoreAsync(
+        string target,
+        CancellationToken ct)
+    {
         for (var attempt = 0; attempt < 3; attempt++)
         {
+            // refresh mutable handshake preferences while reusing this session's compiled references.
+            var execution = await bridgeClient.ExecuteIdempotentCommandAsync(
+                target,
+                ConduitUtility.CreateRequestId(),
+                new()
+                {
+                    CommandType = BridgeCommandTypes.CompilationReferences,
+                    TrackUsage = false,
+                },
+                referenceCommandTimeout,
+                ct
+            );
+            if (execution.Result?.Outcome != ToolOutcome.Success
+                || string.IsNullOrWhiteSpace(execution.Result.ReturnValue))
+                return ReferenceSetResult.Failed(
+                    execution.Result
+                    ?? UnityProjectOperations.ToToolExecutionResult(
+                        target,
+                        BridgeCommandTypes.CompilationReferences,
+                        execution,
+                        referenceCommandTimeout
+                    )
+                );
+
+            if (execution.Handshake is not { SessionInstanceId.Length: > 0 } handshake)
+                return ReferenceSetResult.Failed(
+                    CompileError("Unity omitted its session identity from the compilation reference response.")
+                );
+
             var session = GetSessionCache(target, handshake.SessionInstanceId);
             await session.ReferenceGate.WaitAsync(ct);
             try
             {
                 if (session.References is { } cached)
                     return ReferenceSetResult.Succeeded(cached, handshake);
-
-                var execution = await bridgeClient.ExecuteIdempotentCommandAsync(
-                    target,
-                    ConduitUtility.CreateRequestId(),
-                    new()
-                    {
-                        CommandType = BridgeCommandTypes.CompilationReferences,
-                        TrackUsage = false,
-                    },
-                    referenceCommandTimeout,
-                    ct
-                );
-                if (execution.Result?.Outcome != ToolOutcome.Success
-                    || string.IsNullOrWhiteSpace(execution.Result.ReturnValue))
-                    return ReferenceSetResult.Failed(
-                        execution.Result
-                        ?? UnityProjectOperations.ToToolExecutionResult(
-                            target,
-                            BridgeCommandTypes.CompilationReferences,
-                            execution,
-                            referenceCommandTimeout
-                        )
-                    );
-
-                if (execution.Handshake is not { } executionHandshake)
-                    return ReferenceSetResult.Failed(
-                        CompileError("Unity omitted its session identity from the compilation reference response.")
-                    );
-                if (!string.Equals(
-                        executionHandshake.SessionInstanceId,
-                        session.SessionInstanceId,
-                        StringComparison.Ordinal
-                    ))
-                {
-                    handshake = executionHandshake;
-                    continue;
-                }
 
                 BridgeAssemblyReferenceManifest? manifest;
                 try
@@ -512,11 +486,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                         session.SessionInstanceId,
                         ct
                     );
-                    if (fetched.SessionHandshake is { } changedHandshake)
-                    {
-                        handshake = changedHandshake;
+                    if (fetched.SessionHandshake is not null)
                         continue;
-                    }
                     if (fetched.Failure is { } fetchFailure)
                         return ReferenceSetResult.Failed(fetchFailure);
 
@@ -552,7 +523,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     referencePaths.ToArray()
                 );
                 session.References = references;
-                return ReferenceSetResult.Succeeded(references, executionHandshake);
+                return ReferenceSetResult.Succeeded(references, handshake);
             }
             finally
             {
@@ -1144,6 +1115,11 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             );
     }
 
+    sealed class ReferenceFlight
+    {
+        internal Task<ReferenceSetResult>? Task { get; set; }
+    }
+
     // execute_code and detour share one sequence within each session storage root.
     sealed class TargetCompilationCache(int nextArtifactId)
     {
@@ -1194,17 +1170,6 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
 
         internal static ReferenceFetchBatchResult Failed(ToolExecutionResult failure) =>
             new(null, null, failure);
-    }
-
-    readonly record struct HandshakeResult(
-        BridgeProjectHandshake? Handshake,
-        ToolExecutionResult? Failure)
-    {
-        internal static HandshakeResult Succeeded(BridgeProjectHandshake handshake) =>
-            new(handshake, null);
-
-        internal static HandshakeResult Failed(ToolExecutionResult failure) =>
-            new(null, failure);
     }
 
     sealed record CachedReferenceSet(MetadataReference[] References, string[] Paths);

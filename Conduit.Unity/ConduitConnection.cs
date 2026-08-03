@@ -425,7 +425,9 @@ namespace Conduit
         internal static void RefreshClientHandshakes()
         {
             Interlocked.Increment(ref handshakeGeneration);
-            refreshClientHandshakesRequested = !clientSessions.IsEmpty;
+            // close idle clients before another command can use their immutable handshake metadata.
+            if (!clientSessions.IsEmpty)
+                RefreshIdleClientHandshakes();
         }
 
         static void RefreshIdleClientHandshakes()
