@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.IO.Pipes;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Conduit;
@@ -191,6 +192,146 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task IdleRemoteCloseInvalidatesTheCachedHandshake()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-idle-close-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var result = await client.ExecuteCommandAsync(
+            projectPath,
+            ConduitUtility.CreateRequestId(),
+            new() { CommandType = BridgeCommandTypes.Status },
+            TimeSpan.FromSeconds(10),
+            processIdHint: null,
+            CancellationToken.None
+        );
+
+        await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
+        for (var attempt = 0; attempt < 100
+             && client.TryGetLiveHandshake(projectPath, out _); attempt++)
+            await Task.Delay(10);
+
+        await Assert.That(client.TryGetLiveHandshake(projectPath, out _)).IsFalse();
+    }
+
+    [Test]
+    public async Task StatusCompletesWhileAnotherCommandIsStillRunning()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-multiplex-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            multiplexCommands: true
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var longCommand = client.ExecuteCommandAsync(
+            projectPath,
+            "long-command",
+            new() { CommandType = BridgeCommandTypes.RunTestsEditMode },
+            TimeSpan.FromSeconds(10),
+            processIdHint: null,
+            CancellationToken.None
+        );
+
+        await bridge.CommandStarted.WaitAsync(TimeSpan.FromSeconds(10));
+        var status = client.ExecuteCommandAsync(
+            projectPath,
+            "concurrent-status",
+            new() { CommandType = BridgeCommandTypes.Status },
+            TimeSpan.FromSeconds(10),
+            processIdHint: null,
+            CancellationToken.None
+        );
+
+        await bridge.ConcurrentCommandCompleted.WaitAsync(TimeSpan.FromSeconds(10));
+        var statusResult = await status.WaitAsync(TimeSpan.FromSeconds(10));
+        await Assert.That(statusResult.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
+        await Assert.That(longCommand.IsCompleted).IsFalse();
+
+        bridge.ReleaseFirstCommand();
+        await Assert.That((await longCommand).Result?.Outcome).IsEqualTo(ToolOutcome.Success);
+        await Assert.That(bridge.ConnectionCount).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task IdempotentCommandReconnectsOnceAfterDisconnect()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-idempotent-retry-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            disconnectFirstCommand: true
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var result = await client.ExecuteIdempotentCommandAsync(
+            projectPath,
+            "idempotent-read",
+            new() { CommandType = BridgeCommandTypes.CompilationReferences },
+            TimeSpan.FromSeconds(10),
+            CancellationToken.None
+        );
+
+        await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
+        await Assert.That(bridge.ConnectionCount).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task CompilationReferencesAreSingleFlightWithinAUnitySession()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-reference-cache-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var compiler = new SnippetCompiler(client);
+
+        var first = compiler.GetReferencePathsAsync(projectPath, CancellationToken.None);
+        var second = compiler.GetReferencePathsAsync(projectPath, CancellationToken.None);
+        var results = await Task.WhenAll(first, second);
+
+        await Assert.That(results.All(static result => result.Failure is null)).IsTrue();
+        await Assert.That(bridge.CommandCount).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task NewUnitySessionRefetchesCompilationReferences()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-reference-session-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(
+            projectPath,
+            int.MaxValue,
+            changeSessionOnReconnect: true
+        );
+        var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
+        var compiler = new SnippetCompiler(client);
+
+        await Assert.That(
+            (await compiler.GetReferencePathsAsync(projectPath, CancellationToken.None)).Failure
+        ).IsNull();
+        for (var attempt = 0; attempt < 100
+             && client.TryGetLiveHandshake(projectPath, out _); attempt++)
+            await Task.Delay(10);
+
+        await Assert.That(
+            (await compiler.GetReferencePathsAsync(projectPath, CancellationToken.None)).Failure
+        ).IsNull();
+        await Assert.That(bridge.CommandCount).IsEqualTo(2);
+    }
+
+    [Test]
     public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
         await AssertProtocolMismatchAsync(
             BridgeProtocol.Version - 1,
@@ -241,12 +382,25 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task CommandStartWaitReadsPayloadWhenTransportLivenessProbeIsFalse()
+    public async Task ReceivePumpRoutesCommandStartedWhenTransportLivenessProbeIsFalse()
     {
         var requestId = ConduitUtility.CreateRequestId();
         var payload = BridgeProtocol.Serialize(BridgeMessage.CreateCommandStarted(requestId));
-        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(payload + "\n"));
-        await using var transport = UnityBridgeClient.BridgeTransport.FromStream(stream, static () => false, static () => ValueTask.CompletedTask);
+        var read = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var readCount = 0;
+        await using var transport = new UnityBridgeClient.BridgeTransport(
+            async ct =>
+            {
+                if (Interlocked.Increment(ref readCount) == 1)
+                    return await read.Task;
+
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return null;
+            },
+            static (_, _) => Task.CompletedTask,
+            static () => false,
+            static () => ValueTask.CompletedTask
+        );
         await using var connection = new UnityBridgeClient.BridgeClientConnection(
             transport,
             new()
@@ -257,11 +411,12 @@ public sealed class UnityBridgeClientTests
             },
             NullLogger<UnityBridgeClient>.Instance
         );
+        var pending = connection.RegisterRequest(requestId, BridgeCommandTypes.Status);
+        pending.MarkSent();
+        read.SetResult(payload);
 
         var outcome = await connection.WaitForCommandStartedAsync(
-            requestId,
-            BridgeCommandTypes.Status,
-            commandSent: true,
+            pending,
             TimeSpan.FromSeconds(1),
             CancellationToken.None,
             CancellationToken.None
@@ -308,11 +463,17 @@ public sealed class UnityBridgeClientTests
         readonly int handshakeProtocolVersion;
         readonly bool coalesceCommandResponses;
         readonly bool waitForCancellation;
+        readonly bool multiplexCommands;
+        readonly bool disconnectFirstCommand;
+        readonly bool changeSessionOnReconnect;
         readonly string endpointDirectory;
         readonly Task serverTask;
         readonly TaskCompletionSource commandStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        readonly TaskCompletionSource concurrentCommandCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        readonly TaskCompletionSource releaseFirstCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int connectionCount;
+        int commandCount;
 
         FakeFifoBridge(
             string projectPath,
@@ -320,6 +481,9 @@ public sealed class UnityBridgeClientTests
             int handshakeProtocolVersion,
             bool coalesceCommandResponses,
             bool waitForCancellation,
+            bool multiplexCommands,
+            bool disconnectFirstCommand,
+            bool changeSessionOnReconnect,
             string endpointDirectory)
         {
             this.projectPath = projectPath;
@@ -327,6 +491,9 @@ public sealed class UnityBridgeClientTests
             this.handshakeProtocolVersion = handshakeProtocolVersion;
             this.coalesceCommandResponses = coalesceCommandResponses;
             this.waitForCancellation = waitForCancellation;
+            this.multiplexCommands = multiplexCommands;
+            this.disconnectFirstCommand = disconnectFirstCommand;
+            this.changeSessionOnReconnect = changeSessionOnReconnect;
             this.endpointDirectory = endpointDirectory;
             serverTask = Task.Run(RunAsync);
         }
@@ -335,13 +502,21 @@ public sealed class UnityBridgeClientTests
 
         public Task<string?> CancelledRequestId => cancelledRequestId.Task;
 
+        public Task ConcurrentCommandCompleted => concurrentCommandCompleted.Task;
+
         public int ConnectionCount => Volatile.Read(ref connectionCount);
+        public int CommandCount => Volatile.Read(ref commandCount);
+
+        public void ReleaseFirstCommand() => releaseFirstCommand.TrySetResult();
 
         public static Task<FakeFifoBridge> StartAsync(
             string projectPath,
             int editorProcessId,
             bool coalesceCommandResponses = false,
             bool waitForCancellation = false,
+            bool multiplexCommands = false,
+            bool disconnectFirstCommand = false,
+            bool changeSessionOnReconnect = false,
             int handshakeProtocolVersion = BridgeProtocol.Version)
         {
             var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
@@ -362,6 +537,9 @@ public sealed class UnityBridgeClientTests
                     handshakeProtocolVersion,
                     coalesceCommandResponses,
                     waitForCancellation,
+                    multiplexCommands,
+                    disconnectFirstCommand,
+                    changeSessionOnReconnect,
                     endpointDirectory
                 )
             );
@@ -407,7 +585,7 @@ public sealed class UnityBridgeClientTests
         {
             try
             {
-                Interlocked.Increment(ref connectionCount);
+                var connectionNumber = Interlocked.Increment(ref connectionCount);
                 await using var input = new FileStream(
                     Path.Combine(clientDirectory, "to-unity.fifo"),
                     FileMode.Open,
@@ -449,7 +627,9 @@ public sealed class UnityBridgeClientTests
                         ["display_name"] = Path.GetFileName(projectPath),
                         ["unity_version"] = "6000.3.10f1",
                         ["editor_process_id"] = editorProcessId,
-                        ["session_instance_id"] = "fake-bridge",
+                        ["session_instance_id"] = changeSessionOnReconnect
+                            ? "fake-bridge-" + connectionNumber
+                            : "fake-bridge",
                         ["last_seen_utc"] = DateTimeOffset.UtcNow,
                     },
                 }, cts.Token);
@@ -461,13 +641,20 @@ public sealed class UnityBridgeClientTests
                 if (commandPayload is null)
                     return;
 
-                var requestId = JsonNode.Parse(commandPayload)?["request_id"]?.GetValue<string>() ?? "";
+                var currentCommand = Interlocked.Increment(ref commandCount);
+                if (disconnectFirstCommand && currentCommand == 1)
+                    return;
+
+                var commandJson = JsonNode.Parse(commandPayload);
+                var requestId = commandJson?["request_id"]?.GetValue<string>() ?? "";
+                var commandType = commandJson?["command"]?["command_type"]?.GetValue<string>();
                 var commandStarted = new JsonObject
                 {
                     ["protocol_version"] = BridgeProtocol.Version,
                     ["message_type"] = "command_started",
                     ["request_id"] = requestId,
                 };
+
                 var commandResult = new JsonObject
                 {
                     ["protocol_version"] = BridgeProtocol.Version,
@@ -480,6 +667,44 @@ public sealed class UnityBridgeClientTests
                         ["return_value"] = "",
                     },
                 };
+                if (commandType == BridgeCommandTypes.CompilationReferences)
+                {
+                    commandResult["result"]!["return_value"] = JsonSerializer.Serialize(
+                        new BridgeAssemblyReferenceManifest
+                        {
+                            References =
+                            [
+                                new()
+                                {
+                                    Id = Guid.NewGuid().ToString("N"),
+                                    AssemblyName = typeof(object).Assembly.FullName ?? "System.Private.CoreLib",
+                                    Path = typeof(object).Assembly.Location,
+                                    Length = new FileInfo(typeof(object).Assembly.Location).Length,
+                                },
+                            ],
+                        },
+                        ConduitJsonContext.Default.BridgeAssemblyReferenceManifest
+                    );
+                }
+
+                if (multiplexCommands)
+                {
+                    await WritePayloadAsync(output, commandStarted, cts.Token);
+                    this.commandStarted.TrySetResult();
+                    var concurrentPayload = await reader.ReadLineAsync(cts.Token);
+                    if (concurrentPayload is null)
+                        return;
+
+                    var concurrentRequestId = JsonNode.Parse(concurrentPayload)?["request_id"]?.GetValue<string>() ?? "";
+                    commandStarted["request_id"] = concurrentRequestId;
+                    commandResult["request_id"] = concurrentRequestId;
+                    await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
+                    concurrentCommandCompleted.TrySetResult();
+                    await releaseFirstCommand.Task.WaitAsync(cts.Token);
+                    commandResult["request_id"] = requestId;
+                    await WritePayloadAsync(output, commandResult, cts.Token);
+                    return;
+                }
 
                 if (waitForCancellation)
                 {

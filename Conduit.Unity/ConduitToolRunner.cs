@@ -583,7 +583,7 @@ namespace Conduit
                             await CompleteCurrentAsync(compilation_references.GetManifest());
                             break;
                         case BridgeCommandKind.AssemblyBlob:
-                            await CompleteCurrentAsync(compilation_references.GetAssemblyBlob(operation.target));
+                            await CompleteCurrentAsync(compilation_references.GetAssemblyBlobs(operation.args));
                             break;
                         case BridgeCommandKind.ViewBurstAsm:
                             await ExecuteViewBurstAsmAsync(operation);

@@ -28,8 +28,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         "using static Conduit.Runtime.ConduitRuntimeSearch;",
     ];
 
-    // execute_code and detour share one sequence within each storage root so artifacts cannot collide.
-    readonly ConcurrentDictionary<string, TargetCompilationCache> targetCaches
+    readonly ConcurrentDictionary<string, TargetSessionCache> sessionCaches
         = new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, string> downloadedReferences
         = new(StringComparer.OrdinalIgnoreCase);
@@ -56,15 +55,13 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         string snippet,
         CancellationToken ct)
     {
-        var storage = await GetSnippetStorageAsync(target, ct);
-        if (storage.Failure is { } storageFailure)
-            return SnippetCompilation.FromFailure(storageFailure);
+        var references = await GetReferencesAsync(target, ct);
+        if (references.Failure is { } referenceFailure)
+            return SnippetCompilation.FromFailure(referenceFailure);
 
-        var snippetRoot = GetSnippetRoot(target, storage.PreserveSnippets);
-        var cache = targetCaches.GetOrAdd(
-            snippetRoot ?? target,
-            _ => new(GetHighestArtifactId(snippetRoot))
-        );
+        var snippetRoot = GetSnippetRoot(target, references.PreserveSnippets);
+        var cache = GetSessionCache(target, references.SessionInstanceId)
+            .GetCompilationCache(snippetRoot);
         await cache.Gate.WaitAsync(ct);
         try
         {
@@ -94,10 +91,6 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
 
             if (requestedArtifactId is null && cache.BySource.TryGetValue(source, out var cached))
                 return SnippetCompilation.Success(cached);
-
-            var references = await GetReferencesAsync(target, ct);
-            if (references.Failure is { } referenceFailure)
-                return SnippetCompilation.FromFailure(referenceFailure);
 
             var artifactId = requestedArtifactId
                 ?? (++cache.NextArtifactId).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -247,7 +240,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     target,
                     artifactId + ".dll",
                     "application/vnd.microsoft.portable-executable",
-                    storage.PreserveSnippets,
+                    references.PreserveSnippets,
                     compile.AssemblyBytes!,
                     ct
                 ),
@@ -255,7 +248,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     target,
                     artifactId + ".pdb",
                     "application/vnd.microsoft.portable-pdb",
-                    storage.PreserveSnippets,
+                    references.PreserveSnippets,
                     compile.PdbBytes!,
                     ct
                 ),
@@ -289,37 +282,9 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         return new(
             references.ReferencePaths,
             references.PreserveSnippets,
+            references.SessionInstanceId,
             references.Failure
         );
-    }
-
-    async Task<SnippetStorageResult> GetSnippetStorageAsync(
-        string target,
-        CancellationToken ct)
-    {
-        if (PlayerSelector.TryParse(target, out _))
-            return SnippetStorageResult.Succeeded(false);
-
-        if (bridgeClient.TryGetLiveHandshake(target, out var cachedHandshake))
-            return SnippetStorageResult.Succeeded(cachedHandshake!.PreserveSnippets);
-
-        var connection = await bridgeClient.ProbeAsync(
-            target,
-            processIdHint: null,
-            timeout: referenceCommandTimeout,
-            ct: ct
-        );
-        return connection.Handshake is { } handshake
-            ? SnippetStorageResult.Succeeded(handshake.PreserveSnippets)
-            : SnippetStorageResult.Failed(
-                connection.Result ??
-                UnityProjectOperations.ToToolExecutionResult(
-                    target,
-                    BridgeCommandTypes.ExecuteCode,
-                    connection,
-                    referenceCommandTimeout
-                )
-            );
     }
 
     internal static async Task<BridgeArtifact> CreateArtifactAsync(
@@ -344,13 +309,12 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         string target,
         string source,
         bool preserveSnippets,
+        string sessionInstanceId,
         CancellationToken ct)
     {
         var snippetRoot = GetSnippetRoot(target, preserveSnippets);
-        var cache = targetCaches.GetOrAdd(
-            snippetRoot ?? target,
-            _ => new(GetHighestArtifactId(snippetRoot))
-        );
+        var cache = GetSessionCache(target, sessionInstanceId)
+            .GetCompilationCache(snippetRoot);
         await cache.Gate.WaitAsync(ct);
         try
         {
@@ -401,119 +365,238 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         }
     }
 
+    TargetSessionCache GetSessionCache(string target, string sessionInstanceId)
+        => sessionCaches.AddOrUpdate(
+            target,
+            _ => new(sessionInstanceId),
+            (_, current) => string.Equals(
+                    current.SessionInstanceId,
+                    sessionInstanceId,
+                    StringComparison.Ordinal
+                )
+                ? current
+                : new(sessionInstanceId)
+        );
+
+    async Task<HandshakeResult> GetHandshakeAsync(string target, CancellationToken ct)
+    {
+        if (bridgeClient.TryGetLiveHandshake(target, out var cachedHandshake))
+            return HandshakeResult.Succeeded(cachedHandshake!);
+
+        var connection = await bridgeClient.ProbeAsync(
+            target,
+            processIdHint: null,
+            timeout: referenceCommandTimeout,
+            ct: ct
+        );
+        return connection.Handshake is { } handshake
+            ? HandshakeResult.Succeeded(handshake)
+            : HandshakeResult.Failed(
+                connection.Result
+                ?? UnityProjectOperations.ToToolExecutionResult(
+                    target,
+                    BridgeCommandTypes.CompilationReferences,
+                    connection,
+                    referenceCommandTimeout
+                )
+            );
+    }
+
     async Task<ReferenceSetResult> GetReferencesAsync(
         string target,
         CancellationToken ct)
     {
-        var execution = await bridgeClient.ExecuteCommandAsync(
-            target,
-            ConduitUtility.CreateRequestId(),
-            new()
-            {
-                CommandType = BridgeCommandTypes.CompilationReferences,
-                TrackUsage = false,
-            },
-            referenceCommandTimeout,
-            processIdHint: null,
-            ct
-        );
-        if (execution.Result?.Outcome != ToolOutcome.Success
-            || string.IsNullOrWhiteSpace(execution.Result.ReturnValue))
+        var handshakeResult = await GetHandshakeAsync(target, ct);
+        if (handshakeResult.Failure is { } handshakeFailure)
+            return ReferenceSetResult.Failed(handshakeFailure);
+
+        var handshake = handshakeResult.Handshake!;
+        if (string.IsNullOrWhiteSpace(handshake.SessionInstanceId))
             return ReferenceSetResult.Failed(
-                execution.Result
-                ?? UnityProjectOperations.ToToolExecutionResult(
-                    target,
-                    BridgeCommandTypes.CompilationReferences,
-                    execution,
-                    referenceCommandTimeout
-                )
+                CompileError("Unity omitted its session identity from the compilation reference handshake.")
             );
 
-        BridgeAssemblyReferenceManifest? manifest;
-        try
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            manifest = JsonSerializer.Deserialize(
-                execution.Result.ReturnValue,
-                ConduitJsonContext.Default.BridgeAssemblyReferenceManifest
-            );
-        }
-        catch (JsonException exception)
-        {
-            return ReferenceSetResult.Failed(
-                ToolExecutionResult.FromException(
-                    exception,
-                    string.Empty,
-                    "The player returned an invalid compilation reference manifest."
-                )
-            );
-        }
-
-        if (manifest?.References is not { Length: > 0 })
-            return ReferenceSetResult.Failed(
-                CompileError("The player returned no usable compilation references.")
-            );
-
-        var metadataReferences = new List<MetadataReference>();
-        var referencePaths = new List<string>();
-        foreach (var reference in manifest.References)
-        {
-            ct.ThrowIfCancellationRequested();
-            var path = TryResolveAccessiblePath(reference);
-            if (path is null)
-            {
-                var fetched = await FetchReferenceAsync(target, reference, ct);
-                if (fetched.Failure is { } failure)
-                    return ReferenceSetResult.Failed(failure);
-                path = fetched.Path!;
-            }
-
+            var session = GetSessionCache(target, handshake.SessionInstanceId);
+            await session.ReferenceGate.WaitAsync(ct);
             try
             {
-                metadataReferences.Add(MetadataReference.CreateFromFile(path));
-                referencePaths.Add(path);
+                if (session.References is { } cached)
+                    return ReferenceSetResult.Succeeded(cached, handshake);
+
+                var execution = await bridgeClient.ExecuteIdempotentCommandAsync(
+                    target,
+                    ConduitUtility.CreateRequestId(),
+                    new()
+                    {
+                        CommandType = BridgeCommandTypes.CompilationReferences,
+                        TrackUsage = false,
+                    },
+                    referenceCommandTimeout,
+                    ct
+                );
+                if (execution.Result?.Outcome != ToolOutcome.Success
+                    || string.IsNullOrWhiteSpace(execution.Result.ReturnValue))
+                    return ReferenceSetResult.Failed(
+                        execution.Result
+                        ?? UnityProjectOperations.ToToolExecutionResult(
+                            target,
+                            BridgeCommandTypes.CompilationReferences,
+                            execution,
+                            referenceCommandTimeout
+                        )
+                    );
+
+                if (execution.Handshake is not { } executionHandshake)
+                    return ReferenceSetResult.Failed(
+                        CompileError("Unity omitted its session identity from the compilation reference response.")
+                    );
+                if (!string.Equals(
+                        executionHandshake.SessionInstanceId,
+                        session.SessionInstanceId,
+                        StringComparison.Ordinal
+                    ))
+                {
+                    handshake = executionHandshake;
+                    continue;
+                }
+
+                BridgeAssemblyReferenceManifest? manifest;
+                try
+                {
+                    manifest = JsonSerializer.Deserialize(
+                        execution.Result.ReturnValue,
+                        ConduitJsonContext.Default.BridgeAssemblyReferenceManifest
+                    );
+                }
+                catch (JsonException exception)
+                {
+                    return ReferenceSetResult.Failed(
+                        ToolExecutionResult.FromException(
+                            exception,
+                            string.Empty,
+                            "Unity returned an invalid compilation reference manifest."
+                        )
+                    );
+                }
+
+                if (manifest?.References is not { Length: > 0 } manifestReferences)
+                    return ReferenceSetResult.Failed(
+                        CompileError("Unity returned no usable compilation references.")
+                    );
+
+                var resolvedPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var missing = new List<BridgeAssemblyReference>();
+                foreach (var reference in manifestReferences)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var path = TryResolveAccessiblePath(reference);
+                    if (path is null
+                        && downloadedReferences.TryGetValue(reference.Id, out var downloadedPath)
+                        && File.Exists(downloadedPath)
+                        && (reference.Length <= 0 || new FileInfo(downloadedPath).Length == reference.Length))
+                        path = downloadedPath;
+
+                    if (path is null)
+                        missing.Add(reference);
+                    else
+                        resolvedPaths[reference.Id] = path;
+                }
+
+                if (missing.Count > 0)
+                {
+                    var fetched = await FetchReferencesAsync(
+                        target,
+                        missing,
+                        session.SessionInstanceId,
+                        ct
+                    );
+                    if (fetched.SessionHandshake is { } changedHandshake)
+                    {
+                        handshake = changedHandshake;
+                        continue;
+                    }
+                    if (fetched.Failure is { } fetchFailure)
+                        return ReferenceSetResult.Failed(fetchFailure);
+
+                    foreach (var pair in fetched.Paths!)
+                        resolvedPaths[pair.Key] = pair.Value;
+                }
+
+                var metadataReferences = new List<MetadataReference>();
+                var referencePaths = new List<string>();
+                foreach (var reference in manifestReferences)
+                {
+                    if (!resolvedPaths.TryGetValue(reference.Id, out var path))
+                        continue;
+
+                    try
+                    {
+                        metadataReferences.Add(MetadataReference.CreateFromFile(path));
+                        referencePaths.Add(path);
+                    }
+                    catch (Exception exception) when (exception is BadImageFormatException or IOException)
+                    {
+                        // native and facade-only files can appear in a Mono AppDomain location list.
+                    }
+                }
+
+                if (metadataReferences.Count == 0)
+                    return ReferenceSetResult.Failed(
+                        CompileError("Unity returned no valid managed compilation references.")
+                    );
+
+                var references = new CachedReferenceSet(
+                    metadataReferences.ToArray(),
+                    referencePaths.ToArray()
+                );
+                session.References = references;
+                return ReferenceSetResult.Succeeded(references, executionHandshake);
             }
-            catch (Exception exception) when (exception is BadImageFormatException or IOException)
+            finally
             {
-                // native and facade-only files can appear in a Mono AppDomain location list.
+                session.ReferenceGate.Release();
             }
         }
 
-        return metadataReferences.Count == 0
-            ? ReferenceSetResult.Failed(
-                CompileError("The player returned no valid managed compilation references.")
-            )
-            : ReferenceSetResult.Succeeded(
-                metadataReferences.ToArray(),
-                referencePaths.ToArray(),
-                execution.Handshake?.PreserveSnippets == true
-            );
+        return ReferenceSetResult.Failed(
+            new()
+            {
+                Outcome = ToolOutcome.NotConnected,
+                Diagnostic = "Unity reloaded repeatedly while compilation references were being read.",
+            }
+        );
     }
 
-    async Task<ReferenceFetchResult> FetchReferenceAsync(
+    async Task<ReferenceFetchBatchResult> FetchReferencesAsync(
         string target,
-        BridgeAssemblyReference reference,
+        IReadOnlyList<BridgeAssemblyReference> references,
+        string sessionInstanceId,
         CancellationToken ct)
     {
-        if (downloadedReferences.TryGetValue(reference.Id, out var cachedPath)
-            && File.Exists(cachedPath))
-            return ReferenceFetchResult.Succeeded(cachedPath);
-
-        var execution = await bridgeClient.ExecuteCommandAsync(
+        var execution = await bridgeClient.ExecuteIdempotentCommandAsync(
             target,
             ConduitUtility.CreateRequestId(),
             new()
             {
                 CommandType = BridgeCommandTypes.AssemblyBlob,
-                Target = reference.Id,
+                Args = references.Select(static reference => reference.Id).ToArray(),
                 TrackUsage = false,
             },
             referenceCommandTimeout,
-            processIdHint: null,
             ct
         );
-        if (execution.Result?.Outcome != ToolOutcome.Success
-            || execution.Artifacts is not [var artifact, ..])
-            return ReferenceFetchResult.Failed(
+        if (execution.Handshake is { } handshake
+            && !string.Equals(
+                handshake.SessionInstanceId,
+                sessionInstanceId,
+                StringComparison.Ordinal
+            ))
+            return ReferenceFetchBatchResult.SessionChanged(handshake);
+
+        if (execution.Result?.Outcome != ToolOutcome.Success)
+            return ReferenceFetchBatchResult.Failed(
                 execution.Result
                 ?? UnityProjectOperations.ToToolExecutionResult(
                     target,
@@ -522,30 +605,55 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     referenceCommandTimeout
                 )
             );
+        if (execution.Artifacts.Length != references.Count)
+            return ReferenceFetchBatchResult.Failed(
+                CompileError(
+                    $"Unity returned {execution.Artifacts.Length} assembly artifacts for {references.Count} requested references."
+                )
+            );
 
         try
         {
-            var bytes = artifact.Decode();
             var directory = Path.Combine(
                 Path.GetTempPath(),
                 "conduit",
                 "player-references"
             );
             Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, artifact.Sha256 + ".dll");
-            if (!File.Exists(path))
-                File.WriteAllBytes(path, bytes);
+            var paths = new Dictionary<string, string>(references.Count, StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < references.Count; index++)
+            {
+                var reference = references[index];
+                var artifact = execution.Artifacts[index];
+                if (!string.Equals(artifact.Name, reference.Id + ".dll", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException(
+                        $"Unity returned assembly artifact '{artifact.Name}' for reference '{reference.Id}'."
+                    );
 
-            downloadedReferences[reference.Id] = path;
-            return ReferenceFetchResult.Succeeded(path);
+                var bytes = artifact.Decode();
+                if (reference.Length > 0 && bytes.LongLength != reference.Length)
+                    throw new InvalidDataException(
+                        $"Assembly '{reference.AssemblyName}' changed length during transfer."
+                    );
+
+                var path = Path.Combine(directory, artifact.Sha256 + ".dll");
+                if (!File.Exists(path)
+                    || !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
+                    File.WriteAllBytes(path, bytes);
+
+                downloadedReferences[reference.Id] = path;
+                paths[reference.Id] = path;
+            }
+
+            return ReferenceFetchBatchResult.Succeeded(paths);
         }
         catch (Exception exception)
         {
-            return ReferenceFetchResult.Failed(
+            return ReferenceFetchBatchResult.Failed(
                 ToolExecutionResult.FromException(
                     exception,
                     string.Empty,
-                    $"The assembly '{reference.AssemblyName}' failed transfer verification."
+                    "One or more Unity assemblies failed transfer verification."
                 )
             );
         }
@@ -1020,6 +1128,23 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     [GeneratedRegex(@"['""](?<symbol>[A-Za-z_][A-Za-z0-9_]*)['""]")]
     internal static partial Regex MissingSymbolRegex();
 
+    sealed class TargetSessionCache(string sessionInstanceId)
+    {
+        readonly ConcurrentDictionary<string, TargetCompilationCache> compilationCaches
+            = new(StringComparer.Ordinal);
+
+        internal string SessionInstanceId { get; } = sessionInstanceId;
+        internal SemaphoreSlim ReferenceGate { get; } = new(1, 1);
+        internal CachedReferenceSet? References { get; set; }
+
+        internal TargetCompilationCache GetCompilationCache(string? snippetRoot) =>
+            compilationCaches.GetOrAdd(
+                snippetRoot ?? string.Empty,
+                _ => new(GetHighestArtifactId(snippetRoot))
+            );
+    }
+
+    // execute_code and detour share one sequence within each session storage root.
     sealed class TargetCompilationCache(int nextArtifactId)
     {
         internal SemaphoreSlim Gate { get; } = new(1, 1);
@@ -1037,37 +1162,52 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     readonly record struct ReferenceSetResult(
         MetadataReference[]? References,
         string[]? ReferencePaths,
+        string SessionInstanceId,
         bool PreserveSnippets,
         ToolExecutionResult? Failure)
     {
         internal static ReferenceSetResult Succeeded(
-            MetadataReference[] references,
-            string[] paths,
-            bool preserveSnippets) =>
-            new(references, paths, preserveSnippets, null);
+            CachedReferenceSet references,
+            BridgeProjectHandshake handshake) =>
+            new(
+                references.References,
+                references.Paths,
+                handshake.SessionInstanceId,
+                handshake.PreserveSnippets,
+                null
+            );
 
         internal static ReferenceSetResult Failed(ToolExecutionResult failure) =>
-            new(null, null, false, failure);
+            new(null, null, string.Empty, false, failure);
     }
 
-    readonly record struct ReferenceFetchResult(
-        string? Path,
+    readonly record struct ReferenceFetchBatchResult(
+        Dictionary<string, string>? Paths,
+        BridgeProjectHandshake? SessionHandshake,
         ToolExecutionResult? Failure)
     {
-        internal static ReferenceFetchResult Succeeded(string path) => new(path, null);
-        internal static ReferenceFetchResult Failed(ToolExecutionResult failure) => new(null, failure);
+        internal static ReferenceFetchBatchResult Succeeded(Dictionary<string, string> paths) =>
+            new(paths, null, null);
+
+        internal static ReferenceFetchBatchResult SessionChanged(BridgeProjectHandshake handshake) =>
+            new(null, handshake, null);
+
+        internal static ReferenceFetchBatchResult Failed(ToolExecutionResult failure) =>
+            new(null, null, failure);
     }
 
-    readonly record struct SnippetStorageResult(
-        bool PreserveSnippets,
+    readonly record struct HandshakeResult(
+        BridgeProjectHandshake? Handshake,
         ToolExecutionResult? Failure)
     {
-        internal static SnippetStorageResult Succeeded(bool preserveSnippets) =>
-            new(preserveSnippets, null);
+        internal static HandshakeResult Succeeded(BridgeProjectHandshake handshake) =>
+            new(handshake, null);
 
-        internal static SnippetStorageResult Failed(ToolExecutionResult failure) =>
-            new(false, failure);
+        internal static HandshakeResult Failed(ToolExecutionResult failure) =>
+            new(null, failure);
     }
+
+    sealed record CachedReferenceSet(MetadataReference[] References, string[] Paths);
 }
 
 readonly record struct SnippetCompilation(
@@ -1101,6 +1241,7 @@ sealed record CompiledSnippet(
 readonly record struct CompilationReferencePaths(
     string[]? Paths,
     bool PreserveSnippets,
+    string SessionInstanceId,
     ToolExecutionResult? Failure);
 
 readonly record struct SourceArtifact(string Id, string FileName, string Source);

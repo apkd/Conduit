@@ -108,24 +108,6 @@ namespace Conduit.Runtime
             "ERROR: Unity built-in module `com.unity.modules.screencapture` is not enabled in this project. " +
             "Ask the user for permission to enable the module so that the `screenshot` tool can be used.";
 #endif
-        static readonly string[] capabilities =
-        {
-            BridgeCommandTypes.Status,
-            BridgeCommandTypes.Restart,
-            BridgeCommandTypes.Help,
-            BridgeCommandTypes.Search,
-            BridgeCommandTypes.Show,
-            BridgeCommandTypes.ToJson,
-            BridgeCommandTypes.FromJsonOverwrite,
-            BridgeCommandTypes.Screenshot,
-            BridgeCommandTypes.ExecuteCode,
-            BridgeCommandTypes.Detour,
-            BridgeCommandTypes.Reflect,
-            "profiler_marker",
-        };
-
-        public static string[] Capabilities => capabilities;
-
         public static async Task<BridgeCommandResult> ExecuteAsync(
             BridgeCommand command,
             CancellationToken ct)
@@ -146,7 +128,7 @@ namespace Conduit.Runtime
                 BridgeCommandTypes.ExecuteCode => await ExecuteCodeAsync(command, ct),
                 BridgeCommandTypes.Detour => Detour(command),
                 BridgeCommandTypes.CompilationReferences => AssemblyReferences.GetManifest(),
-                BridgeCommandTypes.AssemblyBlob => AssemblyReferences.GetAssemblyBlob(command.target),
+                BridgeCommandTypes.AssemblyBlob => AssemblyReferences.GetAssemblyBlobs(command.args),
                 BridgeCommandTypes.Restart => Restart(),
                 BridgeCommandTypes.QuitPlayer => QuitPlayer(),
                 _ => BridgeCommandResult.EditorOnly(command.command_type),

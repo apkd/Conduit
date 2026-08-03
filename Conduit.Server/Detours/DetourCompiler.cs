@@ -51,6 +51,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
                 target,
                 replacementBody,
                 references.PreserveSnippets,
+                references.SessionInstanceId,
                 ct
             );
             if (preparedArtifact.Failure is { } artifactFailure)

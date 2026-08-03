@@ -60,7 +60,7 @@ public sealed class RuntimeBridgeTests
     }
 
     [Test]
-    public void ArtifactTransferRejectsModifiedChunks()
+    public void ArtifactTransferRejectsModifiedContent()
     {
         var bytes = Enumerable.Range(0, 100_000)
             .Select(static value => (byte)(value % 251))
@@ -72,50 +72,70 @@ public sealed class RuntimeBridgeTests
         );
 
         Assert.That(artifact.Decode(), Is.EqualTo(bytes));
-        artifact.chunks[0] = (artifact.chunks[0][0] == 'A' ? "B" : "A")
-                             + artifact.chunks[0].Substring(1);
+        artifact.Content![0] ^= 1;
         Assert.Throws<InvalidDataException>(() => artifact.Decode());
     }
 
     [Test]
     public void ArtifactTransferReadsAndVerifiesSharedSessionFile()
     {
-        var previousRoot = Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT");
         var root = Path.Combine(
             Path.GetTempPath(),
             "conduit-runtime-artifact-" + Guid.NewGuid().ToString("N")
         );
         try
         {
-            Environment.SetEnvironmentVariable("CONDUIT_IPC_ROOT", root);
-            var relativePath = Path.Combine(
-                "endpoints",
-                "player-session",
-                "artifacts",
-                "snippet.dll"
-            );
-            var path = Path.Combine(root, relativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var endpointDirectory = Path.Combine(root, "endpoints", "player-session");
             var bytes = new byte[] { 1, 2, 3, 4 };
-            File.WriteAllBytes(path, bytes);
-            var artifact = BridgeArtifact.FromBytes(
+            var produced = BridgeArtifact.FromBytes(
                 "snippet.dll",
                 "application/vnd.microsoft.portable-executable",
                 bytes
             );
-            artifact.relative_path = relativePath;
-            artifact.chunks = Array.Empty<string>();
+            produced.MaterializeInEndpoint(endpointDirectory);
+            var artifact = new BridgeArtifact
+            {
+                name = produced.name,
+                media_type = produced.media_type,
+                sha256 = produced.sha256,
+                length = produced.length,
+                relative_path = produced.relative_path,
+            };
+            artifact.ResolveInEndpoint(endpointDirectory);
 
             Assert.That(artifact.Decode(), Is.EqualTo(bytes));
-            artifact.relative_path = "../snippet.dll";
-            Assert.Throws<InvalidOperationException>(() => artifact.Decode());
+            artifact.relative_path = "artifacts/../snippet.dll";
+            Assert.Throws<InvalidDataException>(
+                () => artifact.ResolveInEndpoint(endpointDirectory)
+            );
         }
         finally
         {
-            Environment.SetEnvironmentVariable("CONDUIT_IPC_ROOT", previousRoot);
             if (Directory.Exists(root))
                 Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Test]
+    public void AssemblyReferenceTransferReturnsRequestedArtifactsInOrder()
+    {
+        var assemblies = new[]
+        {
+            typeof(RuntimeBridgeTests).Assembly,
+            typeof(GameObject).Assembly,
+        };
+        var ids = assemblies
+            .Select(static assembly => assembly.ManifestModule.ModuleVersionId.ToString("N"))
+            .ToArray();
+
+        var result = AssemblyReferences.GetAssemblyBlobs(ids);
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(
+            result.artifacts.Select(static artifact => artifact.name),
+            Is.EqualTo(ids.Select(static id => id + ".dll"))
+        );
+        Assert.That(result.artifacts.All(static artifact => artifact.Content != null), Is.True);
     }
 
     [Test]

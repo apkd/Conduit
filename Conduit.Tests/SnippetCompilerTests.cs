@@ -81,7 +81,7 @@ public sealed class SnippetCompilerTests
 
             await Assert.That(artifact.RelativePath?.Replace('\\', '/'))
                 .IsEqualTo($"{storageDirectory}/1.dll");
-            await Assert.That(artifact.Chunks).Count().IsEqualTo(0);
+            await Assert.That(artifact.Length).IsEqualTo(bytes.LongLength);
             await Assert.That(File.ReadAllBytes(Path.Combine(root, storageDirectory, "1.dll")))
                 .IsEquivalentTo(bytes);
         }
@@ -136,17 +136,28 @@ public sealed class SnippetCompilerTests
             "player:12345",
             "return 7;",
             false,
+            "test-session",
             CancellationToken.None
         );
         var second = await compiler.PrepareDetourArtifactAsync(
             "player:12345",
             first.Artifact!.Value.FileName,
             false,
+            "test-session",
             CancellationToken.None
         );
 
         await Assert.That(second.Failure).IsNull();
         await Assert.That(second.Artifact).IsEqualTo(first.Artifact);
+
+        var afterReload = await compiler.PrepareDetourArtifactAsync(
+            "player:12345",
+            first.Artifact.Value.FileName,
+            false,
+            "next-session",
+            CancellationToken.None
+        );
+        await Assert.That(afterReload.Failure?.Outcome).IsEqualTo(ToolOutcome.CompileError);
     }
 
     [Test]

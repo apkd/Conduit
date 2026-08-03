@@ -58,28 +58,25 @@ namespace Conduit
             }
         }
 
-        public static BridgeCommandResult GetAssemblyBlob(string? referenceId)
+        public static BridgeCommandResult GetAssemblyBlobs(string[] referenceIds)
         {
+            if (referenceIds.Length == 0)
+                return new()
+                {
+                    outcome = ToolOutcome.Exception,
+                    diagnostic = "No loaded assembly reference IDs were requested.",
+                };
+
+            var assemblies = new Dictionary<string, System.Reflection.Assembly>(StringComparer.Ordinal);
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 try
                 {
                     if (assembly.IsDynamic
-                        || assembly.ManifestModule.ModuleVersionId.ToString("N") != referenceId
                         || string.IsNullOrWhiteSpace(assembly.Location))
                         continue;
 
-                    return new()
-                    {
-                        artifacts = new[]
-                        {
-                            BridgeArtifact.FromBytes(
-                                Path.GetFileName(assembly.Location),
-                                "application/vnd.microsoft.portable-executable",
-                                File.ReadAllBytes(assembly.Location)
-                            ),
-                        },
-                    };
+                    assemblies[assembly.ManifestModule.ModuleVersionId.ToString("N")] = assembly;
                 }
                 catch (Exception exception)
                 {
@@ -87,11 +84,32 @@ namespace Conduit
                 }
             }
 
-            return new()
+            var artifacts = new BridgeArtifact[referenceIds.Length];
+            for (var index = 0; index < referenceIds.Length; index++)
             {
-                outcome = ToolOutcome.Exception,
-                diagnostic = $"Loaded assembly reference '{referenceId}' was not found.",
-            };
+                var referenceId = referenceIds[index];
+                if (!assemblies.TryGetValue(referenceId, out var assembly))
+                    return new()
+                    {
+                        outcome = ToolOutcome.Exception,
+                        diagnostic = $"Loaded assembly reference '{referenceId}' was not found.",
+                    };
+
+                try
+                {
+                    artifacts[index] = BridgeArtifact.FromBytes(
+                        referenceId + ".dll",
+                        "application/vnd.microsoft.portable-executable",
+                        File.ReadAllBytes(assembly.Location)
+                    );
+                }
+                catch (Exception exception)
+                {
+                    return BridgeCommandResult.FromException(exception);
+                }
+            }
+
+            return new() { artifacts = artifacts };
         }
     }
 }
