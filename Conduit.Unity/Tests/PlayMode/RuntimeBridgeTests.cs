@@ -15,6 +15,41 @@ using UnityEngine.TestTools;
 
 public sealed class RuntimeBridgeTests
 {
+    [TestCase(@"Y:\host", @"Z:\legacy", @"Y:\host")]
+    [TestCase(null, @"Z:\legacy", @"Z:\legacy")]
+    public void WineIpcRootUsesHostHome(string? hostHome, string legacyHome, string expectedHome)
+    {
+        var previousRoot = Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT");
+        var previousHostHome = Environment.GetEnvironmentVariable("WINE_HOST_HOME");
+        var previousHome = Environment.GetEnvironmentVariable("HOME");
+        try
+        {
+            Environment.SetEnvironmentVariable("CONDUIT_IPC_ROOT", null);
+            Environment.SetEnvironmentVariable("WINE_HOST_HOME", hostHome);
+            Environment.SetEnvironmentVariable("HOME", legacyHome);
+
+            Assert.That(
+                RuntimeIpcPaths.GetRoot(wine: true),
+                Is.EqualTo(
+                    Path.Combine(
+                        expectedHome,
+                        ".local",
+                        "state",
+                        "conduit",
+                        "ipc",
+                        "v1"
+                    )
+                )
+            );
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CONDUIT_IPC_ROOT", previousRoot);
+            Environment.SetEnvironmentVariable("WINE_HOST_HOME", previousHostHome);
+            Environment.SetEnvironmentVariable("HOME", previousHome);
+        }
+    }
+
     [Test]
     public void RuntimeBridgeOnlyStartsInAPlayer()
     {
