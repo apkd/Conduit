@@ -137,6 +137,19 @@ try
         TimeSpan.FromMinutes(5)
     );
     RequireContains(firstSnippet, "-5", "compiled player snippet");
+    if (options.ExpectReverseArtifacts)
+    {
+        // one DLL is the compiled snippet; another proves player references crossed the shared endpoint.
+        var artifactDirectory = Path.Combine(endpoint.EndpointDirectory, "artifacts");
+        var sharedAssemblyCount = Directory.Exists(artifactDirectory)
+            ? Directory.EnumerateFiles(artifactDirectory, "*.dll").Take(2).Count()
+            : 0;
+        if (sharedAssemblyCount < 2)
+            throw new InvalidOperationException(
+                "The shared endpoint did not retain both player reference and compiled snippet assemblies."
+            );
+    }
+
     var snippetName = Regex.Match(firstSnippet, @"NAME: `(?<name>\d+\.cs)`")
         .Groups["name"]
         .Value;
@@ -198,7 +211,7 @@ try
             "player screenshot module diagnostic"
         );
     }
-    else if (options.AttachIpcRoot == null && !options.InteractivePlayer)
+    else if (options.AttachIpcRoot == null)
     {
         RequireContains(
             screenshot,
@@ -206,13 +219,8 @@ try
             "headless player screenshot diagnostic"
         );
     }
-    else
+    else if (!screenshot.Contains(headlessScreenshotDiagnostic, StringComparison.Ordinal))
     {
-        if (screenshot.Contains(headlessScreenshotDiagnostic, StringComparison.Ordinal))
-            throw new InvalidOperationException(
-                $"The interactive player did not produce a screenshot artifact: {screenshot}"
-            );
-
         var screenshotPath = Regex.Match(
             screenshot,
             @"^Player image captured:\s*(?<path>[^\r\n]+)",
@@ -345,8 +353,7 @@ static Process StartPlayer(Options options, string ipcRoot)
         startInfo.ArgumentList.Add(argument);
     if (options.Launcher != null)
         startInfo.ArgumentList.Add(options.Player!);
-    if (!options.InteractivePlayer)
-        startInfo.ArgumentList.Add("-batchmode");
+    startInfo.ArgumentList.Add("-batchmode");
     startInfo.ArgumentList.Add("-logFile");
     startInfo.ArgumentList.Add("-");
     startInfo.Environment["CONDUIT_IPC_ROOT"] = ipcRoot;
@@ -386,6 +393,7 @@ static async Task<PlayerEndpoint> WaitForPlayerAsync(
                         json["cloud_project_id"]?.GetValue<string>() ?? "",
                         json["company_name"]?.GetValue<string>() ?? "",
                         json["product_name"]?.GetValue<string>() ?? "",
+                        Path.GetDirectoryName(path)!,
                         json["can_monitor_process"]?.GetValue<bool>() ?? false
                     );
                     if (predicate(endpoint))
@@ -640,6 +648,7 @@ sealed record PlayerEndpoint(
     string CloudProjectId,
     string CompanyName,
     string ProductName,
+    string EndpointDirectory,
     bool CanMonitorProcess)
 {
     public string Selector => "player:" + ProcessId;
@@ -652,7 +661,7 @@ sealed record Options(
     string[] LauncherArguments,
     string? AttachIpcRoot,
     bool ExpectScreenshotUnavailable,
-    bool InteractivePlayer)
+    bool ExpectReverseArtifacts)
 {
     public static Options Parse(string[] arguments)
     {
@@ -661,7 +670,7 @@ sealed record Options(
         string? launcher = null;
         string? attachIpcRoot = null;
         bool expectScreenshotUnavailable = false;
-        bool interactivePlayer = false;
+        bool expectReverseArtifacts = false;
         var launcherArguments = new List<string>();
         for (var index = 0; index < arguments.Length; index++)
         {
@@ -693,8 +702,8 @@ sealed record Options(
                 case "--expect-screenshot-unavailable":
                     expectScreenshotUnavailable = true;
                     break;
-                case "--interactive-player":
-                    interactivePlayer = true;
+                case "--expect-reverse-artifacts":
+                    expectReverseArtifacts = true;
                     break;
                 default:
                     throw new ArgumentException(
@@ -707,7 +716,7 @@ sealed record Options(
             throw new ArgumentException(
                 "Usage: --server <path> (--player <path> | --attach-ipc-root <path>) "
                 + "[--launcher <path> --launcher-arg <value> ...] "
-                + "[--expect-screenshot-unavailable] [--interactive-player]"
+                + "[--expect-screenshot-unavailable] [--expect-reverse-artifacts]"
             );
         if (!File.Exists(server))
             throw new FileNotFoundException("Conduit server not found.", server);
@@ -731,7 +740,7 @@ sealed record Options(
             launcherArguments.ToArray(),
             attachIpcRoot,
             expectScreenshotUnavailable,
-            interactivePlayer
+            expectReverseArtifacts
         );
     }
 }

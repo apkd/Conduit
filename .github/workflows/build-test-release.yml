@@ -1042,7 +1042,7 @@ jobs:
             --server "$RUNNER_TEMP/conduit-server/conduit-linux-x64" \
             --player "$RUNNER_TEMP/conduit-player/conduit-player.exe" \
             --launcher "$(command -v umu-run)" \
-            --interactive-player
+            --expect-reverse-artifacts
 
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
