@@ -796,7 +796,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: conduit-player-linux
+          name: test-player-linux
           path: ${{ runner.temp }}/player-linux
 
   build-player-windows:
@@ -914,7 +914,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: conduit-player-windows
+          name: test-player-windows
           path: ${{ runner.temp }}/player-windows
 
   test-player-linux:
@@ -936,7 +936,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: conduit-player-linux
+          name: test-player-linux
           path: ${{ runner.temp }}/conduit-player
 
       - name: Run Linux player E2E
@@ -971,7 +971,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: conduit-player-windows
+          name: test-player-windows
           path: ${{ runner.temp }}/conduit-player
 
       - name: Run Windows player E2E
@@ -1000,7 +1000,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: conduit-player-windows
+          name: test-player-windows
           path: ${{ runner.temp }}/conduit-player
 
       - name: Install umu and player dependencies
@@ -1131,7 +1131,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: conduit-*
+          pattern: conduit-*-x64
           path: release-assets
           merge-multiple: true
 
@@ -1300,7 +1300,23 @@ jobs:
             gh release create "$tag" --title "$title" --notes-file "$notes" --target "${{ needs.prepare.outputs.sha }}" --latest
           fi
 
-          mapfile -t files < <(find release-assets -maxdepth 1 -type f | sort)
-          if [ "${#files[@]}" -gt 0 ]; then
-            gh release upload "$tag" "${files[@]}" --clobber
-          fi
+          files=(
+            release-assets/conduit-linux-musl-x64
+            release-assets/conduit-linux-x64
+            release-assets/conduit-win-x64.exe
+          )
+          for file in "${files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing release asset '$file'."
+              exit 1
+            fi
+          done
+          gh release upload "$tag" "${files[@]}" --clobber
+
+          mapfile -t published < <(gh release view "$tag" --json assets --jq '.assets[].name')
+          for asset in "${published[@]}"; do
+            case "$asset" in
+              conduit-linux-musl-x64|conduit-linux-x64|conduit-win-x64.exe) ;;
+              *) gh release delete-asset "$tag" "$asset" --yes ;;
+            esac
+          done
