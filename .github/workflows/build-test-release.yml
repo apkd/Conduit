@@ -1039,7 +1039,8 @@ jobs:
           xvfb-run -a dotnet run --file run-unity-player-mcp-e2e.cs -- \
             --server "$RUNNER_TEMP/conduit-server/conduit-linux-x64" \
             --player "$RUNNER_TEMP/conduit-player/conduit-player.exe" \
-            --launcher "$(command -v umu-run)"
+            --launcher "$(command -v umu-run)" \
+            --interactive-player
 
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'

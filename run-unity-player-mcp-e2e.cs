@@ -198,7 +198,7 @@ try
             "player screenshot module diagnostic"
         );
     }
-    else if (options.AttachIpcRoot == null)
+    else if (options.AttachIpcRoot == null && !options.InteractivePlayer)
     {
         RequireContains(
             screenshot,
@@ -206,8 +206,13 @@ try
             "headless player screenshot diagnostic"
         );
     }
-    else if (!screenshot.Contains(headlessScreenshotDiagnostic, StringComparison.Ordinal))
+    else
     {
+        if (screenshot.Contains(headlessScreenshotDiagnostic, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"The interactive player did not produce a screenshot artifact: {screenshot}"
+            );
+
         var screenshotPath = Regex.Match(
             screenshot,
             @"^Player image captured:\s*(?<path>[^\r\n]+)",
@@ -340,7 +345,8 @@ static Process StartPlayer(Options options, string ipcRoot)
         startInfo.ArgumentList.Add(argument);
     if (options.Launcher != null)
         startInfo.ArgumentList.Add(options.Player!);
-    startInfo.ArgumentList.Add("-batchmode");
+    if (!options.InteractivePlayer)
+        startInfo.ArgumentList.Add("-batchmode");
     startInfo.ArgumentList.Add("-logFile");
     startInfo.ArgumentList.Add("-");
     startInfo.Environment["CONDUIT_IPC_ROOT"] = ipcRoot;
@@ -645,7 +651,8 @@ sealed record Options(
     string? Launcher,
     string[] LauncherArguments,
     string? AttachIpcRoot,
-    bool ExpectScreenshotUnavailable)
+    bool ExpectScreenshotUnavailable,
+    bool InteractivePlayer)
 {
     public static Options Parse(string[] arguments)
     {
@@ -654,6 +661,7 @@ sealed record Options(
         string? launcher = null;
         string? attachIpcRoot = null;
         bool expectScreenshotUnavailable = false;
+        bool interactivePlayer = false;
         var launcherArguments = new List<string>();
         for (var index = 0; index < arguments.Length; index++)
         {
@@ -685,6 +693,9 @@ sealed record Options(
                 case "--expect-screenshot-unavailable":
                     expectScreenshotUnavailable = true;
                     break;
+                case "--interactive-player":
+                    interactivePlayer = true;
+                    break;
                 default:
                     throw new ArgumentException(
                         $"Unsupported or incomplete argument '{arguments[index]}'."
@@ -696,7 +707,7 @@ sealed record Options(
             throw new ArgumentException(
                 "Usage: --server <path> (--player <path> | --attach-ipc-root <path>) "
                 + "[--launcher <path> --launcher-arg <value> ...] "
-                + "[--expect-screenshot-unavailable]"
+                + "[--expect-screenshot-unavailable] [--interactive-player]"
             );
         if (!File.Exists(server))
             throw new FileNotFoundException("Conduit server not found.", server);
@@ -719,7 +730,8 @@ sealed record Options(
             launcher,
             launcherArguments.ToArray(),
             attachIpcRoot,
-            expectScreenshotUnavailable
+            expectScreenshotUnavailable,
+            interactivePlayer
         );
     }
 }
