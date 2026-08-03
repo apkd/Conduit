@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 
 namespace Conduit
@@ -20,6 +21,10 @@ namespace Conduit
             "Count the number of times each MCP tool was used and the average call duration. " +
             "This data is stored locally and never sent anywhere. Useful for analyzing and " +
             "improving your MCP workflows.";
+        const string DebugBuildDefine = "CONDUIT_INCLUDE_IN_DEBUG_BUILDS";
+        const string DebugBuildDescription =
+            "Enables CONDUIT_INCLUDE_IN_DEBUG_BUILDS in this project, which lets the Conduit MCP " +
+            "communicate with the built development player, supporting a subset of the editor tools.";
         static readonly Color successColor = new(0.45f, 0.8f, 0.45f);
         static readonly Color errorColor = new(0.85f, 0.45f, 0.45f);
         static readonly Color enabledColor = new(0.8f, 0.8f, 0.8f);
@@ -79,6 +84,10 @@ namespace Conduit
                     "Configuration",
                     "Project",
                     "Profile",
+                    "Development",
+                    "Player",
+                    "Builds",
+                    DebugBuildDefine,
                 }
             )
             => label = "Conduit";
@@ -258,6 +267,36 @@ namespace Conduit
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.HelpBox(LocalToolUsageDescription, MessageType.None);
+
+            EditorGUILayout.Space();
+
+            // player defines follow the active compilation target; the server target has a separate
+            // define set even though Unity maps it to the standalone build target group
+#if UNITY_SERVER
+            var buildTarget = NamedBuildTarget.Server;
+#else
+            var buildTarget = NamedBuildTarget.FromBuildTargetGroup(
+                BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget)
+            );
+#endif
+            PlayerSettings.GetScriptingDefineSymbols(buildTarget, out var defines);
+            EditorGUI.BeginChangeCheck();
+            bool includeInDebugBuilds = EditorGUILayout.ToggleLeft(
+                "Enable Conduit in development player builds",
+                Array.IndexOf(defines, DebugBuildDefine) >= 0
+            );
+            EditorGUILayout.HelpBox(DebugBuildDescription, MessageType.None);
+
+            if (!EditorGUI.EndChangeCheck())
+                return;
+
+            var updatedDefines = new List<string>(defines);
+            if (includeInDebugBuilds)
+                updatedDefines.Add(DebugBuildDefine);
+            else
+                updatedDefines.RemoveAll(static define => define == DebugBuildDefine);
+
+            PlayerSettings.SetScriptingDefineSymbols(buildTarget, updatedDefines.ToArray());
         }
 
         void DrawSelectedEditor(ConduitSetupWizardUtility.EditorSpec[] specs, ConduitSettings settings)
