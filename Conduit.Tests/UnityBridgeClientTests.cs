@@ -106,6 +106,41 @@ public sealed class UnityBridgeClientTests
     }
 
     [Test]
+    public async Task FifoTransportReadHonorsCancellation()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var projectPath = $"/tmp/conduit-fifo-cancellation-{Guid.NewGuid():N}";
+        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
+        await using var transport = await UnityBridgeClient.BridgeTransport.ConnectAsync(
+            ConduitUtility.GetPipeName(projectPath),
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None
+        );
+        await transport.WritePayloadAsync(
+            BridgeProtocol.Serialize(
+                BridgeMessage.CreateHello(new() { ProjectPath = projectPath })
+            ),
+            CancellationToken.None
+        );
+        await Assert.That(await transport.ReadLineAsync(CancellationToken.None)).IsNotNull();
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var cancelled = false;
+        try
+        {
+            await transport.ReadLineAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            cancelled = true;
+        }
+
+        await Assert.That(cancelled).IsTrue();
+    }
+
+    [Test]
     public async Task ExecuteCommandIgnoresHandshakeProcessIdThatIsNotVisible()
     {
         if (OperatingSystem.IsWindows())

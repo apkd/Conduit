@@ -604,8 +604,8 @@ public sealed class ConduitMcpEndToEndTests
             var snippetFileName = GetSnippetFileName(first.Text);
             var assemblyPath = Path.Combine(
                 editorProjectPath,
-                "Temp",
-                "execute_code",
+                ConduitSnippetStorage.PreserveSnippets ? "Library" : "Temp",
+                "Conduit",
                 Path.ChangeExtension(snippetFileName, ".dll")
             );
             Assert.That(File.Exists(assemblyPath), Is.True, assemblyPath);
@@ -636,6 +636,60 @@ public sealed class ConduitMcpEndToEndTests
         {
             if (File.Exists(counterPath))
                 File.Delete(counterPath);
+        }
+    }
+
+    [Test]
+    [Order(16)]
+    public async Task ExecuteCode_PreservesSnippetsWhenEnabled()
+    {
+        bool hadPreference = EditorPrefs.HasKey(ConduitSnippetStorage.PreservePreferenceKey);
+        bool previousPreference = ConduitSnippetStorage.PreserveSnippets;
+        string? snippetFileName = null;
+        var storageRoot = Path.Combine(editorProjectPath, "Library", "Conduit");
+        try
+        {
+            ConduitSnippetStorage.PreserveSnippets = true;
+            var marker = Guid.NewGuid().ToString("N");
+            var result = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(
+                    ("projectPath", projectPath),
+                    ("snippet", $"return \"{marker}\";")
+                )
+            );
+            snippetFileName = GetSnippetFileName(result.Text);
+
+            AssertSuccessful(result, marker);
+            Assert.That(File.Exists(Path.Combine(storageRoot, snippetFileName)), Is.True);
+            Assert.That(
+                File.Exists(
+                    Path.Combine(
+                        storageRoot,
+                        Path.ChangeExtension(snippetFileName, ".dll")
+                    )
+                ),
+                Is.True
+            );
+        }
+        finally
+        {
+            if (hadPreference)
+                ConduitSnippetStorage.PreserveSnippets = previousPreference;
+            else
+            {
+                ConduitSnippetStorage.PreserveSnippets = false;
+                EditorPrefs.DeleteKey(ConduitSnippetStorage.PreservePreferenceKey);
+            }
+
+            if (snippetFileName is not null)
+                foreach (var extension in new[] { ".cs", ".kind", ".dll", ".pdb" })
+                    File.Delete(
+                        Path.Combine(
+                            storageRoot,
+                            Path.ChangeExtension(snippetFileName, extension)
+                        )
+                    );
         }
     }
 

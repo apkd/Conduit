@@ -28,7 +28,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         "using static Conduit.Runtime.ConduitRuntimeSearch;",
     ];
 
-    // execute_code and detour share one sequence so their persisted artifacts cannot overwrite each other.
+    // execute_code and detour share one sequence within each storage root so artifacts cannot collide.
     readonly ConcurrentDictionary<string, TargetCompilationCache> targetCaches
         = new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, string> downloadedReferences
@@ -56,9 +56,13 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         string snippet,
         CancellationToken ct)
     {
-        var snippetRoot = GetSnippetRoot(target);
+        var storage = await GetSnippetStorageAsync(target, ct);
+        if (storage.Failure is { } storageFailure)
+            return SnippetCompilation.FromFailure(storageFailure);
+
+        var snippetRoot = GetSnippetRoot(target, storage.PreserveSnippets);
         var cache = targetCaches.GetOrAdd(
-            target,
+            snippetRoot ?? target,
             _ => new(GetHighestArtifactId(snippetRoot))
         );
         await cache.Gate.WaitAsync(ct);
@@ -243,6 +247,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     target,
                     artifactId + ".dll",
                     "application/vnd.microsoft.portable-executable",
+                    storage.PreserveSnippets,
                     compile.AssemblyBytes!,
                     ct
                 ),
@@ -250,6 +255,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     target,
                     artifactId + ".pdb",
                     "application/vnd.microsoft.portable-pdb",
+                    storage.PreserveSnippets,
                     compile.PdbBytes!,
                     ct
                 ),
@@ -280,20 +286,54 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         CancellationToken ct)
     {
         var references = await GetReferencesAsync(target, ct);
-        return new(references.ReferencePaths, references.Failure);
+        return new(
+            references.ReferencePaths,
+            references.PreserveSnippets,
+            references.Failure
+        );
+    }
+
+    async Task<SnippetStorageResult> GetSnippetStorageAsync(
+        string target,
+        CancellationToken ct)
+    {
+        if (PlayerSelector.TryParse(target, out _))
+            return SnippetStorageResult.Succeeded(false);
+
+        if (bridgeClient.TryGetLiveHandshake(target, out var cachedHandshake))
+            return SnippetStorageResult.Succeeded(cachedHandshake!.PreserveSnippets);
+
+        var connection = await bridgeClient.ProbeAsync(
+            target,
+            processIdHint: null,
+            timeout: referenceCommandTimeout,
+            ct: ct
+        );
+        return connection.Handshake is { } handshake
+            ? SnippetStorageResult.Succeeded(handshake.PreserveSnippets)
+            : SnippetStorageResult.Failed(
+                connection.Result ??
+                UnityProjectOperations.ToToolExecutionResult(
+                    target,
+                    BridgeCommandTypes.ExecuteCode,
+                    connection,
+                    referenceCommandTimeout
+                )
+            );
     }
 
     internal static async Task<BridgeArtifact> CreateArtifactAsync(
         string target,
         string name,
         string mediaType,
+        bool preserveSnippets,
         byte[] bytes,
         CancellationToken ct)
     {
         if (PlayerSelector.TryParse(target, out _))
             return BridgeArtifact.FromBytes(name, mediaType, bytes);
 
-        var relativePath = Path.Combine("Temp", "execute_code", name);
+        var relativePath = Path.Combine(GetSnippetDirectory(preserveSnippets), name);
         var path = Path.Combine(ProjectPathNormalizer.ToPlatformPath(target), relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllBytesAsync(path, bytes, ct);
@@ -303,11 +343,12 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     internal async Task<SourceArtifactResult> PrepareDetourArtifactAsync(
         string target,
         string source,
+        bool preserveSnippets,
         CancellationToken ct)
     {
-        var snippetRoot = GetSnippetRoot(target);
+        var snippetRoot = GetSnippetRoot(target, preserveSnippets);
         var cache = targetCaches.GetOrAdd(
-            target,
+            snippetRoot ?? target,
             _ => new(GetHighestArtifactId(snippetRoot))
         );
         await cache.Gate.WaitAsync(ct);
@@ -443,7 +484,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             )
             : ReferenceSetResult.Succeeded(
                 metadataReferences.ToArray(),
-                referencePaths.ToArray()
+                referencePaths.ToArray(),
+                execution.Handshake?.PreserveSnippets == true
             );
     }
 
@@ -540,10 +582,16 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         }
     }
 
-    static string? GetSnippetRoot(string target) =>
+    static string GetSnippetDirectory(bool preserveSnippets)
+        => Path.Combine(preserveSnippets ? "Library" : "Temp", "Conduit");
+
+    static string? GetSnippetRoot(string target, bool preserveSnippets) =>
         PlayerSelector.TryParse(target, out _)
             ? null
-            : Path.Combine(ProjectPathNormalizer.ToPlatformPath(target), "Temp", "execute_code");
+            : Path.Combine(
+                ProjectPathNormalizer.ToPlatformPath(target),
+                GetSnippetDirectory(preserveSnippets)
+            );
 
     static int GetHighestArtifactId(string? snippetRoot)
     {
@@ -989,15 +1037,17 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     readonly record struct ReferenceSetResult(
         MetadataReference[]? References,
         string[]? ReferencePaths,
+        bool PreserveSnippets,
         ToolExecutionResult? Failure)
     {
         internal static ReferenceSetResult Succeeded(
             MetadataReference[] references,
-            string[] paths) =>
-            new(references, paths, null);
+            string[] paths,
+            bool preserveSnippets) =>
+            new(references, paths, preserveSnippets, null);
 
         internal static ReferenceSetResult Failed(ToolExecutionResult failure) =>
-            new(null, null, failure);
+            new(null, null, false, failure);
     }
 
     readonly record struct ReferenceFetchResult(
@@ -1006,6 +1056,17 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     {
         internal static ReferenceFetchResult Succeeded(string path) => new(path, null);
         internal static ReferenceFetchResult Failed(ToolExecutionResult failure) => new(null, failure);
+    }
+
+    readonly record struct SnippetStorageResult(
+        bool PreserveSnippets,
+        ToolExecutionResult? Failure)
+    {
+        internal static SnippetStorageResult Succeeded(bool preserveSnippets) =>
+            new(preserveSnippets, null);
+
+        internal static SnippetStorageResult Failed(ToolExecutionResult failure) =>
+            new(false, failure);
     }
 }
 
@@ -1037,7 +1098,10 @@ sealed record CompiledSnippet(
         };
 }
 
-readonly record struct CompilationReferencePaths(string[]? Paths, ToolExecutionResult? Failure);
+readonly record struct CompilationReferencePaths(
+    string[]? Paths,
+    bool PreserveSnippets,
+    ToolExecutionResult? Failure);
 
 readonly record struct SourceArtifact(string Id, string FileName, string Source);
 

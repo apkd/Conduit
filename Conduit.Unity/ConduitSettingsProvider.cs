@@ -25,6 +25,10 @@ namespace Conduit
         const string DebugBuildDescription =
             "Enables CONDUIT_INCLUDE_IN_DEBUG_BUILDS in this project, which lets the Conduit MCP " +
             "communicate with the built development player, supporting a subset of the editor tools.";
+        const string PreserveSnippetsDescription =
+            "Saves code snippets in Library/Conduit instead of Temp/Conduit. This extends their " +
+            "lifetime, allowing agents to call them across multiple editor sessions. Unity " +
+            "automatically deletes files in the Temp directory during editor startup.";
         static readonly Color successColor = new(0.45f, 0.8f, 0.45f);
         static readonly Color errorColor = new(0.85f, 0.45f, 0.45f);
         static readonly Color enabledColor = new(0.8f, 0.8f, 0.8f);
@@ -88,6 +92,12 @@ namespace Conduit
                     "Player",
                     "Builds",
                     DebugBuildDefine,
+                    "Snippets",
+                    "Preserve",
+                    "Library",
+                    "Temp",
+                    "execute_code",
+                    "detour",
                 }
             )
             => label = "Conduit";
@@ -287,16 +297,27 @@ namespace Conduit
             );
             EditorGUILayout.HelpBox(DebugBuildDescription, MessageType.None);
 
-            if (!EditorGUI.EndChangeCheck())
-                return;
+            if (EditorGUI.EndChangeCheck())
+            {
+                var updatedDefines = new List<string>(defines);
+                if (includeInDebugBuilds)
+                    updatedDefines.Add(DebugBuildDefine);
+                else
+                    updatedDefines.RemoveAll(static define => define == DebugBuildDefine);
 
-            var updatedDefines = new List<string>(defines);
-            if (includeInDebugBuilds)
-                updatedDefines.Add(DebugBuildDefine);
-            else
-                updatedDefines.RemoveAll(static define => define == DebugBuildDefine);
+                PlayerSettings.SetScriptingDefineSymbols(buildTarget, updatedDefines.ToArray());
+            }
 
-            PlayerSettings.SetScriptingDefineSymbols(buildTarget, updatedDefines.ToArray());
+            EditorGUILayout.Space();
+            EditorGUI.BeginChangeCheck();
+            bool preserveSnippets = EditorGUILayout.ToggleLeft(
+                "Preserve `execute_code` and `detour` snippets",
+                ConduitSnippetStorage.PreserveSnippets
+            );
+            if (EditorGUI.EndChangeCheck())
+                ConduitSnippetStorage.PreserveSnippets = preserveSnippets;
+
+            EditorGUILayout.HelpBox(PreserveSnippetsDescription, MessageType.None);
         }
 
         void DrawSelectedEditor(ConduitSetupWizardUtility.EditorSpec[] specs, ConduitSettings settings)

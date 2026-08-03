@@ -59,7 +59,12 @@ public sealed class SnippetCompilerTests
     }
 
     [Test]
-    public async Task EditorArtifactUsesVerifiedProjectRelativeFile()
+    [Arguments(false, "Temp/Conduit")]
+    [Arguments(true, "Library/Conduit")]
+    public async Task EditorArtifactUsesConfiguredProjectRelativeFile(
+        bool preserveSnippets,
+        string storageDirectory
+    )
     {
         var root = Path.Combine(Path.GetTempPath(), $"conduit-artifact-{Guid.NewGuid():N}");
         var bytes = "compiled"u8.ToArray();
@@ -69,14 +74,15 @@ public sealed class SnippetCompilerTests
                 root,
                 "1.dll",
                 "application/vnd.microsoft.portable-executable",
+                preserveSnippets,
                 bytes,
                 CancellationToken.None
             );
 
             await Assert.That(artifact.RelativePath?.Replace('\\', '/'))
-                .IsEqualTo("Temp/execute_code/1.dll");
+                .IsEqualTo($"{storageDirectory}/1.dll");
             await Assert.That(artifact.Chunks).Count().IsEqualTo(0);
-            await Assert.That(File.ReadAllBytes(Path.Combine(root, "Temp", "execute_code", "1.dll")))
+            await Assert.That(File.ReadAllBytes(Path.Combine(root, storageDirectory, "1.dll")))
                 .IsEquivalentTo(bytes);
         }
         finally
@@ -129,11 +135,13 @@ public sealed class SnippetCompilerTests
         var first = await compiler.PrepareDetourArtifactAsync(
             "player:12345",
             "return 7;",
+            false,
             CancellationToken.None
         );
         var second = await compiler.PrepareDetourArtifactAsync(
             "player:12345",
             first.Artifact!.Value.FileName,
+            false,
             CancellationToken.None
         );
 

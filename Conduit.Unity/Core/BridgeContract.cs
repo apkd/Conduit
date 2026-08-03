@@ -229,6 +229,7 @@ namespace Conduit
         public string product_name = string.Empty;
         public bool can_monitor_process = true;
         public string[] capabilities = Array.Empty<string>();
+        public bool preserve_snippets;
         public string editor_log_path = string.Empty;
         public string session_instance_id = string.Empty;
         public string handoff_token = string.Empty;
@@ -247,6 +248,7 @@ namespace Conduit
         public string ProductName { get => product_name; set => product_name = value; }
         public bool CanMonitorProcess { get => can_monitor_process; set => can_monitor_process = value; }
         public string[] Capabilities { get => capabilities; set => capabilities = value; }
+        public bool PreserveSnippets { get => preserve_snippets; set => preserve_snippets = value; }
         public string EditorLogPath { get => editor_log_path; set => editor_log_path = value; }
         public string SessionInstanceId { get => session_instance_id; set => session_instance_id = value; }
         public string HandoffToken { get => handoff_token; set => handoff_token = value; }

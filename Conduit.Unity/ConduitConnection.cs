@@ -31,9 +31,11 @@ namespace Conduit
         static string? fifoEndpointDirectory;
         static bool started;
         static bool shuttingDown;
+        static volatile bool refreshClientHandshakesRequested;
         static bool toolbarRefreshRequested;
         static ConduitConnectionStatus status;
         static DateTimeOffset attachedUntilUtc;
+        static int handshakeGeneration;
         static int nextClientId;
         static readonly string sessionInstanceId = Guid.NewGuid().ToString("N");
 
@@ -263,12 +265,14 @@ namespace Conduit
             try
             {
                 reader = new(connection.Input, utf8NoBom, false, 1024, true);
+                int sessionHandshakeGeneration = Volatile.Read(ref handshakeGeneration);
                 if (!await TryHandshakeAsync(connection, reader, cancellationToken))
                     return;
 
                 session = new()
                 {
                     id = CreateClientId(),
+                    handshake_generation = sessionHandshakeGeneration,
                     connection = connection,
                     reader = reader,
                 };
@@ -397,6 +401,9 @@ namespace Conduit
         static void RegisterConnection(ClientSession session)
         {
             clientSessions[session.id] = session;
+            if (session.handshake_generation != Volatile.Read(ref handshakeGeneration))
+                refreshClientHandshakesRequested = true;
+
             UpdateConnectionStatus(ConduitConnectionStatus.Connected);
         }
 
@@ -413,6 +420,34 @@ namespace Conduit
                 if (!IsShuttingDown())
                     ConduitToolRunner.HandleClientDisconnected(session.id);
             }
+        }
+
+        internal static void RefreshClientHandshakes()
+        {
+            Interlocked.Increment(ref handshakeGeneration);
+            refreshClientHandshakesRequested = !clientSessions.IsEmpty;
+        }
+
+        static void RefreshIdleClientHandshakes()
+        {
+            // handshake metadata is immutable, so active clients reconnect after their work completes
+            bool deferred = false;
+            int currentGeneration = Volatile.Read(ref handshakeGeneration);
+            foreach (var session in clientSessions.Values)
+            {
+                if (session.handshake_generation == currentGeneration)
+                    continue;
+
+                if (ConduitToolRunner.HasOutstandingClientWork(session.id))
+                {
+                    deferred = true;
+                    continue;
+                }
+
+                ClearConnection(session);
+            }
+
+            refreshClientHandshakesRequested = deferred;
         }
 
         static void OnEditorUpdate()
@@ -442,6 +477,8 @@ namespace Conduit
                 ConduitToolRunner.HandleIncomingCommand(inboundMessage.client_id, inboundMessage.message);
 
             ConduitToolRunner.PumpQueuedCommands();
+            if (refreshClientHandshakesRequested)
+                RefreshIdleClientHandshakes();
         }
 
         static void OnBeforeAssemblyReload()
@@ -482,7 +519,7 @@ namespace Conduit
                 ? ConduitConnectionStatus.Connected
                 : ConduitConnectionStatus.Disconnected;
 
-        static BridgeProjectHandshake CreateHandshake(string projectPath)
+        internal static BridgeProjectHandshake CreateHandshake(string projectPath)
         {
             return new()
             {
@@ -496,6 +533,7 @@ namespace Conduit
                 cloud_project_id = CloudProjectSettings.projectId,
                 company_name = Application.companyName,
                 product_name = Application.productName,
+                preserve_snippets = ConduitSnippetStorage.PreserveSnippets,
                 editor_log_path = Application.consoleLogPath,
                 session_instance_id = sessionInstanceId,
                 last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
@@ -770,6 +808,7 @@ namespace Conduit
         sealed class ClientSession
         {
             public int id;
+            public int handshake_generation;
             public EditorBridgeConnection connection = null!;
             public StreamReader reader = null!;
             public readonly ConcurrentQueue<OutboundClientMessage> outbound_messages = new();

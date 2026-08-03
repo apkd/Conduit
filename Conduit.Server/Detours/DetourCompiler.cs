@@ -47,7 +47,12 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             if (replacementBody.Length == 0)
                 return PreparedDetour.Failed(ExceptionResult("`replacementBody` cannot be empty."));
 
-            var preparedArtifact = await snippetCompiler.PrepareDetourArtifactAsync(target, replacementBody, ct);
+            var preparedArtifact = await snippetCompiler.PrepareDetourArtifactAsync(
+                target,
+                replacementBody,
+                references.PreserveSnippets,
+                ct
+            );
             if (preparedArtifact.Failure is { } artifactFailure)
                 return PreparedDetour.Failed(artifactFailure);
             artifact = preparedArtifact.Artifact!.Value;
@@ -161,6 +166,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
                 target,
                 artifact.Id + ".dll",
                 "application/vnd.microsoft.portable-executable",
+                references.PreserveSnippets,
                 output.AssemblyBytes!,
                 ct
             ),
@@ -168,6 +174,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
                 target,
                 artifact.Id + ".pdb",
                 "application/vnd.microsoft.portable-pdb",
+                references.PreserveSnippets,
                 output.PdbBytes!,
                 ct
             ),

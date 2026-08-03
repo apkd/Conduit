@@ -706,7 +706,7 @@ public sealed class UnityBridgeClient
             var requestKeeper = OpenFifoKeeper(requestPath);
             var responseKeeper = OpenFifoKeeper(responsePath);
             FileStream? request = null;
-            FileStream? response = null;
+            FifoLineReader? response = null;
 
             try
             {
@@ -727,14 +727,7 @@ public sealed class UnityBridgeClient
                     bufferSize: 4096,
                     FileOptions.Asynchronous
                 );
-                response = new(
-                    responsePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite,
-                    bufferSize: 4096,
-                    FileOptions.Asynchronous
-                );
+                response = FifoLineReader.Open(responsePath);
 
                 var connectedPath = Path.Combine(clientDirectory, "connected");
                 var deadline = DateTime.UtcNow + timeout;
@@ -752,15 +745,15 @@ public sealed class UnityBridgeClient
                 CloseFifoKeeper(ref requestKeeper);
                 CloseFifoKeeper(ref responseKeeper);
                 var connected = true;
-                return FromStreams(
-                    response,
-                    request,
+                return new(
+                    response.ReadLineAsync,
+                    (payload, writeToken) => WriteStreamPayloadAsync(request, payload, writeToken),
                     () => connected,
                     async () =>
                     {
                         connected = false;
+                        response.Dispose();
                         await request.DisposeAsync();
-                        await response.DisposeAsync();
                         TryDeleteClientDirectory(clientDirectory);
                     }
                 );
@@ -771,8 +764,7 @@ public sealed class UnityBridgeClient
                 CloseFifoKeeper(ref responseKeeper);
                 if (request is not null)
                     await request.DisposeAsync();
-                if (response is not null)
-                    await response.DisposeAsync();
+                response?.Dispose();
                 TryDeleteClientDirectory(clientDirectory);
                 throw;
             }
@@ -856,11 +848,111 @@ public sealed class UnityBridgeClient
                 exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException) { }
         }
 
+        // FileStream cannot cancel a pending FIFO read on Linux. Polling a nonblocking
+        // descriptor keeps bridge command deadlines enforceable when a peer stops responding.
+        sealed class FifoLineReader(int descriptor) : IDisposable
+        {
+            const int RetryDelayMilliseconds = 10;
+            readonly byte[] readBuffer = new byte[4096];
+            readonly MemoryStream lineBuffer = new();
+            readonly Queue<string> lines = new();
+            int descriptor = descriptor;
+            bool endOfStream;
+
+            internal static FifoLineReader Open(string path)
+            {
+                const int readOnly = 0;
+                const int nonBlocking = 0x800;
+                const int closeOnExec = 0x80000;
+                var descriptor = open(path, readOnly | nonBlocking | closeOnExec);
+                if (descriptor < 0)
+                    throw new IOException(
+                        $"Could not open FIFO reader '{path}' (errno {Marshal.GetLastPInvokeError()})."
+                    );
+
+                return new(descriptor);
+            }
+
+            internal async ValueTask<string?> ReadLineAsync(CancellationToken ct)
+            {
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (lines.TryDequeue(out var line))
+                        return line;
+                    if (endOfStream)
+                        return TakeIncompleteLine();
+                    if (descriptor < 0)
+                        throw new ObjectDisposedException(nameof(FifoLineReader));
+
+                    var count = read(descriptor, readBuffer, (nuint)readBuffer.Length);
+                    if (count > 0)
+                    {
+                        Append(readBuffer.AsSpan(0, checked((int)count)));
+                        continue;
+                    }
+
+                    if (count == 0)
+                    {
+                        endOfStream = true;
+                        continue;
+                    }
+
+                    var error = Marshal.GetLastPInvokeError();
+                    if (error == ErrorInterrupted)
+                        continue;
+                    if (error != ErrorAgain)
+                        throw new IOException($"Could not read the Unity FIFO response (errno {error}).");
+
+                    await Task.Delay(RetryDelayMilliseconds, ct);
+                }
+            }
+
+            void Append(ReadOnlySpan<byte> bytes)
+            {
+                var start = 0;
+                for (var index = 0; index < bytes.Length; ++index)
+                {
+                    if (bytes[index] != (byte)'\n')
+                        continue;
+
+                    lineBuffer.Write(bytes[start..index]);
+                    lines.Enqueue(TakeLine());
+                    start = index + 1;
+                }
+
+                lineBuffer.Write(bytes[start..]);
+            }
+
+            string? TakeIncompleteLine() => lineBuffer.Length == 0 ? null : TakeLine();
+
+            string TakeLine()
+            {
+                var bytes = lineBuffer.GetBuffer().AsSpan(0, checked((int)lineBuffer.Length));
+                if (bytes is [.., (byte)'\r'])
+                    bytes = bytes[..^1];
+                var line = utf8NoBom.GetString(bytes);
+                lineBuffer.SetLength(0);
+                return line;
+            }
+
+            public void Dispose()
+            {
+                var current = Interlocked.Exchange(ref descriptor, -1);
+                if (current >= 0)
+                    close(current);
+                lineBuffer.Dispose();
+            }
+        }
+
         [DllImport("libc", SetLastError = true)]
         static extern int mkfifo(string pathname, uint mode);
 
         [DllImport("libc", SetLastError = true)]
         static extern int open(string pathname, int flags);
+
+        [DllImport("libc", SetLastError = true)]
+        static extern nint read(int descriptor, [Out] byte[] buffer, nuint count);
 
         [DllImport("libc", SetLastError = true)]
         static extern int close(int fileDescriptor);
