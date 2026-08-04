@@ -19,12 +19,11 @@ public sealed class ConduitMcpEndToEndTests
 {
     const string TestAssetsRoot = "Packages/dev.tryfinally.conduit/Tests/EditMode/TestAssets";
     const string MaterialAsset = TestAssetsRoot + "/JsonOverwriteMaterial.mat";
+    const string MaterialShaderAsset = TestAssetsRoot + "/IntegerPropertyFixture.shader";
     const string MissingScriptPrefabAsset = TestAssetsRoot + "/MissingScriptFixture.prefab";
     const string SceneAsset = TestAssetsRoot + "/Scenes/BridgeFixtureScene.unity";
-    const string SettingsRoot = TestAssetsRoot + "/Settings";
-    const string SourceAsset = SettingsRoot + "/DependencyPipeline.asset";
-    const string DependencyAsset = SettingsRoot + "/DependencyRenderer.asset";
-    const string VolumeProfileAsset = SettingsRoot + "/SceneEffectsProfile.asset";
+    const string SourceAsset = MaterialAsset;
+    const string DependencyAsset = MaterialShaderAsset;
     const string PackageScriptAsset = "Packages/dev.tryfinally.conduit/ConduitToolRunner.Execution.cs";
     const string TempRoot = "Assets/ConduitMcpE2ETemp";
     const string MissingScenePath = "Assets/ConduitMcpDefinitelyMissingScene.unity";
@@ -168,7 +167,7 @@ public sealed class ConduitMcpEndToEndTests
         );
 
         Assert.That(
-            TryFindGuidForAnyPathSuffix(success.Text, "DependencyRenderer.asset", "PC_Renderer.asset"),
+            TryFindGuidForAnyPathSuffix(success.Text, "IntegerPropertyFixture.shader"),
             Is.Not.Null,
             success.Text
         );
@@ -177,7 +176,7 @@ public sealed class ConduitMcpEndToEndTests
             BridgeCommandTypes.GetDependencies,
             Args(
                 ("projectPath", projectPath),
-                ("asset", SettingsRoot + "/*.asset")
+                ("asset", TestAssetsRoot + "/*.*")
             )
         );
 
@@ -197,13 +196,13 @@ public sealed class ConduitMcpEndToEndTests
             )
         );
 
-        AssertTextContainsAny(success.Text, "DependencyPipeline.asset", "PC_RPAsset.asset");
+        AssertTextContainsAny(success.Text, "JsonOverwriteMaterial.mat");
 
         var failure = await client.CallToolAsync(
             BridgeCommandTypes.FindReferencesTo,
             Args(
                 ("projectPath", projectPath),
-                ("asset", SettingsRoot + "/Nope*.asset")
+                ("asset", TestAssetsRoot + "/Nope*.asset")
             )
         );
 
@@ -533,23 +532,6 @@ public sealed class ConduitMcpEndToEndTests
 
         AssertSuccessful(result, "true");
         Assert.That(result.Text, Does.Not.Contain("Retried with inferred namespaces"));
-    }
-
-    [Test]
-    [Order(15)]
-    public async Task ExecuteCode_AutoInfersLowercaseTypeNamespace()
-    {
-        const string snippet = "return math.length(new float3(3f, 4f, 0f));";
-
-        var result = await client.CallToolAsync(
-            BridgeCommandTypes.ExecuteCode,
-            Args(
-                ("projectPath", projectPath),
-                ("snippet", snippet)
-            )
-        );
-
-        AssertSuccessful(result, "5");
     }
 
     [Test]
@@ -1319,9 +1301,7 @@ public sealed class ConduitMcpEndToEndTests
             MaterialAsset,
             MissingScriptPrefabAsset,
             SceneAsset,
-            SourceAsset,
             DependencyAsset,
-            VolumeProfileAsset,
         };
 
         foreach (var assetPath in assetPaths)

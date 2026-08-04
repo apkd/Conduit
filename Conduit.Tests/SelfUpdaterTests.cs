@@ -1,11 +1,9 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using JetBrains.Annotations;
 using static System.StringComparison;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class SelfUpdaterTests
 {
     [Test]

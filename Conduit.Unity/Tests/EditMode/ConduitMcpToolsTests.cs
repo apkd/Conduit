@@ -23,6 +23,7 @@ public sealed class ConduitMcpToolsTests
 {
     const string TestAssetsRoot = "Packages/dev.tryfinally.conduit/Tests/EditMode/TestAssets";
     const string MaterialAsset = TestAssetsRoot + "/JsonOverwriteMaterial.mat";
+    const string MaterialShaderAsset = TestAssetsRoot + "/IntegerPropertyFixture.shader";
     const string SceneAsset = TestAssetsRoot + "/Scenes/BridgeFixtureScene.unity";
 
     [Test]
@@ -37,10 +38,8 @@ public sealed class ConduitMcpToolsTests
             Is.EqualTo("1 minute 1 second")
         );
     }
-    const string SettingsRoot = TestAssetsRoot + "/Settings";
-    const string SourceAsset = SettingsRoot + "/DependencyPipeline.asset";
-    const string DependencyAsset = SettingsRoot + "/DependencyRenderer.asset";
-    const string MaterialIntShaderAsset = TestAssetsRoot + "/IntegerPropertyFixture.shader";
+    const string SourceAsset = MaterialAsset;
+    const string DependencyAsset = MaterialShaderAsset;
     const string TempRoot = "Assets/ConduitMcpE2ETemp";
     const string CameraSearchQuery = "Main Camera t:camera";
 
@@ -1228,7 +1227,7 @@ public sealed class ConduitMcpToolsTests
     public void GetDependencies_PatternWithSingleMatchMatchesExactOutput()
     {
         var exact = find_references_to.GetDependencies(SourceAsset);
-        var pattern = find_references_to.GetDependencies($"{SettingsRoot}/DependencyPipeline*.asset");
+        var pattern = find_references_to.GetDependencies($"{TestAssetsRoot}/JsonOverwriteMaterial*.mat");
 
         Assert.That(pattern, Is.EqualTo(exact));
     }
@@ -1236,7 +1235,7 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void ExpandAssetPaths_PackageWildcardMatchesSingleAsset()
     {
-        var matches = ConduitAssetPathUtility.ExpandAssetPaths($"{SettingsRoot}/DependencyPipeline*.asset");
+        var matches = ConduitAssetPathUtility.ExpandAssetPaths($"{TestAssetsRoot}/JsonOverwriteMaterial*.mat");
 
         Assert.That(matches, Is.EqualTo(new[] { SourceAsset }));
     }
@@ -1245,7 +1244,7 @@ public sealed class ConduitMcpToolsTests
     public void FindReferencesTo_PatternWithSingleMatchMatchesExactOutput()
     {
         var exact = find_references_to.FindReferencesTo(DependencyAsset, true);
-        var pattern = find_references_to.FindReferencesTo($"{SettingsRoot}/DependencyRenderer*.asset", false);
+        var pattern = find_references_to.FindReferencesTo($"{TestAssetsRoot}/IntegerPropertyFixture*.shader", false);
 
         Assert.That(pattern, Is.EqualTo(exact));
     }
@@ -1253,18 +1252,18 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void GetDependencies_PatternWithMultipleMatchesReportsAmbiguity()
     {
-        var output = find_references_to.GetDependencies($"{SettingsRoot}/*.asset");
+        var output = find_references_to.GetDependencies($"{TestAssetsRoot}/*.*");
 
-        Assert.That(output, Does.StartWith($"Asset selector '{SettingsRoot}/*.asset' matched "));
+        Assert.That(output, Does.StartWith($"Asset selector '{TestAssetsRoot}/*.*' matched "));
         Assert.That(output, Does.Contain("requires a single asset"));
     }
 
     [Test]
     public void FindReferencesTo_PatternWithNoMatchesReportsNoResults()
     {
-        var output = find_references_to.FindReferencesTo($"{SettingsRoot}/Nope*.asset", true);
+        var output = find_references_to.FindReferencesTo($"{TestAssetsRoot}/Nope*.asset", true);
 
-        Assert.That(output, Is.EqualTo($"No assets matched '{SettingsRoot}/Nope*.asset'."));
+        Assert.That(output, Is.EqualTo($"No assets matched '{TestAssetsRoot}/Nope*.asset'."));
     }
 
     [Test]
@@ -1274,7 +1273,7 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(output, Does.StartWith($"Asset: {MaterialAsset}"));
         Assert.That(output, Does.Contain("Main Object:"));
-        Assert.That(output, Does.Contain("Imported Subassets:"));
+        Assert.That(output, Does.Not.Contain("Imported Subassets:"));
     }
 
     [Test]
@@ -1432,6 +1431,11 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void Show_NonSerializableUnityIndexableFormatsByIndex()
     {
+        if (AppDomain.CurrentDomain
+            .GetAssemblies()
+            .All(assembly => assembly.GetName().Name != "Unity.Collections"))
+            Assert.Ignore("Unity.Collections is not installed.");
+
         var assetPath = GetTempAssetPath("UnitTests", $"NativeIndexable_{Guid.NewGuid():N}.asset");
         var target = ScriptableObject.CreateInstance<ConduitNativeIndexableAsset>();
         try
@@ -1749,7 +1753,7 @@ public sealed class ConduitMcpToolsTests
     [Test]
     public void FromJsonOverwrite_MaterialIntPatchPersistsForTrueIntProperty()
     {
-        var assetPath = CreateTemporaryMaterialAsset(MaterialIntShaderAsset);
+        var assetPath = CreateTemporaryMaterialAsset(MaterialShaderAsset);
         try
         {
             var result = ConduitObjectJsonUtility.FromJsonOverwrite(

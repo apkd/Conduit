@@ -1,9 +1,7 @@
 using System.Text.Json;
-using JetBrains.Annotations;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class PlayerBridgeDiscoveryTests
 {
     [Test]

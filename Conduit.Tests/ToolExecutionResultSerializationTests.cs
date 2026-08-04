@@ -1,10 +1,8 @@
 using System.Text.Json;
 using System.Reflection;
-using JetBrains.Annotations;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class ToolExecutionResultSerializationTests
 {
     [Test]

@@ -243,7 +243,9 @@ namespace Conduit
             string? testFilter = null)
         {
             Console.WriteLine($"Running {mode} tests...");
-            var completion = new TaskCompletionSource<ITestResultAdaptor>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var completion = new TaskCompletionSource<ITestResultAdaptor>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            );
             TestRunnerCallbacks callbacks = null!;
             callbacks = new()
             {
@@ -261,19 +263,8 @@ namespace Conduit
                 },
                 RunFinished = result =>
                 {
-                    try
-                    {
-                        WriteTestResults(resultsPath);
-                        completion.TrySetResult(result);
-                    }
-                    catch (Exception exception)
-                    {
-                        completion.TrySetException(exception);
-                    }
-                    finally
-                    {
-                        testRunnerApi.UnregisterCallbacks(callbacks);
-                    }
+                    testRunnerApi.UnregisterCallbacks(callbacks);
+                    completion.TrySetResult(result);
                 },
             };
 
@@ -291,20 +282,10 @@ namespace Conduit
                 throw;
             }
 
-            return await completion.Task;
-        }
-
-        static void WriteTestResults(string outputPath)
-        {
-            var sourcePath = Path.Combine(Application.persistentDataPath, "TestResults.xml");
-            if (!File.Exists(sourcePath))
-                throw new FileNotFoundException("Unity did not produce a test results XML file.", sourcePath);
-
-            Console.WriteLine($"Saving results to: {outputPath}");
-            if (PathsEqual(sourcePath, outputPath))
-                return;
-
-            File.Copy(sourcePath, outputPath, overwrite: true);
+            var result = await completion.Task;
+            Console.WriteLine($"Saving results to: {resultsPath}");
+            TestRunnerApi.SaveResultToFile(result, resultsPath);
+            return result;
         }
 
         static void EnsureOutputDirectoryExists(string outputPath)
@@ -399,12 +380,6 @@ namespace Conduit
 
             builder.Append(character);
         }
-
-        static bool PathsEqual(string left, string right)
-            => string.Equals(
-                Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase);
     }
 }
 #endif

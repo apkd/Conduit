@@ -3,13 +3,11 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Text;
-using JetBrains.Annotations;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class DetourMetadataTests
 {
     [Test]

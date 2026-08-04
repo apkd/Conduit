@@ -1,9 +1,7 @@
 using Microsoft.CodeAnalysis;
-using JetBrains.Annotations;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class SnippetCompilerTests
 {
     static readonly MetadataReference[] platformReferences =

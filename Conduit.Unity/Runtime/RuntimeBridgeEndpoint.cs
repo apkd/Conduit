@@ -108,7 +108,7 @@ namespace Conduit.Runtime
             {
                 try
                 {
-                    await Task.Delay(leaseInterval, ct);
+                    await Task.Delay(leaseInterval, ct).ConfigureAwait(false);
                     descriptor.last_seen_utc = DateTimeOffset.UtcNow.ToString("O");
                     WriteDescriptor();
                 }

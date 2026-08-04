@@ -1,10 +1,8 @@
 using System.Diagnostics;
 using System.Text;
-using JetBrains.Annotations;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class UnityRestartAndPreflightPolicyTests
 {
     [Test]

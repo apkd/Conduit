@@ -338,20 +338,20 @@ jobs:
       max-parallel: 10
       matrix:
         UNITY_VERSION: [
-          # 6.6 Alpha
-          6000.6.0a7,
+          # 6.6
+          6000.6.0b6,
           # 6.5
-          6000.5.1f1,
+          6000.5.6f1,
           # 6.4
           6000.4.12f1,
           # 6.3 LTS
-          6000.3.18f1,
+          6000.3.21f1,
           # 6.2
           6000.2.15f1,
           # 6.1
           6000.1.17f1,
           # 6.0 LTS
-          6000.0.78f1,
+          6000.0.80f1,
         ]
 
     steps:
@@ -481,7 +481,7 @@ jobs:
     timeout-minutes: 45
     env:
       PROJECT: /ConduitConsumerCI
-      UNITY_VERSION: 6000.0.78f1
+      UNITY_VERSION: 6000.0.80f1
 
     steps:
       - uses: actions/checkout@v6

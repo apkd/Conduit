@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
@@ -18,6 +19,16 @@ namespace Conduit
         static readonly Regex arrayElementPattern = new(
             @"^(?<array>.+)\.Array\.data\[(?<index>\d+)\]$",
             RegexOptions.CultureInvariant
+        );
+        static readonly int guidPropertyType = Enum.TryParse(
+            "GUID",
+            out SerializedPropertyType parsedGuidPropertyType
+        )
+            ? (int)parsedGuidPropertyType
+            : -1;
+        static readonly PropertyInfo? guidValueProperty = typeof(SerializedProperty).GetProperty(
+            "guidValue",
+            BindingFlags.Instance | BindingFlags.Public
         );
 
         internal static void RegisterFile(
@@ -273,6 +284,16 @@ namespace Conduit
                 return;
             }
 
+            if (IsGuid(property))
+            {
+                var valueProperty = guidValueProperty!;
+                valueProperty.SetValue(
+                    property,
+                    Activator.CreateInstance(valueProperty.PropertyType)
+                );
+                return;
+            }
+
             switch (property.propertyType)
             {
                 case SerializedPropertyType.Integer:
@@ -343,9 +364,6 @@ namespace Conduit
                 case SerializedPropertyType.RenderingLayerMask:
                     property.uintValue = 0;
                     return;
-                case SerializedPropertyType.GUID:
-                    property.guidValue = default;
-                    return;
             }
 
             foreach (var child in GetDirectChildren(property))
@@ -353,7 +371,11 @@ namespace Conduit
         }
 
         static string ReadProperty(SerializedProperty property)
-            => property.propertyType switch
+        {
+            if (IsGuid(property))
+                return guidValueProperty!.GetValue(property)?.ToString() ?? string.Empty;
+
+            return property.propertyType switch
             {
                 SerializedPropertyType.Integer         => property.longValue.ToString(CultureInfo.InvariantCulture),
                 SerializedPropertyType.Boolean         => property.boolValue ? "true" : "false",
@@ -402,12 +424,14 @@ namespace Conduit
                     CultureInfo.InvariantCulture
                 ),
                 SerializedPropertyType.Hash128         => property.hash128Value.ToString(),
-                SerializedPropertyType.RenderingLayerMask => property.uintValue.ToString(CultureInfo.InvariantCulture),
-                SerializedPropertyType.GUID            => property.guidValue.ToString(),
+                SerializedPropertyType.RenderingLayerMask => property.uintValue.ToString(
+                    CultureInfo.InvariantCulture
+                ),
                 _ => throw new NotSupportedException(
                     $"Serialized setting '{property.propertyPath}' has unsupported type {property.propertyType}."
                 ),
             };
+        }
 
         static string ReadValue(SerializedProperty property)
             => IsSupportedLeaf(property)
@@ -438,6 +462,8 @@ namespace Conduit
         {
             if (!IsSupportedLeaf(property))
                 return SerializeCompound(property);
+            if (IsGuid(property))
+                return ConduitSimpleJson.Quote(ReadProperty(property));
 
             return property.propertyType switch
             {
@@ -450,8 +476,7 @@ namespace Conduit
                 SerializedPropertyType.ExposedReference => property.exposedReferenceValue == null
                     ? "null"
                     : FormatReferenceJson(property.exposedReferenceValue),
-                SerializedPropertyType.Hash128 or SerializedPropertyType.GUID
-                    => ConduitSimpleJson.Quote(ReadProperty(property)),
+                SerializedPropertyType.Hash128 => ConduitSimpleJson.Quote(ReadProperty(property)),
                 _ => ReadProperty(property),
             };
 
@@ -474,6 +499,16 @@ namespace Conduit
 
             try
             {
+                if (IsGuid(property))
+                {
+                    string text = (string)ProjectSettingValueCodec.Parse(value, typeof(string))!;
+                    var valueProperty = guidValueProperty!;
+                    var guid = Activator.CreateInstance(valueProperty.PropertyType, text)
+                               ?? throw new FormatException($"Could not construct GUID '{text}'.");
+                    valueProperty.SetValue(property, guid);
+                    return;
+                }
+
                 switch (property.propertyType)
                 {
                     case SerializedPropertyType.Integer:
@@ -560,11 +595,6 @@ namespace Conduit
                     case SerializedPropertyType.RenderingLayerMask:
                         property.uintValue = uint.Parse(value, NumberStyles.Integer, CultureInfo.InvariantCulture);
                         break;
-                    case SerializedPropertyType.GUID:
-                        property.guidValue = new UnityEngine.GUID(
-                            (string)ProjectSettingValueCodec.Parse(value, typeof(string))!
-                        );
-                        break;
                     default:
                         throw new NotSupportedException(
                             $"Serialized setting '{property.propertyPath}' has unsupported "
@@ -572,7 +602,11 @@ namespace Conduit
                         );
                 }
             }
-            catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
+            catch (Exception exception) when (
+                exception is FormatException
+                    or OverflowException
+                    or ArgumentException
+                    or TargetInvocationException)
             {
                 throw new FormatException(
                     $"Could not parse '{value}' for serialized setting "
@@ -682,7 +716,8 @@ namespace Conduit
         }
 
         static bool IsSupportedLeaf(SerializedProperty property)
-            => property.propertyType is SerializedPropertyType.Integer
+            => IsGuid(property)
+               || property.propertyType is SerializedPropertyType.Integer
                    or SerializedPropertyType.Boolean
                    or SerializedPropertyType.Float
                    or SerializedPropertyType.String
@@ -706,8 +741,7 @@ namespace Conduit
                    or SerializedPropertyType.ExposedReference
                    or SerializedPropertyType.FixedBufferSize
                    or SerializedPropertyType.Hash128
-                   or SerializedPropertyType.RenderingLayerMask
-                   or SerializedPropertyType.GUID;
+                   or SerializedPropertyType.RenderingLayerMask;
 
         static bool IsSupportedArrayElement(SerializedProperty array)
         {
@@ -767,9 +801,15 @@ namespace Conduit
         {
             string key = ProjectSettingKey.Canonicalize(property.propertyPath);
             return !property.editable
-                   || property.propertyType is SerializedPropertyType.FixedBufferSize or SerializedPropertyType.GUID
-                   || key is "product_guid" or "project_guid";
+                   || property.propertyType == SerializedPropertyType.FixedBufferSize
+                   || IsGuid(property)
+                   || key is "product_guid" or "project_guid"
+                   || key.StartsWith("product_guid.", StringComparison.Ordinal)
+                   || key.StartsWith("project_guid.", StringComparison.Ordinal);
         }
+
+        static bool IsGuid(SerializedProperty property)
+            => guidValueProperty != null && (int)property.propertyType == guidPropertyType;
 
         internal static string ToKey(string propertyPath)
         {

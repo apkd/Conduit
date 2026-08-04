@@ -43,7 +43,7 @@ echo 'path-include /usr/share/locale/locale.alias' >> /etc/dpkg/dpkg.cfg.d/01_no
 # core runtime unity editor deps
 apt-get update -o Acquire::Retries=10 -qq
 apt-get install -y --no-install-recommends \
-  tini binutils ca-certificates curl xz-utils axel xvfb libgtk-3-0 libglu1-mesa \
+  tini binutils ca-certificates xz-utils axel xvfb libgtk-3-0 libglu1-mesa \
   libxrandr2 libxinerama1 libxcursor1 libxi6 libxss1 libnss3 libgbm1 fonts-dejavu-core
 if ! dpkg -s libasound2 >/dev/null 2>&1 && ! dpkg -s libasound2t64 >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends libasound2t64 || apt-get install -y --no-install-recommends libasound2
@@ -55,24 +55,52 @@ fi
 # clear apt lists
 rm -rf /var/lib/apt/lists/*
 
+download_with_axel() {
+  local output="$1"
+  local url="$2"
+  shift 2
+
+  local attempt=1
+  local delay=2
+  while [ "$attempt" -le 5 ]; do
+    if axel -q -T 30 "$@" -o "$output" "$url"; then
+      return
+    fi
+
+    # axel can resume only when the partial download has its matching state file.
+    if [ -e "$output" ] && [ ! -e "${output}.st" ]; then
+      rm -f "$output"
+    fi
+    if [ "$attempt" -eq 5 ]; then
+      echo "Download failed after 5 attempts: $url" >&2
+      return 1
+    fi
+
+    echo "Download failed; retrying in ${delay}s: $url" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 # install libssl1.1 for older unity versions
 # https://discussions.unity.com/t/workaround-for-libssl-issue-on-ubuntu-22-04/879165
 # https://stackoverflow.com/questions/73378850/how-can-i-install-unity-hub-on-ubuntu-22-04
-axel -q -o libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
+download_with_axel libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
 dpkg -i libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
 rm -f libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
 
 DEST="${INSTALL_ROOT}/${UNITY_VERSION}"
 mkdir -p "$DEST"
 TMPHTML="/tmp/unity_whats_new.html"
-axel -q -o "$TMPHTML" "https://unity.com/releases/editor/whats-new/${UNITY_VERSION}"
+download_with_axel "$TMPHTML" "https://unity.com/releases/editor/whats-new/${UNITY_VERSION}"
 
 download_and_extract() {
   local url="$1"
   local tarball="$2"
   test -n "$url"
   echo "Downloading: $url"
-  axel -q -n 16 -o "$tarball" "$url"
+  download_with_axel "$tarball" "$url" -n 16
   xz -T0 -dc "$tarball" | tar -x --no-same-owner --no-same-permissions --delay-directory-restore --no-xattrs --no-acls --no-selinux -C "$DEST"
   rm -f "$tarball"
 }
@@ -85,7 +113,7 @@ EDITOR_URL="$( \
 REV=""
 if [ -z "$EDITOR_URL" ]; then
   ARCHIVE_HTML="/tmp/unity_archive.html"
-  axel -q -o "$ARCHIVE_HTML" "https://unity.com/releases/editor/archive"
+  download_with_axel "$ARCHIVE_HTML" "https://unity.com/releases/editor/archive"
   REV="$( \
     tr '\n' ' ' < "$ARCHIVE_HTML" \
     | grep -oE "unityhub://${UNITY_VERSION}/[0-9a-f]+" \
@@ -165,7 +193,10 @@ rm -rf "$DEST/Editor/BugReporter" || true
 rm -rf "$DEST/Editor/*_s.debug" || true
 find "$DEST/Editor/Data/Resources/PackageManager/Editor/" ! -name 'manifest.json' -type f -exec rm -f {} + || true
 find "$DEST" -type f \( -name '*.mdb' -o -name '*.dbg' \) -delete || true
-find "$DEST" -type f \( -name '*.a' -o -name '*.la' -o -name '*.pdb' \) -delete || true
+find "$DEST" -type f \( -name '*.la' -o -name '*.pdb' \) -delete || true
+find "$DEST" -type f -name '*.a' \
+  ! -path "$DEST/Editor/Data/Tools/Burst/Client/bcl/libs/*" \
+  -delete || true
 find "$DEST" -type f -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
 strip --strip-unneeded "$DEST/Editor/Unity" 2>/dev/null || true
 test -x "${DEST}/Editor/Unity"

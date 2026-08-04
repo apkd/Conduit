@@ -1,9 +1,7 @@
-using JetBrains.Annotations;
 using static Conduit.BridgeRuntimeFailureKind;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class UnityProjectOperationsPolicyTests
 {
     static readonly BridgeProjectHandshake handshake = new()

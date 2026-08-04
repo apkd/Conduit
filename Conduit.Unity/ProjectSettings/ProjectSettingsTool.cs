@@ -319,12 +319,12 @@ namespace Conduit
             var builder = new StringBuilder()
                 .Append("Found ")
                 .Append(groups.Count)
-                .AppendLine(groups.Count == 1
+                .Append(groups.Count == 1
                     ? " project settings group:"
                     : " project settings groups:");
             foreach (string group in groups)
-                builder.AppendLine(group);
-            return builder.ToString().TrimEnd();
+                builder.Append('\n').Append(group);
+            return builder.ToString();
         }
 
         static string ReadGroup(string group, IReadOnlyList<ProjectSetting> settings)
@@ -336,10 +336,14 @@ namespace Conduit
                     ? " project setting in '"
                     : " project settings in '")
                 .Append(group)
-                .AppendLine("':");
+                .Append("':");
             foreach (var setting in settings)
-                builder.Append(setting.Key).Append(" = ").AppendLine(ReadSafely(setting));
-            return builder.ToString().TrimEnd();
+                builder
+                    .Append('\n')
+                    .Append(setting.Key)
+                    .Append(" = ")
+                    .Append(ReadSafely(setting));
+            return builder.ToString();
         }
 
         static string ReadMatches(string query, IReadOnlyList<ProjectSetting> matches)
@@ -354,10 +358,14 @@ namespace Conduit
                 .Append(query.Trim())
                 .Append("' (showing ")
                 .Append(Math.Min(matches.Count, MaximumDisplayedMatches))
-                .AppendLine("):");
+                .Append("):");
             foreach (var match in matches.Take(MaximumDisplayedMatches))
-                builder.Append(match.Key).Append(" = ").AppendLine(ReadSafely(match));
-            return builder.ToString().TrimEnd();
+                builder
+                    .Append('\n')
+                    .Append(match.Key)
+                    .Append(" = ")
+                    .Append(ReadSafely(match));
+            return builder.ToString();
         }
 
         static string AmbiguousWrite(
@@ -381,10 +389,10 @@ namespace Conduit
                 .Append(noun)
                 .Append(". Use a more specific key (showing ")
                 .Append(Math.Min(keys.Count, MaximumDisplayedMatches))
-                .AppendLine("):");
+                .Append("):");
             foreach (string key in keys.Take(MaximumDisplayedMatches))
-                builder.AppendLine(key);
-            return builder.ToString().TrimEnd();
+                builder.Append('\n').Append(key);
+            return builder.ToString();
         }
 
         static string ReadSafely(ProjectSetting setting)

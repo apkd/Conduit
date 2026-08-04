@@ -35,6 +35,7 @@ namespace Conduit
             BridgeCommandTypes.ProfilerBrowse,
             BridgeCommandTypes.ProfilerOverview,
             BridgeCommandTypes.ProfilerRecord,
+            BridgeCommandTypes.ProjectSettings,
             BridgeCommandTypes.Reflect,
             BridgeCommandTypes.RefreshAssetDatabase,
             BridgeCommandTypes.ReimportAssets,
