@@ -27,9 +27,11 @@ namespace Conduit
                         CommandType = operation.command_type,
                         Target = operation.target,
                         Snippet = operation.snippet,
+                        Args = operation.args,
                         TestFilter = operation.test_filter,
                         ToolUsageStartedUtcTicks = operation.tool_usage_started_utc_ticks,
                         ReimportAssetPaths = operation.reimport_asset_paths,
+                        ProjectSettingPrevious = operation.project_setting_previous,
                     }
                 )
             );
@@ -74,10 +76,11 @@ namespace Conduit
                 snippet = restoredState.Snippet,
                 test_filter = restoredState.TestFilter,
                 tool_usage_started_utc_ticks = restoredState.ToolUsageStartedUtcTicks,
-                args = Array.Empty<string>(),
+                args = restoredState.Args ?? Array.Empty<string>(),
                 is_acknowledged = true,
                 is_restored = true,
                 reimport_asset_paths = restoredState.ReimportAssetPaths ?? Array.Empty<string>(),
+                project_setting_previous = restoredState.ProjectSettingPrevious,
             };
         }
 
@@ -94,6 +97,7 @@ namespace Conduit
                    _ when BridgeCommandKinds.IsEditorMode(commandKind)  => false,
                    _ when BridgeCommandKinds.IsAssetImport(commandKind) => !EditorApplication.isCompiling && !EditorApplication.isUpdating,
                    _ when BridgeCommandKinds.IsTest(commandKind)        => !isAnyTestRunActive && !EditorApplication.isPlayingOrWillChangePlaymode,
+                   _ when commandKind == BridgeCommandKind.ProjectSettings => false,
                    _                                                    => true,
                };
 
@@ -147,7 +151,8 @@ namespace Conduit
         internal static bool CanRestore(BridgeCommandKind commandKind)
             => BridgeCommandKinds.IsEditorMode(commandKind)
                || BridgeCommandKinds.IsAssetImport(commandKind)
-               || BridgeCommandKinds.IsTest(commandKind);
+               || BridgeCommandKinds.IsTest(commandKind)
+               || commandKind == BridgeCommandKind.ProjectSettings;
 
         [Serializable]
         sealed class PersistedOperationState
@@ -156,9 +161,11 @@ namespace Conduit
             public string CommandType = string.Empty;
             public string? Target;
             public string? Snippet;
+            public string[] Args = Array.Empty<string>();
             public string? TestFilter;
             public long ToolUsageStartedUtcTicks;
             public string[] ReimportAssetPaths = Array.Empty<string>();
+            public string? ProjectSettingPrevious;
         }
     }
 

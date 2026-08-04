@@ -15,33 +15,33 @@ namespace Conduit
 
         internal sealed class JsonObjectValue : JsonValue
         {
-            public Dictionary<string, JsonValue?> Properties { get; } = new(StringComparer.Ordinal);
+            internal Dictionary<string, JsonValue?> Properties { get; } = new(StringComparer.Ordinal);
         }
 
-        sealed class JsonArrayValue : JsonValue
+        internal sealed class JsonArrayValue : JsonValue
         {
-            public List<JsonValue?> Items { get; } = new();
+            internal List<JsonValue?> Items { get; } = new();
         }
 
-        sealed class JsonStringValue : JsonValue
+        internal sealed class JsonStringValue : JsonValue
         {
-            public string Value = string.Empty;
+            internal string Value = string.Empty;
         }
 
-        sealed class JsonBoolValue : JsonValue
+        internal sealed class JsonBoolValue : JsonValue
         {
-            public bool Value;
+            internal bool Value;
         }
 
-        sealed class JsonNumberValue : JsonValue
+        internal sealed class JsonNumberValue : JsonValue
         {
             // preserve source spelling and precision for unrelated numeric settings
-            public string Value = string.Empty;
+            internal string Value = string.Empty;
         }
 
-        sealed class JsonNullValue : JsonValue
+        internal sealed class JsonNullValue : JsonValue
         {
-            public static readonly JsonNullValue Instance = new();
+            internal static readonly JsonNullValue Instance = new();
         }
 
         public static JsonDocument ParseObject(string json)
@@ -54,11 +54,33 @@ namespace Conduit
             return new() { Root = value };
         }
 
+        internal static JsonValue? ParseValue(string json)
+        {
+            var parser = new Parser(json);
+            var value = parser.ParseValue();
+            parser.ExpectEnd();
+            return value;
+        }
+
         public static string Serialize(JsonDocument document)
         {
             var builder = new StringBuilder();
             WriteValue(builder, document.Root, 0);
             builder.Append('\n');
+            return builder.ToString();
+        }
+
+        internal static string SerializeValue(JsonValue? value)
+        {
+            var builder = new StringBuilder();
+            WriteValue(builder, value, 0);
+            return builder.ToString();
+        }
+
+        internal static string Quote(string value)
+        {
+            var builder = new StringBuilder();
+            WriteString(builder, value);
             return builder.ToString();
         }
 

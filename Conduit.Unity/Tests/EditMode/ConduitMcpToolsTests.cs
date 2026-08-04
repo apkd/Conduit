@@ -2902,6 +2902,7 @@ public sealed class ConduitMcpToolsTests
     [TestCase(BridgeCommandTypes.PlayMode, true)]
     [TestCase(BridgeCommandTypes.RefreshAssetDatabase, true)]
     [TestCase(BridgeCommandTypes.RunTestsEditMode, true)]
+    [TestCase(BridgeCommandTypes.ProjectSettings, true)]
     [TestCase(BridgeCommandTypes.ExecuteCode, false)]
     [TestCase(BridgeCommandTypes.Show, false)]
     public void AssemblyReloadRecovery_OnlyRestoresExplicitEditorWork(

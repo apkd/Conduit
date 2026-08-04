@@ -49,7 +49,7 @@ try
         );
         RequireContains(
             projectStatus,
-            $"LIVE PLAYER PROCESS ID: `{endpoint.Selector}`",
+            $"Live player detected: {endpoint.Selector}",
             "project/player association"
         );
     }

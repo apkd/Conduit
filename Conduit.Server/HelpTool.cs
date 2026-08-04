@@ -59,6 +59,34 @@ static class HelpTool
 
                 Use `return <value>;` to print the value in the tool response. `return;` exits without a result.
                 Pass a prior snippet's filename, such as `7.cs` instead of source code to run it again.
+
+                # `detour`
+
+                Replace a managed method body at runtime without recompiling the Unity project.
+                Find ways to use this tool whenever possible - this is much faster than editing source and running `refresh_asset_database`.
+                Use cases: prototyping, debugging, testing fixes, checking hypotheses, etc.
+
+                - inspect support and get the canonical selector: `detour("Game.Player.TakeDamage", "test")`
+                - replace an instance method: `detour("Game.Player.TakeDamage", "@this.health -= arg0 * 2;")`
+                - replace a returning method: `detour("Game.Player.GetHealth", "return 100;")`
+                - reapply a saved replacement: `detour("Game.Player.GetHealth", "5.cs")`
+                - restore the original method: `detour("Game.Player.GetHealth", "restore")`
+
+                You can use `detour` with most managed methods loaded from any assembly, including packages and UnityEngine/UnityEditor.
+                Run `test` first to check whether the method is compatible.
+                Replacement bodies use `@this` for the instance and `arg0`, `arg1`, etc. for parameters.
+                Does not support generic methods and small/inlined methods.
+
+                # `project_settings`
+
+                One central tool for reading and editing an extensive set of project-level options.
+
+                - list all settings groups: `project_settings("get", key: "")`
+                - all settings in a group: `project_settings("get", key: "build_settings")`
+                - read or search: `project_settings("get", key: "log shader compilation")`
+                - set a value: `project_settings("set", key: "graphics_settings.log_shader_compilation", value: "true")`
+                - append an element: `project_settings("add_element", key: "tag_manager.tags", value: "Gameplay")`
+                - remove an element: `project_settings("remove_element", key: "tag_manager.tags.4")`
                 """;
     }
 

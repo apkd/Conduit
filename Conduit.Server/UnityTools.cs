@@ -46,7 +46,6 @@ public sealed class UnityTools
         Captures an image and saves it into Temp/screenshot.
         Supported targets include: game_view, scene_view, window:<name>, a scene camera eid, an object eid/path/guid for preview capture,
         or a scene path/guid for top-down scene capture.
-        A window:<name> capture is available only when Unity can focus the resolved window.
         Useful for debugging and validation. Always use the view_image tool to view the captured image.
         """
     )]
@@ -74,8 +73,8 @@ public sealed class UnityTools
     [McpServerTool(Name = "help", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         $"""
-         Returns additional help for finding objects with {CMD.Search}, {CMD.Show}, {CMD.ToJson}, and {CMD.FromJsonOverwrite}.
-         Run this command once to find out how to efficiently search for objects.
+         Returns usage guidance for object search, execute_code helpers, detour, and project_settings.
+         Run this command once to see query and tool examples.
          """
     )]
     public static Task<string> Help(
@@ -290,8 +289,8 @@ public sealed class UnityTools
     )]
     public static Task<string> Detour(
         [Description("Project path or player selector")] string projectPath,
-        [Description("Unique Type.Method selector or canonical selector returned by test")] string methodName,
-        [Description("C# replacement body, `test`, `restore`, or a prior detour source filename")]
+        [Description("Target method name, including type name, or canonical selector returned by `test`")] string methodName,
+        [Description("C# replacement body, `test`, `restore`, or a prior script filename such as 5.cs to apply again")]
         string replacementBody,
         UnityProjectOperations operations,
         CancellationToken ct
@@ -332,6 +331,25 @@ public sealed class UnityTools
         [Description("Member name query")]
         string? member = null
     ) => ToPlainTextToolResponseAsync(operations.ReflectAsync(projectPath, mode, type, member, ct));
+
+    [McpServerTool(Name = CMD.ProjectSettings, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
+    [Description(
+        """
+        Searches, reads or changes project-level settings.
+        Supports a wide array of providers: player settings, quality/graphics/render pipeline settings, input system, build profiles, etc.
+        Get with an empty key lists setting groups; get with a group key lists every setting in that group.
+        Scalar settings are simple C# values and compound values use JSON.
+        """
+    )]
+    public static Task<string> ProjectSettings(
+        [Description("Project path")] string projectPath,
+        [Description("Exact or partial setting key")] string key,
+        [Description("Operation: get, set, add_element, or remove_element")] string operation,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Setting value. Omit to pass null.")]
+        string? value = null
+    ) => ToPlainTextToolResponseAsync(operations.ProjectSettingsAsync(projectPath, key, operation, value, ct));
 
     [McpServerTool(Name = CMD.RunTestsEditMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description("Runs the edit mode test suite")]

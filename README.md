@@ -332,6 +332,7 @@ tools.editmode.approval_mode = "approve"
 tools.profiler_browse.approval_mode = "approve"
 tools.profiler_overview.approval_mode = "approve"
 tools.profiler_record.approval_mode = "approve"
+tools.project_settings.approval_mode = "approve"
 tools.refresh_asset_database.approval_mode = "approve"
 tools.reimport_assets.approval_mode = "approve"
 tools.reflect.approval_mode = "approve"
@@ -1391,6 +1392,7 @@ Together, these tools enable agents to find, read, and write any asset, GameObje
 - ***`find_references_to`***: what assets use this?
 - ***`save_scenes`***: save current changes for open scenes
 - ***`discard_scenes`***: discard current changes for open scenes
+- ***`project_settings`***: searches, reads and modifies project settings
 
 #### Testing:
 These complete the iteration loop, allowing the agent to validate their work.

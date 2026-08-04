@@ -418,6 +418,25 @@ public sealed class UnityProjectOperations(
         );
     }
 
+    public Task<ToolExecutionResult> ProjectSettingsAsync(
+        string projectPath,
+        string key,
+        string operation,
+        string? value,
+        CT ct
+    )
+        => EnqueueAsync(
+            projectPath: projectPath,
+            command: new()
+            {
+                CommandType = BridgeCommandTypes.ProjectSettings,
+                Target = key,
+                Snippet = value ?? "null",
+                Args = [operation],
+            },
+            ct: ct
+        );
+
     internal static ToolExecutionResult? ValidateReflectRequest(string mode)
         => string.IsNullOrWhiteSpace(mode)
             ? new()
@@ -1536,9 +1555,8 @@ public sealed class UnityProjectOperations(
                      .OrderBy(static value => value.ProcessId)
                      .ThenBy(static value => value.SessionInstanceId, StringComparer.Ordinal))
         {
-            builder.Append("\nLIVE PLAYER PROCESS ID: `")
-                .Append(PlayerSelector.Format(player.ProcessId))
-                .Append('`');
+            builder.Append("\nLive player detected: ")
+                .Append(PlayerSelector.Format(player.ProcessId));
         }
 
         return builder.ToString();

@@ -106,6 +106,9 @@ namespace Conduit
             }
         }
 
+        static Task ExecuteProjectSettingsAsync(PendingOperationState operation)
+            => ExecuteCommandAsync(() => ProjectSettingsTool.Execute(operation));
+
         static async Task ExecuteProfilerRecordAsync(PendingOperationState operation)
         {
             try

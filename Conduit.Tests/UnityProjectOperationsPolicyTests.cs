@@ -202,6 +202,8 @@ public sealed class UnityProjectOperationsPolicyTests
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ReimportAssets)).IsEqualTo(TimeSpan.FromMinutes(10));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.Reflect)).IsEqualTo(BridgeCommandKind.Reflect);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.Reflect)).IsEqualTo(TimeSpan.FromSeconds(90));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProjectSettings)).IsEqualTo(BridgeCommandKind.ProjectSettings);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProjectSettings)).IsEqualTo(TimeSpan.FromMinutes(20));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerRecord)).IsEqualTo(BridgeCommandKind.ProfilerRecord);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerRecord)).IsEqualTo(TimeSpan.FromMinutes(2));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerOverview)).IsEqualTo(BridgeCommandKind.ProfilerOverview);

@@ -10,7 +10,7 @@ namespace Conduit
     /// <summary>Defines the bridge wire version shared by the server, Editor, and player.</summary>
     static class BridgeContract
     {
-        public const int Version = 6;
+        public const int Version = 7;
 
         public static string FormatProtocolMismatch(int serverVersion, int unityVersion)
             => serverVersion < unityVersion
@@ -41,6 +41,7 @@ namespace Conduit
         public const string Detour = "detour";
         public const string ViewBurstAsm = "view_burst_asm";
         public const string Reflect = "reflect";
+        public const string ProjectSettings = "project_settings";
         public const string RunTestsEditMode = "run_tests_editmode";
         public const string RunTestsPlayMode = "run_tests_playmode";
         public const string RunTestsPlayer = "run_tests_player";
@@ -77,6 +78,7 @@ namespace Conduit
         Detour,
         ViewBurstAsm,
         Reflect,
+        ProjectSettings,
         RunTestsEditMode,
         RunTestsPlayMode,
         RunTestsPlayer,
@@ -115,6 +117,7 @@ namespace Conduit
                 BridgeCommandTypes.Detour                => BridgeCommandKind.Detour,
                 BridgeCommandTypes.ViewBurstAsm          => BridgeCommandKind.ViewBurstAsm,
                 BridgeCommandTypes.Reflect               => BridgeCommandKind.Reflect,
+                BridgeCommandTypes.ProjectSettings       => BridgeCommandKind.ProjectSettings,
                 BridgeCommandTypes.RunTestsEditMode      => BridgeCommandKind.RunTestsEditMode,
                 BridgeCommandTypes.RunTestsPlayMode      => BridgeCommandKind.RunTestsPlayMode,
                 BridgeCommandTypes.RunTestsPlayer        => BridgeCommandKind.RunTestsPlayer,

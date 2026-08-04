@@ -30,6 +30,8 @@ namespace Conduit
         public bool is_restored;
         public int client_id;
         public bool is_acknowledged;
+        // build-target and define changes reload the domain; retain the original value for the final confirmation.
+        public string? project_setting_previous;
         // session state preserves this timestamp across play-mode and compilation domain reloads.
         public long tool_usage_started_utc_ticks;
         public string[] args = Array.Empty<string>();

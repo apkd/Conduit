@@ -158,6 +158,24 @@ public sealed class ToolExecutionResultSerializationTests
     }
 
     [Test]
+    public async Task SerializedProjectSettingsCommandIncludesOperationAndEmptyValue()
+    {
+        string payload = JsonSerializer.Serialize(
+            new BridgeCommand
+            {
+                CommandType = BridgeCommandTypes.ProjectSettings,
+                Snippet = string.Empty,
+                Args = ["set"],
+            },
+            ConduitJsonContext.Default.BridgeCommand
+        );
+
+        await Assert.That(payload).Contains("\"snippet\":\"\"");
+        await Assert.That(payload).Contains("\"args\":[\"set\"]");
+        await Assert.That(payload).DoesNotContain("has_snippet");
+    }
+
+    [Test]
     public async Task SerializedToolResultKeepsMeaningfulOptionalFields()
     {
         var payload = JsonSerializer.Serialize(
