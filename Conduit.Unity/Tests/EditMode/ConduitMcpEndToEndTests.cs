@@ -124,6 +124,7 @@ public sealed class ConduitMcpEndToEndTests
                      BridgeCommandTypes.ExecuteCode,
                      BridgeCommandTypes.Detour,
                      BridgeCommandTypes.Reflect,
+                     BridgeCommandTypes.ProjectSettings,
                      BridgeCommandTypes.ProfilerRecord,
                      BridgeCommandTypes.ProfilerOverview,
                      BridgeCommandTypes.ProfilerBrowse,
@@ -328,6 +329,31 @@ public sealed class ConduitMcpEndToEndTests
         );
 
         AssertSuccessful(memberResult, "Containing Type: ConduitMcpEndToEndTests", "Search_ReturnsSceneObjectMatchAndNoMatchFailure");
+    }
+
+    [Test]
+    [Order(10)]
+    public async Task ProjectSettings_ReadsAndConfirmsAnExactWrite()
+    {
+        const string key = "graphics_settings.log_shader_compilation";
+        var read = await client.CallToolAsync(
+            BridgeCommandTypes.ProjectSettings,
+            Args(("projectPath", projectPath), ("key", key), ("operation", "get"))
+        );
+
+        AssertSuccessful(read, key + " = ");
+        string value = read.Text[(read.Text.LastIndexOf(" = ", StringComparison.Ordinal) + 3)..].Trim();
+        var write = await client.CallToolAsync(
+            BridgeCommandTypes.ProjectSettings,
+            Args(
+                ("projectPath", projectPath),
+                ("key", key),
+                ("operation", "set"),
+                ("value", value)
+            )
+        );
+
+        AssertSuccessful(write, "Set " + key + ":", " -> " + value);
     }
 
     [Test]

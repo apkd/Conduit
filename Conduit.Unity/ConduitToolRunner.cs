@@ -591,6 +591,9 @@ namespace Conduit
                         case BridgeCommandKind.Reflect:
                             await ExecuteReflectAsync(operation);
                             break;
+                        case BridgeCommandKind.ProjectSettings:
+                            await ExecuteProjectSettingsAsync(operation);
+                            break;
                         case BridgeCommandKind.RunTestsEditMode:
                             testRunMonitor.Start(operation, commandKind, TestMode.EditMode, playerRun: false);
                             break;
@@ -656,6 +659,10 @@ namespace Conduit
                             operation.kind,
                             RestorePendingTestCompletion(operation)
                         );
+                        break;
+                    case BridgeCommandKind.ProjectSettings:
+                        logCapture.Start(operation.kind);
+                        _ = ExecuteProjectSettingsAsync(operation);
                         break;
                 }
             }
