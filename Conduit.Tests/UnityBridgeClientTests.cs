@@ -1,4 +1,3 @@
-using JetBrains.Annotations;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.IO.Pipes;
 using System.Text;
@@ -7,7 +6,6 @@ using System.Text.Json.Nodes;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class UnityBridgeClientTests
 {
     [Test]

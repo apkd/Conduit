@@ -1,8 +1,5 @@
-using JetBrains.Annotations;
-
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 sealed class FakeTimeProvider(DateTimeOffset utcNow) : TimeProvider
 {
     DateTimeOffset utcNow = utcNow;

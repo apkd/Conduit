@@ -1,11 +1,9 @@
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
-using JetBrains.Annotations;
 using ModelContextProtocol.Server;
 using Conduit;
 using CMD = Conduit.BridgeCommandTypes;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 [McpServerToolType]
 [SuppressMessage("ReSharper", "RawStringCanBeSimplified")]
 public sealed class UnityTools

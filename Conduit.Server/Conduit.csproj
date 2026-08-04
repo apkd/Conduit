@@ -7,7 +7,6 @@
         <RuntimeIdentifiers>win-x64;linux-x64;linux-musl-x64</RuntimeIdentifiers>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
-        <LangVersion>preview</LangVersion>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <RootNamespace>Conduit</RootNamespace>
         <IsPackable>false</IsPackable>
@@ -20,9 +19,6 @@
 
     <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
         <DefineConstants>$(DefineConstants);CONDUIT_LINUX</DefineConstants>
-    </PropertyGroup>
-
-    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
@@ -54,7 +50,6 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4"/>
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0"/>
         <PackageReference Include="ModelContextProtocol" Version="1.1.0"/>
         <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.1.0"/>

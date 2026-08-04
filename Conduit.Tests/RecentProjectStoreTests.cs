@@ -1,8 +1,5 @@
-using JetBrains.Annotations;
-
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class RecentProjectStoreTests : IDisposable
 {
     readonly string tempDirectory = Path.Combine(Path.GetTempPath(), "Conduit.Tests", Guid.NewGuid().ToString("N"));

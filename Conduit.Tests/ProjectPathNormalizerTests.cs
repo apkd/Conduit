@@ -1,8 +1,5 @@
-using JetBrains.Annotations;
-
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class ProjectPathNormalizerTests
 {
     [Test]

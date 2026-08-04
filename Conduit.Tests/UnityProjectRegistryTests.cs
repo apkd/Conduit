@@ -1,9 +1,7 @@
-using JetBrains.Annotations;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Conduit;
 
-[UsedImplicitly(ImplicitUseTargetFlags.WithMembers)]
 public sealed class UnityProjectRegistryTests : IDisposable
 {
     readonly string tempDirectory = Path.Combine(Path.GetTempPath(), "Conduit.Tests", Guid.NewGuid().ToString("N"));

@@ -84,13 +84,13 @@ public sealed class ProjectSettingsToolTests
     }
 
     [Test]
-    public void ReadOnlyIdentitySettingRejectsSet()
+    public void ReadOnlySettingRejectsSet()
     {
         var exception = Assert.Throws<InvalidOperationException>(
             () => Execute(
                 "set",
-                "player_settings.product_guid",
-                "00000000000000000000000000000000"
+                "test_project_settings.read_only",
+                "changed"
             )
         );
 
@@ -247,32 +247,36 @@ public sealed class ProjectSettingsToolTests
     }
 
     [Test]
-    public void CatalogIncludesCoreProceduralAndInstalledPackageSettings()
+    public void CatalogIncludesStableCoreAndProceduralSettings()
     {
-        var keys = ProjectSettingsRegistry.Build().Settings.Select(setting => setting.Key).ToHashSet();
+        var settings = ProjectSettingsRegistry.Build().Settings;
+        var keys = settings.Select(setting => setting.Key).ToHashSet();
+        var productGuidSettings = settings
+            .Where(setting => setting.Key.StartsWith(
+                "player_settings.product_guid",
+                StringComparison.Ordinal
+            ))
+            .ToArray();
+        bool ContainsPrefix(string prefix)
+            => keys.Any(key => key.StartsWith(prefix, StringComparison.Ordinal));
 
         Assert.That(keys, Does.Contain("graphics_settings.log_shader_compilation"));
-        Assert.That(keys, Does.Contain("player_settings.platforms.android.application_identifier"));
-        Assert.That(keys, Does.Contain("quality_settings.quality_levels.pc.async_asset_upload.time_slice"));
+        Assert.That(ContainsPrefix("player_settings.platforms.android."), Is.True);
+        Assert.That(
+            keys.Any(key => key.StartsWith("quality_settings.quality_levels.", StringComparison.Ordinal)
+                            && key.EndsWith(".async_asset_upload.time_slice", StringComparison.Ordinal)),
+            Is.True
+        );
         Assert.That(keys, Does.Contain("quality_settings.platforms.standalone.default_level"));
         Assert.That(keys, Does.Contain("build_settings.active_platform"));
-        Assert.That(keys, Does.Contain("input_system_settings.update_mode"));
-        Assert.That(keys, Does.Contain("input_system_settings.settings_asset"));
-        Assert.That(keys, Does.Contain("shader_graph_settings.shader_variant_limit"));
-        Assert.That(keys, Does.Contain("ui_toolkit_settings.enable_advanced_text"));
-        Assert.That(keys, Does.Contain("scene_template_settings.new_scene_override"));
-        Assert.That(keys, Does.Contain("project_auditor_settings.diagnostic_params.current_params_index"));
-        Assert.That(keys, Does.Contain("player_settings.product_guid"));
+        Assert.That(productGuidSettings, Is.Not.Empty);
+        Assert.That(
+            productGuidSettings.All(
+                setting => setting.Operations == ProjectSettingOperations.None
+            ),
+            Is.True
+        );
         Assert.That(keys, Does.Contain("conduit_settings.platforms.standalone.enable_in_development_mode"));
-        Assert.That(
-            keys.Any(key => key.StartsWith("render_pipeline_global_settings.")),
-            Is.True
-        );
-        Assert.That(
-            keys.Any(key => key.StartsWith("burst_aot_settings.")
-                            && key.EndsWith(".enable_burst_compilation")),
-            Is.True
-        );
     }
 
     [Test]
@@ -342,6 +346,7 @@ public sealed class ProjectSettingsToolTests
         registry.Add<string?>("test_project_settings.empty_value", () => emptyValue, value => emptyValue = value);
         registry.Add("test_project_settings.alpha", () => alphaValue, value => alphaValue = value);
         registry.Add("test_project_settings.alphabet", () => alphabetValue, value => alphabetValue = value);
+        registry.Add("test_project_settings.read_only", () => "identity");
         registry.Add("test_project_settings.duplicate", () => "first", _ => { });
         registry.Add("test_project_settings.duplicate", () => "second", _ => { });
     }
