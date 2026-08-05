@@ -261,31 +261,46 @@ namespace Conduit
                     if (!string.IsNullOrWhiteSpace(result.StackTrace))
                         Console.WriteLine(result.StackTrace);
                 },
-                RunFinished = result =>
-                {
-                    testRunnerApi.UnregisterCallbacks(callbacks);
-                    completion.TrySetResult(result);
-                },
+                RunFinished = result => completion.TrySetResult(result),
             };
 
             testRunnerApi.RegisterCallbacks(callbacks);
+            Application.logMessageReceivedThreaded += ExpectUnityConnectLoginFailure;
 
             try
             {
                 var filter = new Filter { testMode = mode };
                 ApplyNameFilter(filter, testFilter);
                 testRunnerApi.Execute(new(filter));
+
+                var result = await completion.Task;
+                Console.WriteLine($"Saving results to: {resultsPath}");
+                TestRunnerApi.SaveResultToFile(result, resultsPath);
+                return result;
             }
-            catch
+            finally
             {
+                Application.logMessageReceivedThreaded -= ExpectUnityConnectLoginFailure;
                 testRunnerApi.UnregisterCallbacks(callbacks);
-                throw;
             }
 
-            var result = await completion.Task;
-            Console.WriteLine($"Saving results to: {resultsPath}");
-            TestRunnerApi.SaveResultToFile(result, resultsPath);
-            return result;
+            static void ExpectUnityConnectLoginFailure(string message, string _, LogType type)
+            {
+                if (type is not LogType.Error
+                    || message is not (
+                        "UnityConnectLoginRequest: Failed to login - please check your username or password"
+                        or "No sufficient permissions while processing request \"https://core.cloud.unity3d.com/api/login\", HTTP error code 401"
+                    ))
+                    return;
+
+                // this listener is registered before the test framework's per-test listener,
+                // so only the unavoidable authentication error enters its log scope as expected
+                try
+                {
+                    UnityEngine.TestTools.LogAssert.Expect(type, message);
+                }
+                catch (InvalidOperationException) { } // no active test log scope
+            }
         }
 
         static void EnsureOutputDirectoryExists(string outputPath)
