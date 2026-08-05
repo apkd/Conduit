@@ -32,6 +32,8 @@ sealed class UnityPingSnapshot
 
     public string? ProfilerStatusLine { get; set; }
 
+    public string? RecordingStatusLine { get; set; }
+
     public string[] Scenes { get; set; } = [];
 
     public string[] DirtyScenes { get; set; } = [];

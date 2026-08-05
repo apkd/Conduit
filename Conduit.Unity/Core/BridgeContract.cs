@@ -10,7 +10,7 @@ namespace Conduit
     /// <summary>Defines the bridge wire version shared by the server, Editor, and player.</summary>
     static class BridgeContract
     {
-        public const int Version = 7;
+        public const int Version = 8;
 
         public static string FormatProtocolMismatch(int serverVersion, int unityVersion)
             => serverVersion < unityVersion
@@ -26,6 +26,7 @@ namespace Conduit
         public const string PlayMode = "playmode";
         public const string EditMode = "editmode";
         public const string Screenshot = "screenshot";
+        public const string Record = "record";
         public const string GetDependencies = "get_dependencies";
         public const string FindReferencesTo = "find_references_to";
         public const string FindMissingScripts = "find_missing_scripts";
@@ -63,6 +64,7 @@ namespace Conduit
         PlayMode,
         EditMode,
         Screenshot,
+        Record,
         GetDependencies,
         FindReferencesTo,
         FindMissingScripts,
@@ -102,6 +104,7 @@ namespace Conduit
                 BridgeCommandTypes.PlayMode              => BridgeCommandKind.PlayMode,
                 BridgeCommandTypes.EditMode              => BridgeCommandKind.EditMode,
                 BridgeCommandTypes.Screenshot            => BridgeCommandKind.Screenshot,
+                BridgeCommandTypes.Record                => BridgeCommandKind.Record,
                 BridgeCommandTypes.GetDependencies       => BridgeCommandKind.GetDependencies,
                 BridgeCommandTypes.FindReferencesTo      => BridgeCommandKind.FindReferencesTo,
                 BridgeCommandTypes.FindMissingScripts    => BridgeCommandKind.FindMissingScripts,
@@ -146,6 +149,9 @@ namespace Conduit
             => commandKind is BridgeCommandKind.ProfilerRecord
                 or BridgeCommandKind.ProfilerOverview
                 or BridgeCommandKind.ProfilerBrowse;
+
+        public static bool SupportsCancellation(BridgeCommandKind commandKind)
+            => IsTest(commandKind) || commandKind == BridgeCommandKind.Record;
     }
 
     static class BridgeMessageTypes

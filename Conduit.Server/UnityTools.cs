@@ -55,6 +55,41 @@ public sealed class UnityTools
         CancellationToken ct
     ) => ToPlainTextToolResponseAsync(operations.ScreenshotAsync(projectPath, target, ct));
 
+    [McpServerTool(Name = CMD.Record, ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = true)]
+    [Description(
+        """
+        Records a Unity editor view through FFmpeg. The first call starts recording and returns immediately; call again while recording to wait for the result.
+        Supported targets: game_view, scene_view, window:<name>. Supported formats: auto, x264, x265, x264_hw, x265_hw, webm, gif.
+        Output is stored under Library/Recordings. FFmpeg must be available on PATH.
+        """
+    )]
+    public static Task<string> Record(
+        [Description("Project path")] string projectPath,
+        [Description("Capture target: game_view, scene_view, or window:<name>")] string target,
+        [Description("Output duration in seconds, greater than zero and at most 1800")] float durationSeconds,
+        [Description("Use Time.captureDeltaTime for deterministic, smooth game-time capture. Requires unpaused play mode.")]
+        bool adjustDeltaTime,
+        UnityProjectOperations operations,
+        CancellationToken ct,
+        [Description("Output frame rate from 1 through 240")] int frameRate = 60,
+        [Description("GPU capture scale from 0.1 through 1.0")] float resolution_scale = 0.5f,
+        [Description("Encoding format: auto, x264, x265, x264_hw, x265_hw, webm, or gif")]
+        string format = "auto",
+        [Description("Encoder quality value. Lower values generally preserve more detail; ignored for GIF.")] int crf = 23
+    ) => ToPlainTextToolResponseAsync(
+        operations.RecordAsync(
+            projectPath,
+            target,
+            durationSeconds,
+            adjustDeltaTime,
+            frameRate,
+            resolution_scale,
+            format,
+            crf,
+            ct
+        )
+    );
+
     [McpServerTool(Name = "restart", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """

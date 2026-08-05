@@ -31,6 +31,7 @@ namespace Conduit
                 active_detour_count = DetourRuntime.ActiveCount,
                 active_detours = DetourRuntime.ActiveMethodNames,
                 profiler_status_line = profiler.BuildStatusLine(),
+                recording_status_line = RecordTool.BuildStatusLine(),
                 scenes = BuildScenes(),
                 dirty_scenes = ConduitSceneCommandUtility.GetDirtySceneDescriptions(),
             };
@@ -75,6 +76,7 @@ namespace Conduit
             public int active_detour_count;
             public string[] active_detours = Array.Empty<string>();
             public string? profiler_status_line;
+            public string? recording_status_line;
             public string[] scenes = Array.Empty<string>();
             public string[] dirty_scenes = Array.Empty<string>();
         }

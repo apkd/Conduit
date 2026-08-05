@@ -52,6 +52,30 @@ namespace Conduit
             );
 #endif
 
+        static async Task ExecuteRecordAsync(PendingOperationState operation)
+        {
+            try
+            {
+                await CompleteCurrentAsync(
+                    CreateSuccessResult(await RecordTool.ExecuteAsync(operation.target, operation.args))
+                );
+            }
+            catch (RecordTool.WaitCancelledException)
+            {
+                await CompleteCurrentAsync(
+                    new()
+                    {
+                        outcome = ToolOutcome.Cancelled,
+                        diagnostic = "The recording wait was cancelled; recording continues in the background.",
+                    }
+                );
+            }
+            catch (Exception exception)
+            {
+                await CompleteCurrentAsync(CreateExceptionResult(exception));
+            }
+        }
+
         static Task ExecuteFindReferencesToAsync(PendingOperationState operation)
             => ExecuteCommandAsync(() => find_references_to.FindReferencesTo(operation.target ?? string.Empty, operation.rebuild_cache));
 

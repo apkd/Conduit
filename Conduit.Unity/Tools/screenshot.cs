@@ -3,7 +3,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Reflection;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -20,7 +19,6 @@ namespace Conduit
         const int DefaultRenderWidth = 1280;
         const int DefaultRenderHeight = 720;
         const float BoundsSizeEpsilon = 0.01f;
-        const string HdrpAssetTypeName = "UnityEngine.Rendering.HighDefinition.HDRenderPipelineAsset";
 
         internal static string ModuleUnavailableDiagnostic
         {
@@ -56,24 +54,6 @@ namespace Conduit
                     "Ask the user for permission to enable the module so that the `screenshot` tool can be used.",
                 _ => string.Empty,
             };
-
-        static readonly Type? gameViewType
-            = Type.GetType("UnityEditor.GameView,UnityEditor");
-
-        static readonly Type? playModeViewType
-            = Type.GetType("UnityEditor.PlayModeView,UnityEditor");
-
-        static readonly MethodInfo? getMainPlayModeViewMethod
-            = playModeViewType?.GetMethod("GetMainPlayModeView", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
-        static readonly FieldInfo? gameViewRenderTextureField
-            = gameViewType?.GetField("m_RenderTexture", BindingFlags.Instance | BindingFlags.NonPublic);
-
-        static readonly FieldInfo? playModeViewTargetTextureField
-            = playModeViewType?.GetField("m_TargetTexture", BindingFlags.Instance | BindingFlags.NonPublic);
-
-        static readonly FieldInfo? sceneViewTargetTextureField
-            = typeof(SceneView).GetField("m_SceneTargetTexture", BindingFlags.Instance | BindingFlags.NonPublic);
 
         public static async Task<string> CaptureAsync(string? target)
         {
@@ -119,10 +99,10 @@ namespace Conduit
                 return await CaptureSceneAssetAsync(assetPath);
 
             if (TryGetSceneCamera(target, out var camera))
-                return CaptureCamera(camera, match.Name);
+                return await CaptureCameraAsync(camera, match.Name);
 
             if (TryGetPreviewSource(target, out var previewSource))
-                return CaptureGameObjectPreview(previewSource, match.Name);
+                return await CaptureGameObjectPreviewAsync(previewSource, match.Name);
 
             if (EditorUtility.IsPersistent(target))
                 return await CaptureAssetPreviewAsync(target, match.Name);
@@ -145,7 +125,10 @@ namespace Conduit
             {
                 { Count: 0 }           => $"No matches for '{target}'.",
                 { Count: 1 } matches   => matches[0].Target is EditorWindow window
-                    ? await CaptureEditorWindowAsync(window, ConduitSearchUtility.GetEditorWindowDisplayName(window))
+                    ? await CaptureLiveEditorSourceAsync(
+                        target,
+                        ConduitSearchUtility.GetEditorWindowDisplayName(window)
+                    )
                     : throw new InvalidOperationException($"Target '{matches[0].Name}' is not an editor window."),
                 { Count: > 1 } matches => ConduitSearchUtility.FormatMatches(matches, includeHint: true),
             };
@@ -154,33 +137,13 @@ namespace Conduit
         static async Task<string> CaptureGameViewAsync()
         {
             EnsureCanRenderScreenshot("game_view");
-            if (gameViewType == null || playModeViewType == null)
-                throw new InvalidOperationException("'game_view' screenshots are not supported in this Unity version.");
-
-            var window = FindOpenWindow(gameViewType)
-                         ?? getMainPlayModeViewMethod?.Invoke(null, null) as EditorWindow
-                         ?? EditorWindow.GetWindow(gameViewType);
-
-            if (window == null)
-                throw new InvalidOperationException("Could not find or create the Game View window.");
-
-            var renderTexture = await GetWindowRenderTextureAsync(
-                window,
-                "game_view",
-                TryGetGameViewRenderTexture
-            );
-
-            return SaveTexture(renderTexture, "game_view", ShouldFlipGameViewTexture());
+            return await CaptureLiveEditorSourceAsync("game_view", "game_view");
         }
 
         static async Task<string> CaptureSceneViewAsync()
         {
             EnsureCanRenderScreenshot("scene_view");
-            var window = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
-            if (window == null)
-                throw new InvalidOperationException("Could not find or create the Scene View window.");
-
-            return await Task.FromResult(CaptureSceneView(window));
+            return await CaptureLiveEditorSourceAsync("scene_view", "scene_view");
         }
 
         static async Task<string> CaptureSceneAssetAsync(string sceneAssetPath)
@@ -192,11 +155,11 @@ namespace Conduit
             var previewScene = EditorSceneManager.OpenPreviewScene(sceneAssetPath);
             try
             {
-                await WaitForNextEditorUpdateAsync();
+                await EditorCaptureSource.WaitForNextEditorUpdateAsync();
                 if (!TryCalculateSceneBounds(previewScene, out var bounds))
                     throw new InvalidOperationException($"Scene '{sceneAssetPath}' has no visible renderer bounds to capture.");
 
-                return CaptureSceneBounds(
+                return await CaptureSceneBoundsAsync(
                     previewScene,
                     bounds,
                     Path.GetFileNameWithoutExtension(sceneAssetPath),
@@ -209,7 +172,7 @@ namespace Conduit
             }
         }
 
-        static string CaptureCamera(Camera sourceCamera, string prefix)
+        static async Task<string> CaptureCameraAsync(Camera sourceCamera, string prefix)
         {
             EnsureCanRenderScreenshot(prefix);
             var width = Mathf.Max(1, sourceCamera.pixelWidth);
@@ -225,7 +188,7 @@ namespace Conduit
                 sourceCamera.targetTexture = renderTexture;
                 sourceCamera.Render();
                 RenderTexture.active = renderTexture;
-                return SaveRenderTexture(renderTexture, prefix);
+                return await SaveRenderTextureAsync(renderTexture, prefix);
             }
             finally
             {
@@ -236,7 +199,7 @@ namespace Conduit
             }
         }
 
-        static string CaptureGameObjectPreview(GameObject previewSource, string prefix)
+        static async Task<string> CaptureGameObjectPreviewAsync(GameObject previewSource, string prefix)
         {
             var previewScene = EditorSceneManager.NewPreviewScene();
             GameObject? previewInstance = null;
@@ -250,7 +213,7 @@ namespace Conduit
                 if (!TryCalculateRendererBounds(previewInstance, out var bounds))
                     throw new InvalidOperationException($"Target '{previewSource.name}' has no non-trivial renderer bounds to preview.");
 
-                return CaptureSceneBounds(previewScene, bounds, prefix, topDown: false);
+                return await CaptureSceneBoundsAsync(previewScene, bounds, prefix, topDown: false);
             }
             finally
             {
@@ -278,7 +241,7 @@ namespace Conduit
             if (previewTexture == null)
                 throw new InvalidOperationException($"Unity could not generate a preview image for '{target.name}'.");
 
-            return SaveTexture(previewTexture, prefix);
+            return await SaveTextureAsync(previewTexture, prefix);
         }
 
         static bool IsLoadingAssetPreview(Object target)
@@ -290,7 +253,7 @@ namespace Conduit
 #endif
         }
 
-        static string CaptureSceneBounds(Scene scene, Bounds bounds, string prefix, bool topDown)
+        static async Task<string> CaptureSceneBoundsAsync(Scene scene, Bounds bounds, string prefix, bool topDown)
         {
             EnsureCanRenderScreenshot(prefix);
             var (width, height) = GetDefaultCaptureSize(16f / 9f);
@@ -323,7 +286,7 @@ namespace Conduit
 
                 camera.Render();
                 RenderTexture.active = renderTexture;
-                return SaveRenderTexture(renderTexture, prefix);
+                return await SaveRenderTextureAsync(renderTexture, prefix);
             }
             finally
             {
@@ -438,124 +401,26 @@ namespace Conduit
             }
         }
 
-        static async Task<RenderTexture> GetWindowRenderTextureAsync<TWindow>(TWindow window, string targetName, Func<TWindow, RenderTexture?> getRenderTexture)
-            where TWindow : EditorWindow
+        static async Task<string> CaptureLiveEditorSourceAsync(string target, string prefix)
         {
-            var renderTexture = getRenderTexture(window);
-            if (IsUsableRenderTexture(renderTexture))
-                return renderTexture!;
+            using var source = await EditorCaptureSource.CreateAsync(target);
+            var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
+            try
+            {
+                if (!source.TryCapture(staging, out var diagnostic))
+                    throw new InvalidOperationException(diagnostic);
 
-            window.Focus();
-            window.Repaint();
-            await WaitForNextEditorUpdateAsync();
-            renderTexture = getRenderTexture(window);
-            if (IsUsableRenderTexture(renderTexture))
-                return renderTexture!;
-
-            await WaitForNextEditorUpdateAsync();
-            renderTexture = getRenderTexture(window);
-            if (IsUsableRenderTexture(renderTexture))
-                return renderTexture!;
-
-            throw new InvalidOperationException($"Unity did not expose a rendered texture for '{targetName}'.");
-        }
-
-        static RenderTexture? TryGetGameViewRenderTexture(EditorWindow window)
-        {
-            var renderTexture = gameViewRenderTextureField?.GetValue(window) as RenderTexture;
-            if (IsUsableRenderTexture(renderTexture))
-                return renderTexture;
-
-            return playModeViewTargetTextureField?.GetValue(window) as RenderTexture;
-        }
-
-        static RenderTexture? TryGetSceneViewRenderTexture(SceneView window)
-            => sceneViewTargetTextureField?.GetValue(window) as RenderTexture;
-
-        static bool IsUsableRenderTexture(RenderTexture? renderTexture)
-            => renderTexture != null
-               && renderTexture.IsCreated()
-               && renderTexture.width > 0
-               && renderTexture.height > 0;
-
-        static async Task<string> CaptureEditorWindowAsync(EditorWindow window, string prefix)
-        {
-            window.Focus();
-            window.Repaint();
-            await WaitForNextEditorUpdateAsync();
-            if (EditorWindow.focusedWindow != window)
-                throw new InvalidOperationException(
-                    $"Editor window '{ConduitSearchUtility.GetEditorWindowDisplayName(window)}' resolved, but Unity did not grant it focus; no reliable image is available."
+                var outputPath = AllocateOutputPath(
+                    ConduitAssetPathUtility.GetProjectRootPath(),
+                    prefix
                 );
-
-            var renderSize = GetWindowRenderSize(window.position);
-            var renderTexture = new RenderTexture(
-                Mathf.Max(1, Mathf.RoundToInt(renderSize.x)),
-                Mathf.Max(1, Mathf.RoundToInt(renderSize.y)),
-                24,
-                RenderTextureFormat.ARGB32
-            );
-            var previousActive = RenderTexture.active;
-
-            try
-            {
-                renderTexture.Create();
-                if (!UnityEditorInternal.InternalEditorUtility.CaptureEditorWindow(window, renderTexture))
-                    throw new InvalidOperationException($"Unity failed to capture editor window '{ConduitSearchUtility.GetEditorWindowDisplayName(window)}'.");
-
-                return SaveTexture(renderTexture, prefix);
+                await GpuCapture.SavePreparedJpegAsync(staging, outputPath.absolute_path);
+                return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
             }
             finally
             {
-                if (RenderTexture.active == renderTexture)
-                    RenderTexture.active = previousActive;
-
-                renderTexture.Release();
-                Object.DestroyImmediate(renderTexture);
-            }
-        }
-
-        static Task WaitForNextEditorUpdateAsync()
-        {
-            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            EditorApplication.update += Complete;
-            return completion.Task;
-
-            void Complete()
-            {
-                EditorApplication.update -= Complete;
-                completion.TrySetResult(true);
-            }
-        }
-
-        static string CaptureSceneView(SceneView window)
-        {
-            var sceneViewTexture = TryGetSceneViewRenderTexture(window);
-            var renderSize = IsUsableRenderTexture(sceneViewTexture)
-                ? new(sceneViewTexture!.width, sceneViewTexture.height)
-                : GetWindowRenderSize(window.position);
-
-            var (width, height) = (Mathf.RoundToInt(renderSize.x), Mathf.RoundToInt(renderSize.y));
-            var renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
-            var camera = window.camera;
-            if (camera == null)
-                throw new InvalidOperationException("Scene View does not have an active camera.");
-
-            var previousTargetTexture = camera.targetTexture;
-            var previousActive = RenderTexture.active;
-            try
-            {
-                camera.targetTexture = renderTexture;
-                camera.Render();
-                RenderTexture.active = renderTexture;
-                return SaveRenderTexture(renderTexture, "scene_view");
-            }
-            finally
-            {
-                RenderTexture.active = previousActive;
-                camera.targetTexture = previousTargetTexture;
-                renderTexture.Release();
-                Object.DestroyImmediate(renderTexture);
+                staging.Release();
+                Object.DestroyImmediate(staging);
             }
         }
 
@@ -648,116 +513,26 @@ namespace Conduit
             return size.sqrMagnitude > BoundsSizeEpsilon * BoundsSizeEpsilon;
         }
 
-        static Vector2 GetWindowRenderSize(Rect position)
+        static Task<string> SaveRenderTextureAsync(
+            RenderTexture renderTexture,
+            string prefix,
+            bool flipVertically = false)
+            => SaveTextureAsync(renderTexture, prefix, flipVertically);
+
+        static async Task<string> SaveTextureAsync(Texture texture, string prefix, bool flipVertically = false)
         {
-            var pixelsPerPoint = EditorGUIUtility.pixelsPerPoint;
-            var width = Mathf.Max(1, Mathf.RoundToInt(position.width * pixelsPerPoint));
-            var height = Mathf.Max(1, Mathf.RoundToInt(position.height * pixelsPerPoint));
-            return new(width, height);
-        }
-
-        static string SaveRenderTexture(RenderTexture renderTexture, string prefix, bool flipVertically = false)
-        {
-            var texture = new Texture2D(renderTexture.width, renderTexture.height, TextureFormat.RGB24, false);
-            try
-            {
-                texture.ReadPixels(new(0f, 0f, renderTexture.width, renderTexture.height), 0, 0);
-                texture.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-                if (flipVertically)
-                    FlipTextureVertically(texture);
-
-                return SaveTexture(texture, prefix);
-            }
-            finally
-            {
-                Object.DestroyImmediate(texture);
-            }
-        }
-
-        static void FlipTextureVertically(Texture2D texture)
-        {
-            var width = texture.width;
-            var height = texture.height;
-            var pixels = texture.GetPixels32();
-            var rowLength = width;
-            var halfHeight = height / 2;
-
-            for (var y = 0; y < halfHeight; y++)
-            {
-                var topRow = y * rowLength;
-                var bottomRow = (height - 1 - y) * rowLength;
-                for (var x = 0; x < rowLength; x++)
-                    (pixels[topRow + x], pixels[bottomRow + x]) = (pixels[bottomRow + x], pixels[topRow + x]);
-            }
-
-            texture.SetPixels32(pixels);
-            texture.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-        }
-
-        static bool ShouldFlipGameViewTexture()
-        {
-            if (SystemInfo.graphicsUVStartsAtTop)
-                return true;
-
-            // hdrp's final game view blit stores an inverted target for the editor presentation path
-            for (var type = GraphicsSettings.currentRenderPipeline?.GetType(); type != null; type = type.BaseType)
-                if (string.Equals(type.FullName, HdrpAssetTypeName, StringComparison.Ordinal))
-                    return true;
-
-            return false;
-        }
-
-        static string SaveTexture(Texture texture, string prefix, bool flipVertically = false)
-        {
-            var readableTexture = ToReadableTexture(texture);
-            try
-            {
-                if (flipVertically)
-                    FlipTextureVertically(readableTexture);
-
 #if MODULE_IMAGECONVERSION
-                var outputPath = AllocateOutputPath(ConduitAssetPathUtility.GetProjectRootPath(), prefix);
-                File.WriteAllBytes(outputPath.absolute_path, readableTexture.EncodeToJPG(95));
-                return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+            var outputPath = AllocateOutputPath(ConduitAssetPathUtility.GetProjectRootPath(), prefix);
+            await GpuCapture.SaveJpegAsync(
+                texture,
+                outputPath.absolute_path,
+                flipVertically
+            );
+            return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
 #else
-                throw new InvalidOperationException(ModuleUnavailableDiagnostic);
+            await Task.Yield();
+            throw new InvalidOperationException(ModuleUnavailableDiagnostic);
 #endif
-            }
-            finally
-            {
-                Object.DestroyImmediate(readableTexture);
-            }
-        }
-
-        static Texture2D ToReadableTexture(Texture texture)
-        {
-            if (texture is Texture2D readableTexture && readableTexture.isReadable)
-            {
-                var copy = new Texture2D(readableTexture.width, readableTexture.height, TextureFormat.RGB24, false);
-                copy.SetPixels(readableTexture.GetPixels());
-                copy.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-                return copy;
-            }
-
-            var width = Mathf.Max(1, texture.width);
-            var height = Mathf.Max(1, texture.height);
-            var renderTexture = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
-            var previousActive = RenderTexture.active;
-            try
-            {
-                Graphics.Blit(texture, renderTexture);
-                RenderTexture.active = renderTexture;
-
-                var readable = new Texture2D(width, height, TextureFormat.RGB24, false);
-                readable.ReadPixels(new(0f, 0f, width, height), 0, 0);
-                readable.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-                return readable;
-            }
-            finally
-            {
-                RenderTexture.active = previousActive;
-                RenderTexture.ReleaseTemporary(renderTexture);
-            }
         }
 
         internal static ScreenshotOutputPath AllocateOutputPath(string projectPath, string prefix)
@@ -815,15 +590,6 @@ namespace Conduit
 
             var sanitized = builder.ToString().Trim('_');
             return string.IsNullOrWhiteSpace(sanitized) ? "capture" : sanitized;
-        }
-
-        static EditorWindow? FindOpenWindow(Type windowType)
-        {
-            foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
-                if (candidate is EditorWindow window)
-                    return window;
-
-            return null;
         }
 
         static (int Width, int Height) GetDefaultCaptureSize(float aspect)

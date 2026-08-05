@@ -333,6 +333,7 @@ tools.profiler_browse.approval_mode = "approve"
 tools.profiler_overview.approval_mode = "approve"
 tools.profiler_record.approval_mode = "approve"
 tools.project_settings.approval_mode = "approve"
+tools.record.approval_mode = "approve"
 tools.refresh_asset_database.approval_mode = "approve"
 tools.reimport_assets.approval_mode = "approve"
 tools.reflect.approval_mode = "approve"
@@ -1402,6 +1403,7 @@ By the way: if your project doesn't have tests, *you're doing it wrong*.
 - ***`run_tests_playmode`***: run Play Mode tests
 - ***`run_tests_player`***: run player tests
 - ***`screenshot`***: captures the game view, scene view, or any other object
+- ***`record`***: records the game view, scene view, or an editor window through FFmpeg
 
 #### Profiling:
 These inspect runtime performance and Burst output.

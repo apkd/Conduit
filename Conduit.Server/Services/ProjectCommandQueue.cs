@@ -67,12 +67,16 @@ sealed class ProjectCommandQueue
         var completedTask = await Task.WhenAny(command.Completion.Task, callerCancellation.Task);
         if (completedTask != command.Completion.Task)
         {
-            if (BridgeCommandKinds.IsTest(BridgeCommandKinds.Parse(command.Command.CommandType)))
+            var commandKind = BridgeCommandKinds.Parse(command.Command.CommandType);
+            if (BridgeCommandKinds.SupportsCancellation(commandKind))
             {
+                var diagnostic = commandKind == BridgeCommandKind.Record
+                    ? "The request was cancelled. Any active recording continues in the background."
+                    : "The request was cancelled. Unity is stopping the test run.";
                 logger.ZLogWarning(
-                    $"Queued Unity test command '{command.Command.CommandType}' for project {command.Session.ProjectPath} was cancelled by the caller. Unity was told to stop the test run."
+                    $"Queued cancellable Unity command '{command.Command.CommandType}' for project {command.Session.ProjectPath} was cancelled by the caller."
                 );
-                return ToolExecutionResult.Cancelled("The request was cancelled. Unity is stopping the test run.");
+                return ToolExecutionResult.Cancelled(diagnostic);
             }
 
             logger.ZLogWarning(
