@@ -59,6 +59,20 @@ public sealed class UnityProjectStatusFormatterTests
     }
 
     [Test]
+    public async Task PingReportIncludesActiveRecordingStatusLine()
+    {
+        var report = UnityProjectStatusFormatter.FormatPingReport(
+            new()
+            {
+                UnityVersion = "6000.4.5f1",
+                RecordingStatusLine = "Recording: game_view -> Library/Recordings/0.mp4 (1.0/3.0s, libx265)",
+            }
+        );
+
+        await Assert.That(report).Contains("Recording: game_view -> Library/Recordings/0.mp4");
+    }
+
+    [Test]
     public async Task PingReportShowsActiveTestRun()
     {
         var report = UnityProjectStatusFormatter.FormatPingReport(

@@ -206,6 +206,15 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
+    public void RecordCommand_ParsesAndSupportsWaitCancellation()
+    {
+        var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.Record);
+
+        Assert.That(command, Is.EqualTo(BridgeCommandKind.Record));
+        Assert.That(BridgeCommandKinds.SupportsCancellation(command), Is.True);
+    }
+
+    [Test]
     public void ReimportAssetsCommand_Parses()
     {
         var command = ConduitToolRunner.ParseIncomingCommand(BridgeCommandTypes.ReimportAssets);
@@ -2080,6 +2089,84 @@ public sealed class ConduitMcpToolsTests
         {
             if (File.Exists(firstAbsolutePath))
                 File.Delete(firstAbsolutePath);
+        }
+    }
+
+    [Test]
+    public void RecordSettings_ParseAndRoundDurationUpToAWholeFrame()
+    {
+        var settings = RecordSettings.Parse(
+            " game_view ",
+            new[]
+            {
+                "duration_seconds=1.01",
+                "adjust_delta_time=true",
+                "frame_rate=60",
+                "resolution_scale=0.5",
+                "format=x265",
+                "crf=19",
+            }
+        );
+
+        Assert.That(settings.Target, Is.EqualTo("game_view"));
+        Assert.That(settings.FrameCount, Is.EqualTo(61));
+        Assert.That(settings.AdjustDeltaTime, Is.True);
+        Assert.That(settings.ResolutionScale, Is.EqualTo(0.5f));
+        Assert.That(settings.Format, Is.EqualTo("x265"));
+        Assert.That(settings.Crf, Is.EqualTo(19));
+    }
+
+    [TestCase("duration_seconds=0", "durationSeconds")]
+    [TestCase("frame_rate=0", "frameRate")]
+    [TestCase("resolution_scale=1.1", "resolution_scale")]
+    [TestCase("format=avi", "format")]
+    [TestCase("crf=64", "crf")]
+    public void RecordSettings_RejectInvalidValues(string replacement, string expectedDiagnostic)
+    {
+        var args = new[]
+        {
+            "duration_seconds=1",
+            "adjust_delta_time=false",
+            "frame_rate=60",
+            "resolution_scale=0.5",
+            "format=webm",
+            "crf=23",
+        };
+        var key = replacement[..replacement.IndexOf('=')];
+        for (var index = 0; index < args.Length; index++)
+            if (args[index].StartsWith(key + "=", StringComparison.Ordinal))
+                args[index] = replacement;
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => RecordSettings.Parse("game_view", args)
+        );
+        Assert.That(exception!.Message, Does.Contain(expectedDiagnostic));
+    }
+
+    [Test]
+    public void RecordOutputPaths_AreSequentialAcrossFormats()
+    {
+        var projectPath = Path.Combine(
+            Path.GetTempPath(),
+            "conduit-record-path-" + Guid.NewGuid().ToString("N")
+        );
+        try
+        {
+            var first = RecordOutputPath.Allocate(projectPath, "auto");
+            Assert.That(first.RelativePath, Is.EqualTo("Library/Recordings/0.mp4"));
+            File.WriteAllBytes(first.AbsolutePath, new byte[] { 1 });
+
+            var second = RecordOutputPath.Allocate(projectPath, "gif");
+            Assert.That(second.RelativePath, Is.EqualTo("Library/Recordings/1.gif"));
+            File.WriteAllBytes(second.IntermediatePath, new byte[] { 1 });
+
+            var third = RecordOutputPath.Allocate(projectPath, "webm");
+            Assert.That(third.RelativePath, Is.EqualTo("Library/Recordings/2.webm"));
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
         }
     }
 

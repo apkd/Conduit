@@ -347,11 +347,14 @@ namespace Conduit
             {
                 if (activeOperation is { } active
                     && active.request_id == requestId
-                    && BridgeCommandKinds.IsTest(active.kind))
+                    && BridgeCommandKinds.SupportsCancellation(active.kind))
                 {
                     active.client_id = clientId;
-                    if (!testRunMonitor.Cancel())
-                        ConduitDiagnostics.Warn($"Could not cancel Unity test request '{requestId}'.");
+                    var cancelled = active.kind == BridgeCommandKind.Record
+                        ? RecordTool.CancelWait()
+                        : testRunMonitor.Cancel();
+                    if (!cancelled)
+                        ConduitDiagnostics.Warn($"Could not cancel Unity request '{requestId}'.");
 
                     UpdateSnapshot();
                     return;
@@ -359,7 +362,7 @@ namespace Conduit
 
                 var queuedOperation = queuedOperations.Find(
                     operation => operation.request_id == requestId
-                                 && BridgeCommandKinds.IsTest(operation.kind)
+                                 && BridgeCommandKinds.SupportsCancellation(operation.kind)
                 );
                 if (queuedOperation == null)
                     return;
@@ -373,7 +376,13 @@ namespace Conduit
                 _ = ConduitConnection.TrySendResultAsync(
                     clientId,
                     requestId,
-                    run_tests.CreateRequestCancelledResult(),
+                    queuedOperation.kind == BridgeCommandKind.Record
+                        ? new()
+                        {
+                            outcome = ToolOutcome.Cancelled,
+                            diagnostic = "The recording wait was cancelled; any active recording continues in the background.",
+                        }
+                        : run_tests.CreateRequestCancelledResult(),
                     queuedOperation.command_type
                 );
                 PumpQueuedCommands();
@@ -541,6 +550,9 @@ namespace Conduit
                             break;
                         case BridgeCommandKind.Screenshot:
                             await ExecuteScreenshotAsync(operation);
+                            break;
+                        case BridgeCommandKind.Record:
+                            await ExecuteRecordAsync(operation);
                             break;
                         case BridgeCommandKind.GetDependencies:
                             await ExecuteGetDependenciesAsync(operation);

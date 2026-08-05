@@ -112,6 +112,7 @@ static class UnityProjectStatusFormatter
                 string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath) ? fallbackEditorLogPath : pingSnapshot.EditorLogPath
             );
             AppendProfilerStatus(ref builder, pingSnapshot);
+            AppendRecordingStatus(ref builder, pingSnapshot);
             AppendActiveDetours(ref builder, pingSnapshot);
 
             builder.AppendLine("Scenes:");
@@ -199,6 +200,14 @@ static class UnityProjectStatusFormatter
             return;
 
         builder.AppendLine(pingSnapshot.ProfilerStatusLine);
+    }
+
+    static void AppendRecordingStatus(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (string.IsNullOrWhiteSpace(pingSnapshot.RecordingStatusLine))
+            return;
+
+        builder.AppendLine(pingSnapshot.RecordingStatusLine);
     }
 
     static void AppendActiveDetours(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)

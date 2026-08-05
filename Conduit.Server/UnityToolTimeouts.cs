@@ -26,6 +26,7 @@ static class UnityToolTimeouts
             PlayMode             => TimeSpan.FromSeconds(60),
             EditMode             => TimeSpan.FromSeconds(60),
             Screenshot           => TimeSpan.FromSeconds(90),
+            Record               => TimeSpan.FromMinutes(240),
             GetDependencies      => TimeSpan.FromMinutes(1),
             FindReferencesTo     => TimeSpan.FromMinutes(10),
             FindMissingScripts   => TimeSpan.FromMinutes(10),

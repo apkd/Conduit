@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Conduit.BridgeRuntimeFailureKind;
 
 namespace Conduit;
@@ -208,6 +209,41 @@ public sealed class UnityProjectOperationsPolicyTests
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerOverview)).IsEqualTo(TimeSpan.FromSeconds(90));
         await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.ProfilerBrowse)).IsEqualTo(BridgeCommandKind.ProfilerBrowse);
         await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.ProfilerBrowse)).IsEqualTo(TimeSpan.FromSeconds(90));
+        await Assert.That(BridgeCommandKinds.Parse(BridgeCommandTypes.Record)).IsEqualTo(BridgeCommandKind.Record);
+        await Assert.That(UnityToolTimeouts.ForCommand(BridgeCommandKind.Record)).IsEqualTo(TimeSpan.FromMinutes(240));
+        await Assert.That(BridgeCommandKinds.SupportsCancellation(BridgeCommandKind.Record)).IsTrue();
+    }
+
+    [Test]
+    public async Task RecordArgs_UseInvariantWireValues()
+    {
+        var previousCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("pl-PL");
+            var args = UnityProjectOperations.BuildRecordArgs(
+                durationSeconds: 1.25f,
+                adjustDeltaTime: true,
+                frameRate: 60,
+                resolutionScale: 0.5f,
+                format: "x265",
+                crf: 23
+            );
+
+            await Assert.That(args).IsEquivalentTo(
+            [
+                "duration_seconds=1.25",
+                "adjust_delta_time=true",
+                "frame_rate=60",
+                "resolution_scale=0.5",
+                "format=x265",
+                "crf=23",
+            ]);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+        }
     }
 
     [Test]
