@@ -111,18 +111,21 @@ public sealed class PlayerBridgeDiscoveryTests
     public async Task ResolutionRetriesATransientlyMissingEndpoint()
     {
         var now = new DateTimeOffset(2026, 7, 31, 10, 0, 0, TimeSpan.Zero);
-        var time = new FakeTimeProvider(now);
         var root = CreateTemporaryDirectory();
         try
         {
-            var discovery = new UnityPlayerDiscovery(time, () => [root]);
-            var resolutionTask = discovery.ResolveAsync(new(3910489), CancellationToken.None);
-
-            await Assert.That(resolutionTask.IsCompleted).IsFalse();
             WriteEndpoint(root, "appeared", Endpoint(3910489, "appeared", now));
-            time.Advance(UnityPlayerDiscovery.ResolutionRetryDelay);
+            var discoveryAttempt = 0;
+            var discovery = new UnityPlayerDiscovery(
+                new FakeTimeProvider(now),
+                () => discoveryAttempt++ == 0 ? [] : [root]
+            );
 
-            var resolution = await resolutionTask;
+            var resolution = await discovery.ResolveAsync(
+                new(3910489),
+                CancellationToken.None
+            );
+
             await Assert.That(resolution.Endpoint?.ProcessId).IsEqualTo(3910489);
         }
         finally

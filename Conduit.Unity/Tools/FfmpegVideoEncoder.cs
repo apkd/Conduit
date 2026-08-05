@@ -616,7 +616,7 @@ namespace Conduit
                     new[]
                     {
                         "-f", "lavfi",
-                        "-i", "color=c=black:s=64x64:r=1:d=1",
+                        "-i", "color=c=black:s=256x256:r=1:d=1",
                         "-frames:v", "1",
                         "-an",
                         "-vf", spec.ProbeFilter,

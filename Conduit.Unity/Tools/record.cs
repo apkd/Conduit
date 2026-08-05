@@ -527,6 +527,8 @@ namespace Conduit
                 captureEnded = true;
                 trailingRepeatCount = trailingRepeats;
                 RestoreCaptureDeltaTime();
+                // static editor views may not dispatch another GPU callback after capture ends
+                CompletePendingReadbacks();
                 lock (gate)
                     Monitor.PulseAll(gate);
             }
