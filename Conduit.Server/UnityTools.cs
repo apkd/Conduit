@@ -71,7 +71,7 @@ public sealed class UnityTools
         bool adjustDeltaTime,
         UnityProjectOperations operations,
         CancellationToken ct,
-        [Description("Output frame rate from 1 through 240")] int frameRate = 60,
+        [Description("Output frame rate from 1 through 240")] int frameRate = 30,
         [Description("GPU capture scale from 0.1 through 1.0")] float resolution_scale = 0.5f,
         [Description("Encoding format: auto, x264, x265, x264_hw, x265_hw, webm, or gif")]
         string format = "auto",
