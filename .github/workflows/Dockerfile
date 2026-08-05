@@ -250,38 +250,97 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'exec "$@"' \
   > /usr/local/bin/with-xvfb && chmod +x /usr/local/bin/with-xvfb
 
-printf '%s\n' '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'EDITOR_PATH="${INSTALL_ROOT}/${UNITY_VERSION}/Editor/Unity"' \
-  ': "${HOME:=/root}"' \
-  ': "${XDG_CACHE_HOME:=$HOME/.cache}"' \
-  ': "${XDG_CONFIG_HOME:=$HOME/.config}"' \
-  'mkdir -p "${XDG_CACHE_HOME}/unity3d" "${XDG_CONFIG_HOME}/unity3d" "/root/.local/share/unity3d"' \
-  'ulimit -n 65535' \
-  'ulimit -u 16384' \
-  '' \
-  'LOGIN=0; ARGS=()' \
-  'for a in "$@"; do' \
-  '  if [ "$a" = "-login" ]; then LOGIN=1; else ARGS+=("$a"); fi' \
-  'done' \
-  '' \
-  '# No -login => do NOT inject credentials' \
-  'if [ "$LOGIN" -eq 0 ]; then' \
-  '  exec with-xvfb "$EDITOR_PATH" -silent-crashes -batchmode -nographics -logFile - "${ARGS[@]}"' \
-  'fi' \
-  '' \
-  '# -login present => require + inject credentials' \
-  'SERIAL="${UNITY_SERIAL:-}"' \
-  'USERN="${UNITY_USER:-}"' \
-  'PASSW="${UNITY_PASSWORD:-}"' \
-  'if [ -f /run/secrets/unity_serial ]; then SERIAL="$(cat /run/secrets/unity_serial)"; fi' \
-  'if [ -f /run/secrets/unity_user ]; then USERN="$(cat /run/secrets/unity_user)"; fi' \
-  'if [ -f /run/secrets/unity_password ]; then PASSW="$(cat /run/secrets/unity_password)"; fi' \
-  ': "${SERIAL:?UNITY serial is required}"' \
-  ': "${USERN:?UNITY username is required}"' \
-  ': "${PASSW:?UNITY password is required}"' \
-  'exec with-xvfb "$EDITOR_PATH" -serial "${SERIAL}" -username "${USERN}" -password "${PASSW}" -silent-crashes -batchmode -nographics -logFile - "${ARGS[@]}"' \
-  > /usr/local/bin/unity-editor && chmod +x /usr/local/bin/unity-editor
+cat > /usr/local/bin/unity-editor <<'UNITY_EDITOR'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${CONDUIT_XVFB_READY:-}" != 1 ]]; then
+  export CONDUIT_XVFB_READY=1
+  exec with-xvfb "$0" "$@"
+fi
+
+editor_path="${INSTALL_ROOT}/${UNITY_VERSION}/Editor/Unity"
+: "${HOME:=/root}"
+: "${XDG_CACHE_HOME:=$HOME/.cache}"
+: "${XDG_CONFIG_HOME:=$HOME/.config}"
+: "${XDG_DATA_HOME:=$HOME/.local/share}"
+mkdir -p \
+  "${XDG_CACHE_HOME}/unity3d" \
+  "${XDG_CONFIG_HOME}/unity3d" \
+  "${XDG_DATA_HOME}/unity3d"
+ulimit -n 65535
+ulimit -u 16384
+
+login=0
+arguments=()
+for argument in "$@"; do
+  if [[ "$argument" == "-login" ]]; then
+    login=1
+  else
+    arguments+=("$argument")
+  fi
+done
+
+editor_arguments=(
+  -silent-crashes
+  -batchmode
+  -nographics
+  -logFile -
+  "${arguments[@]}"
+)
+if (( ! login )); then
+  exec "$editor_path" "${editor_arguments[@]}"
+fi
+
+serial="${UNITY_SERIAL:-}"
+username="${UNITY_USER:-}"
+password="${UNITY_PASSWORD:-}"
+[[ ! -f /run/secrets/unity_serial ]] || serial="$(</run/secrets/unity_serial)"
+[[ ! -f /run/secrets/unity_user ]] || username="$(</run/secrets/unity_user)"
+[[ ! -f /run/secrets/unity_password ]] || password="$(</run/secrets/unity_password)"
+: "${serial:?UNITY serial is required}"
+: "${username:?UNITY username is required}"
+: "${password:?UNITY password is required}"
+
+login_arguments=(
+  -serial "$serial"
+  -username "$username"
+  -password "$password"
+)
+log_path="$(mktemp)"
+trap 'rm -f "$log_path"' EXIT
+
+# unity occasionally rejects a valid token before licensing starts. a fresh process
+# recovers, while matching both messages prevents retries after ordinary build failures.
+is_retryable_license_failure() {
+  grep -Fq "Access token is unavailable; failed to update" "$log_path" &&
+    grep -Fq "Failed to activate entitlement license" "$log_path"
+}
+
+max_attempts=4
+for ((attempt = 1; attempt <= max_attempts; ++attempt)); do
+  : > "$log_path"
+  set +e
+  "$editor_path" \
+    "${login_arguments[@]}" \
+    "${editor_arguments[@]}" \
+    2>&1 | tee "$log_path"
+  status=${PIPESTATUS[0]}
+  set -e
+
+  if (( status == 0 )); then
+    exit 0
+  fi
+  if (( attempt == max_attempts )) || ! is_retryable_license_failure; then
+    exit "$status"
+  fi
+
+  delay=$((120 << (attempt - 1)))
+  echo "Unity license activation failed; retrying in ${delay}s ($((attempt + 1))/${max_attempts})..." >&2
+  sleep "$delay"
+done
+UNITY_EDITOR
+chmod +x /usr/local/bin/unity-editor
 
 rm -rf "/root/.cache/unity3d" "/root/.config/unity3d" "/root/.local/share/unity3d" "${PROJECT}/Temp" || true
 
@@ -289,8 +348,6 @@ rm -rf "/root/.cache/unity3d" "/root/.config/unity3d" "/root/.local/share/unity3
 #   (END OF THE)
 BUILDER_SETUP_SCRIPT
 #=====================
-
-
 
 #=====================================
 #
