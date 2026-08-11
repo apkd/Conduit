@@ -999,11 +999,33 @@ public sealed class ConduitMcpToolsTests
         Assert.That(fixture.EnableBurstDebug, Is.False);
         Assert.That(options, Does.Contain("--float-mode=Default"));
         Assert.That(options, Does.Contain("--disable-warnings=BC1370;BC1322"));
-        Assert.That(options, Does.Contain("--target=Auto"));
+        Assert.That(options, Does.Contain("--target=AVX2"));
         Assert.That(options, Does.Contain("--debug=2"));
         Assert.That(options, Does.Not.Contain("--disable-function-caching"));
         Assert.That(options, Does.Not.Contain("--disable-assembly-caching"));
         Assert.That(options, Does.EndWith("--dump=Asm"));
+    }
+
+    [TestCase("x86", "x86", "AVX2", "Intel")]
+    [TestCase("wasm32", "wasm32", "WASM32", "Wasm")]
+    [TestCase("armv8", "armv8", "ARMV8A_AARCH64_HALFFP", "ARM")]
+    [TestCase("armv9", "armv9", "ARMV9A", "ARM")]
+    public void ViewBurstAsmCpuTarget_MapsSimplifiedNames(
+        string input,
+        string name,
+        string compilerTarget,
+        string asmKind)
+    {
+        Assert.That(view_burst_asm.TryParseCpuTarget(input, out var target), Is.True);
+        Assert.That(target.Name, Is.EqualTo(name));
+        Assert.That(target.CompilerTarget, Is.EqualTo(compilerTarget));
+        Assert.That(target.AsmKind, Is.EqualTo(asmKind));
+    }
+
+    [Test]
+    public void ViewBurstAsmCpuTarget_RejectsUnknownNames()
+    {
+        Assert.That(view_burst_asm.TryParseCpuTarget("sse2", out _), Is.False);
     }
 
     [Test]
@@ -1122,12 +1144,9 @@ public sealed class ConduitMcpToolsTests
 
         Assert.That(output, Is.EqualTo(
             "**Assembly:** `GenerateInteriorMesh(NativeArray<ShadowMeshVertex>&, NativeArray<int>&, ShadowEdge&, int&)`\n\n" +
+            "**Static code summary**\n\n" +
             "- Instructions: 1\n" +
-            "- Vector instructions: 0 (0%)\n" +
-            "- Control flow: branches=0, conditional=0, unconditional=0, calls=0, returns=1\n" +
-            "- Memory operands: 0 (0%); stack/frame operands: 0\n" +
-            "- Vector width hints: xmm=0, ymm=0, zmm=0, neon/simd=0, sve=0\n" +
-            "- Top instructions: ret=1\n\n" +
+            "- Control flow: 1 return\n\n" +
             "```asm\nret\n```"));
     }
 
@@ -1165,17 +1184,15 @@ public sealed class ConduitMcpToolsTests
 
         var output = view_burst_asm.BuildOutput(target, disassembly);
 
-        Assert.That(output, Does.Contain("**Assembly:** `MoveJob - (IJob)`\n\n- Instructions: 8\n"));
+        Assert.That(output, Does.Contain("**Assembly:** `MoveJob - (IJob)`\n\n**Selected function:** `JobStruct<MoveJob>.Execute(ref MoveJob data) -> void`\n\n**Static code summary**\n\n- Instructions: 8\n"));
         Assert.That(output, Does.Contain("\n\n```asm\n.text"));
         Assert.That(output, Does.EndWith("```"));
-        Assert.That(output, Does.Contain("- Vector instructions: 2 (25%)"));
-        Assert.That(output, Does.Contain("- Control flow: branches=1, conditional=1, unconditional=0, calls=1, returns=1"));
-        Assert.That(output, Does.Contain("- Memory operands: 3 (37.5%); stack/frame operands: 1"));
-        Assert.That(output, Does.Contain("- Vector width hints: xmm=1, ymm=2, zmm=0, neon/simd=0, sve=0"));
-        Assert.That(output, Does.Contain("call=1"));
-        Assert.That(output, Does.Contain("vaddps=1"));
-        Assert.That(output, Does.Contain("- Analyzed function: `JobStruct<MoveJob>.Execute(ref MoveJob data) -> void`"));
-        Assert.That(output, Does.Not.Contain("Top source lines:"));
+        Assert.That(output, Does.Contain("- Control flow: 1 conditional branch, 1 direct call, 1 return"));
+        Assert.That(output, Does.Contain("- SIMD: packed compute 1, scalar compute 1, transfer 1; widest packed compute 256-bit"));
+        Assert.That(output, Does.Contain("- Memory access instructions: 3 loads; stack/frame 1"));
+        Assert.That(output, Does.Contain("- Explicit stack operations: push 1"));
+        Assert.That(output, Does.Contain("- Direct callees: `helper`"));
+        Assert.That(output, Does.Not.Contain("Top instructions:"));
     }
 
     [Test]
@@ -1193,10 +1210,130 @@ public sealed class ConduitMcpToolsTests
         var output = view_burst_asm.BuildOutput(target, disassembly);
 
         Assert.That(output, Does.Contain("- Instructions: 5"));
-        Assert.That(output, Does.Contain("- Vector instructions: 2 (40%)"));
-        Assert.That(output, Does.Contain("- Control flow: branches=1, conditional=1, unconditional=0, calls=1, returns=1"));
-        Assert.That(output, Does.Contain("- Memory operands: 1 (20%); stack/frame operands: 0"));
-        Assert.That(output, Does.Contain("- Vector width hints: xmm=0, ymm=0, zmm=0, neon/simd=2, sve=0"));
+        Assert.That(output, Does.Contain("- SIMD: packed compute 1, transfer 1; widest packed compute 128-bit"));
+        Assert.That(output, Does.Contain("- Control flow: 1 conditional branch, 1 direct call, 1 return"));
+        Assert.That(output, Does.Contain("- Memory access instructions: 1 load"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_PrefersTheTargetMethodOverLargerHelpers()
+    {
+        var target = new BurstTarget(
+            "Unity.Collections.xxHash3.Hash64Long(byte*, byte*, long, byte*)",
+            "Hash64Long",
+            "Unity.Collections.xxHash3",
+            "Unity.Collections.xxHash3"
+        );
+        var disassembly = string.Join("\n",
+            "\"Collections.xxHash3.DefaultHashLongInternalLoop(byte* input) -> void\":",
+            "nop",
+            "nop",
+            "nop",
+            "ret",
+            "\"Collections.xxHash3.Hash64Long(byte* input, byte* dest, long length, byte* secret) -> ulong\":",
+            "ret");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("**Selected function:** `Collections.xxHash3.Hash64Long(byte* input, byte* dest, long length, byte* secret) -> ulong`"));
+        Assert.That(output, Does.Contain("- Instructions: 1"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_FollowsScaffoldingOnlyEntryForwarders()
+    {
+        var target = new BurstTarget(
+            "Unity.Collections.xxHash3.Hash64Long(byte*, byte*, long, byte*)",
+            "Hash64Long",
+            "Unity.Collections.xxHash3",
+            "Unity.Collections.xxHash3"
+        );
+        var disassembly = string.Join("\n",
+            "\"Collections.xxHash3+Hash64Long_1234$Invoke(byte* input) -> ulong\":",
+            "vaddps            ymm0, ymm1, ymm2",
+            "ret",
+            "\"Collections.xxHash3.Hash64Long(byte* input) -> ulong\":",
+            "push              rbp",
+            "mov               rbp, rsp",
+            "pop               rbp",
+            "jmp               \"Collections.xxHash3+Hash64Long_1234$Invoke(byte* input) -> ulong\"@PLT");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("**Selected function:** `Collections.xxHash3+Hash64Long_1234$Invoke(byte* input) -> ulong`"));
+        Assert.That(output, Does.Contain("**Entry forwarder:** `Collections.xxHash3.Hash64Long(byte* input) -> ulong`"));
+        Assert.That(output, Does.Contain("- SIMD: packed compute 1; widest packed compute 256-bit"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_SeparatesDataMovementIdiomsAndLoopCandidates()
+    {
+        var target = new BurstTarget("Example.Hash()", "Hash", "Example", "Example");
+        var disassembly = string.Join("\n",
+            ".Lloop:",
+            "xor               eax, eax",
+            "xor               ecx, edx",
+            "movabs            r8, 0x12345678",
+            "movabs            r9, helper",
+            "vmovdqu           ymm0, ymmword ptr [rax]",
+            "vpinsrd           xmm0, xmm0, eax, 1",
+            "jne               .Lloop",
+            "ret");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("- SIMD: transfer 1, lane/shuffle 1"));
+        Assert.That(output, Does.Contain("- Memory access instructions: 1 load"));
+        Assert.That(output, Does.Contain("- XOR instructions: 2; zeroing 1; non-zeroing 1"));
+        Assert.That(output, Does.Contain("- `movabs` materialization: numeric constants 1, symbol addresses 1"));
+        Assert.That(output, Does.Contain("**Backward branches (loop candidates)**"));
+        Assert.That(output, Does.Contain("Vector registers are used only for transfers or lane manipulation"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_ReportsWasmControlMemoryAndSimdRoles()
+    {
+        var target = new BurstTarget("Example.Execute()", "Execute", "Example", "Example");
+        var disassembly = string.Join("\n",
+            ".Lloop:",
+            "i32.load          0",
+            "v128.load         0",
+            "i32x4.add",
+            "br_if             .Lloop",
+            "call_indirect     0",
+            "end_function");
+
+        var output = view_burst_asm.BuildOutput(target, disassembly);
+
+        Assert.That(output, Does.Contain("- Control flow: 1 conditional branch, 1 indirect call, 1 return, 1 backward branch"));
+        Assert.That(output, Does.Contain("- SIMD: packed compute 1, transfer 1; widest packed compute 128-bit"));
+        Assert.That(output, Does.Contain("- Memory access instructions: 2 loads"));
+    }
+
+    [Test]
+    public void ViewBurstAsmOutput_IncludesCompilationContextAndDeduplicatedRemarks()
+    {
+        var target = new BurstTarget("Example.Execute()", "Execute", "Example", "Example");
+        const string options = "--target=ARMV9A\n--opt-level=3\n--float-mode=Fast\n--float-precision=Low\n--disable-safety-checks";
+        const string remark =
+            "--- !Analysis\n" +
+            "Remark Type: Analysis\n" +
+            "Pass: loop-vectorize\n" +
+            "Remark: CantVectorizeInstructionReturnType\n" +
+            "Function: Example.Execute\n" +
+            "Message: /src/Example.cs:42:0: loop not vectorized: instruction return type cannot be vectorized";
+        var remarks = remark + "\n" + remark;
+
+        var output = view_burst_asm.BuildOutput(
+            target,
+            "ret",
+            view_burst_asm.ParseCompilationContext(options, "armv9"),
+            remarks
+        );
+
+        Assert.That(output, Does.Contain("**Compilation:** `armv9/ARMV9A` · `Performance` · floats `Fast/Low` · safety checks `Off`"));
+        Assert.That(output, Does.Contain("`loop-vectorize/CantVectorizeInstructionReturnType` · `Example.cs:42`"));
+        Assert.That(output.Split(new[] { "instruction return type cannot be vectorized" }, StringSplitOptions.None), Has.Length.EqualTo(2));
     }
 
     [Test]
@@ -1218,11 +1355,11 @@ public sealed class ConduitMcpToolsTests
             var result = view_burst_asm.CompleteOutput(target, builder.ToString());
 
             Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
-            Assert.That(result.return_value, Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n- Instructions: 1000"));
+            Assert.That(result.return_value, Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n**Static code summary**\n\n- Instructions: 1000"));
             Assert.That(result.return_value, Does.Contain("Assembly output very large ("));
             Assert.That(result.return_value, Does.EndWith(" KB); saved to `Temp/GenerateInteriorMesh.txt`.*"));
             Assert.That(File.Exists(path), Is.True);
-            Assert.That(File.ReadAllText(path), Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n- Instructions: 1000"));
+            Assert.That(File.ReadAllText(path), Does.StartWith("**Assembly:** `GenerateInteriorMesh()`\n\n**Static code summary**\n\n- Instructions: 1000"));
             Assert.That(File.ReadAllText(path), Does.Contain("\n\n```asm\nnop\nnop"));
         }
         finally

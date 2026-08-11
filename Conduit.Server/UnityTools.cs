@@ -70,12 +70,12 @@ public sealed class UnityTools
         [Description("Use Time.captureDeltaTime for deterministic, smooth game-time capture. Requires unpaused play mode.")]
         bool adjustDeltaTime,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Output frame rate from 1 through 240")] int frameRate = 30,
         [Description("GPU capture scale from 0.1 through 1.0")] float resolution_scale = 0.5f,
         [Description("Encoding format: auto, x264, x265, x264_hw, x265_hw, webm, or gif")]
         string format = "auto",
-        [Description("Encoder quality value. Lower values generally preserve more detail; ignored for GIF.")] int crf = 23
+        [Description("Encoder quality value. Lower values generally preserve more detail; ignored for GIF.")] int crf = 23,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(
         operations.RecordAsync(
             projectPath,
@@ -113,9 +113,9 @@ public sealed class UnityTools
     public static Task<string> Help(
         UnityProjectRegistry projectRegistry,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional project path or player selector")]
-        string? projectPath = null)
+        string? projectPath = null,
+        CancellationToken ct = default)
     {
         if (PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _))
             return ToPlainTextToolResponseAsync(operations.HelpAsync(projectPath!, ct));
@@ -146,9 +146,9 @@ public sealed class UnityTools
         [Description("Asset path or a GUID string")]
         string asset,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("The object reference graph is cached after first call. Use this to invalidate the cache; usually unnecessary, unless you modified the assets")]
-        bool rebuildCache = false
+        bool rebuildCache = false,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.FindReferencesToAsync(projectPath, asset, rebuildCache, ct));
 
     [McpServerTool(Name = CMD.FindMissingScripts, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -234,9 +234,9 @@ public sealed class UnityTools
     public static Task<string> SaveScenes(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional exact open scene path to save. Omit to save all dirty open scenes")]
-        string? scenePath = null
+        string? scenePath = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.SaveScenesAsync(projectPath, scenePath, ct));
 
     [McpServerTool(Name = CMD.DiscardScenes, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
@@ -249,9 +249,9 @@ public sealed class UnityTools
     public static Task<string> DiscardScenes(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional exact open scene path to discard. Omit to discard all dirty open scenes")]
-        string? scenePath = null
+        string? scenePath = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.DiscardScenesAsync(projectPath, scenePath, ct));
 
     [McpServerTool(Name = CMD.RefreshAssetDatabase, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = true)]
@@ -341,8 +341,10 @@ public sealed class UnityTools
         [Description("Burst compilation target (job/method) name or partial name")]
         string target,
         UnityProjectOperations operations,
-        CancellationToken ct
-    ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, ct));
+        [Description("Burst CPU target: x86, wasm32, armv8, or armv9")]
+        string cpu = "x86",
+        CancellationToken ct = default
+    ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, cpu, ct));
 
     [McpServerTool(Name = CMD.Reflect, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
@@ -358,11 +360,11 @@ public sealed class UnityTools
         [Description("Search mode: types/classes/structs/enums/interfaces/delegates or members/fields/properties/methods/constructors")]
         string mode,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Type name query. Use full type name or 'Full.Type.Name, AssemblyName' to disambiguate.")]
         string? type = null,
         [Description("Member name query")]
-        string? member = null
+        string? member = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ReflectAsync(projectPath, mode, type, member, ct));
 
     [McpServerTool(Name = CMD.ProjectSettings, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -379,9 +381,9 @@ public sealed class UnityTools
         [Description("Exact or partial setting key")] string key,
         [Description("Operation: get, set, add_element, or remove_element")] string operation,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Setting value. Omit to pass null.")]
-        string? value = null
+        string? value = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ProjectSettingsAsync(projectPath, key, operation, value, ct));
 
     [McpServerTool(Name = CMD.RunTestsEditMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
@@ -389,11 +391,11 @@ public sealed class UnityTools
     public static Task<string> RunTestsEditMode(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional glob-like filter matched against full test names")]
         string? testFilter = null,
         [Description("True starts the test run and returns immediately while tests continue asynchronously.")]
-        bool @async = false
+        bool @async = false,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.RunTestsEditModeAsync(projectPath, testFilter, @async, ct));
 
     [McpServerTool(Name = CMD.RunTestsPlayMode, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
@@ -401,11 +403,11 @@ public sealed class UnityTools
     public static Task<string> RunTestsPlayMode(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional glob-like filter matched against full test names")]
         string? testFilter = null,
         [Description("True starts the test run and returns immediately while tests continue asynchronously.")]
-        bool @async = false
+        bool @async = false,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayModeAsync(projectPath, testFilter, @async, ct));
 
     [McpServerTool(Name = CMD.RunTestsPlayer, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
@@ -413,9 +415,9 @@ public sealed class UnityTools
     public static Task<string> RunTestsPlayer(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Optional glob-like filter matched against full test names")]
-        string? testFilter = null
+        string? testFilter = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.RunTestsPlayerAsync(projectPath, testFilter, ct));
 
     [McpServerTool(Name = CMD.ProfilerRecord, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -427,7 +429,6 @@ public sealed class UnityTools
     public static Task<string> ProfilerRecord(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Action to perform: capture, save, load, or list")]
         ProfilerRecordAction action = ProfilerRecordAction.Capture,
         [Description("Number of completed frames to capture when action is capture (max 600).")]
@@ -437,7 +438,8 @@ public sealed class UnityTools
         [Description("Capture target. Use play_mode or edit_mode.")]
         string target = "play_mode",
         [Description("Capture file name or path.")]
-        string? fileName = null
+        string? fileName = null,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ProfilerRecordAsync(projectPath, action, frames, delaySeconds, target, fileName, ct));
 
     [McpServerTool(Name = CMD.ProfilerOverview, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -449,11 +451,11 @@ public sealed class UnityTools
     public static Task<string> ProfilerOverview(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Sort metric: cpu_ms or gc_kb")]
         ProfilerOverviewMode mode = ProfilerOverviewMode.CpuMs,
         [Description("Available-frame ordinal range. Examples: 0..^1, ^120..^1, 10..50.")]
-        string frameRange = "0..^1"
+        string frameRange = "0..^1",
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ProfilerOverviewAsync(projectPath, mode, frameRange, ct));
 
     [McpServerTool(Name = CMD.ProfilerBrowse, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -465,7 +467,6 @@ public sealed class UnityTools
     public static Task<string> ProfilerBrowse(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct,
         [Description("Frame selector: selected, latest, or an available-frame ordinal.")]
         string frame = "selected",
         [Description("Thread selector: main, render, all_workers, or worker<N>.")]
@@ -479,7 +480,8 @@ public sealed class UnityTools
         [Description("Maximum number of rows to print. Clamped to 1..200.")]
         int limit = 50,
         [Description("Exclude rows that are insignificant for the selected sort metric.")]
-        bool onlyNonTrivial = true
+        bool onlyNonTrivial = true,
+        CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(
         operations.ProfilerBrowseAsync(projectPath, frame, thread, root, depth, sort, limit, onlyNonTrivial, ct)
     );

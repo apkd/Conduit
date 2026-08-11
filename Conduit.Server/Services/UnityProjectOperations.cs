@@ -440,10 +440,10 @@ public sealed class UnityProjectOperations(
         };
     }
 
-    public Task<ToolExecutionResult> ViewBurstAsmAsync(string projectPath, string target, CT ct)
+    public Task<ToolExecutionResult> ViewBurstAsmAsync(string projectPath, string target, string cpu, CT ct)
         => EnqueueAsync(
             projectPath: projectPath,
-            command: new() { CommandType = BridgeCommandTypes.ViewBurstAsm, Target = target },
+            command: new() { CommandType = BridgeCommandTypes.ViewBurstAsm, Target = target, Args = [cpu] },
             ct: ct
         );
 

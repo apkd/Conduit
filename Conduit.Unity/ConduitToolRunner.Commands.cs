@@ -110,7 +110,8 @@ namespace Conduit
         {
             try
             {
-                await CompleteCurrentAsync(view_burst_asm.ViewBurstAsm(operation.target ?? string.Empty));
+                var cpu = operation.args is { Length: > 0 } ? operation.args[0] : "x86";
+                await CompleteCurrentAsync(view_burst_asm.ViewBurstAsm(operation.target ?? string.Empty, cpu));
             }
             catch (Exception exception)
             {
