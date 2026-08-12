@@ -332,8 +332,8 @@ public sealed class UnityTools
     [McpServerTool(Name = CMD.ViewBurstAsm, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
-        Shows low-level optimization statistics and assembly for a Burst compilation target.
-        Use this for job optimization and for validating and debugging Burst compilation.
+        Shows assembly optimization statistics and view the output assembly of a Burst compilation target.
+        Use this for job optimization and for validating/debugging Burst output.
         """
     )]
     public static Task<string> ViewBurstAsm(
@@ -341,7 +341,7 @@ public sealed class UnityTools
         [Description("Burst compilation target (job/method) name or partial name")]
         string target,
         UnityProjectOperations operations,
-        [Description("Burst CPU target: x86, wasm32, armv8, or armv9")]
+        [Description("Burst output target: x86, wasm32, armv8, armv9, cil, or llvmir")]
         string cpu = "x86",
         CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ViewBurstAsmAsync(projectPath, target, cpu, ct));

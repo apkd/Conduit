@@ -10,18 +10,19 @@ using System.Text.RegularExpressions;
 
 namespace Conduit
 {
-    static class view_burst_asm
+    static partial class view_burst_asm
     {
         const int MaxCandidates = 10;
         const int ClearMatchGap = 25;
-        const int MaxBackwardBranchDetails = 5;
+        const int MaxTopInstructions = 20;
         const int MaxDirectCalleeDetails = 5;
-        const int MaxOptimizationRemarks = 10;
+        const int MaxSourceAttributionRows = 16;
         const int MaxForwarderInstructions = 8;
         const int LargeOutputLineThreshold = 1000;
         static readonly Regex tempLabel = new(@"^\s*\.Ltmp\d+:\s*(?:[#;].*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex burstError = new(@"^.*\(\d+,\d+\):\sBurst\serror", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex sourceLocation = new(@"^(?<prefix>\s*[#;]\s+)(?<file>.+?)\((?<line>\d+),\s*\d+\)(?<rest>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly Regex splitSourceFileDirective = new(@"^(?<prefix>\s*\.file\s+\d+\s+)""(?<directory>[^""]*)""\s+""(?<file>[^""]+)""(?<rest>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Multiline);
         static readonly Regex renderedSourceLocation = new(@"^\s*[#;]\s+(?<file>.+?):(?<line>\d+)(?:\s|$)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex remarkSourceLocation = new(@"^(?<file>.+?):(?<line>\d+):\d+:\s*(?<message>.*)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex assemblyQualifier = new(@",\s*[^,\]\)>]+,\s*Version=[0-9.]+,\s*Culture=[^,\]\)>\s]+,\s*PublicKeyToken=(?:null|[0-9a-fA-F]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -39,8 +40,8 @@ namespace Conduit
 #if MODULE_BURST
             try
             {
-                if (!TryParseCpuTarget(cpu, out var cpuTarget))
-                    return Error($"Unknown Burst CPU '{cpu}'. Expected x86, wasm32, armv8, or armv9.");
+                if (!TryParseOutputTarget(cpu, out var outputTarget))
+                    return Error($"Unknown Burst output target '{cpu}'. Expected x86, wasm32, armv8, armv9, cil, or llvmir.");
 
                 var targets = LoadTargets();
                 if (targets.Count == 0)
@@ -49,14 +50,14 @@ namespace Conduit
                 var match = MatchTarget(targetName, targets);
                 return match.Kind switch
                 {
-                    BurstAsmTargetMatchKind.Matched   => Compile(targets[match.SelectedIndex], cpuTarget),
+                    BurstAsmTargetMatchKind.Matched   => Compile(targets[match.SelectedIndex], outputTarget),
                     BurstAsmTargetMatchKind.Ambiguous => Ambiguous(targetName, targets, match),
                     _                                 => NoMatch(targetName, targets, match),
                 };
             }
             catch (Exception exception)
             {
-                return Error($"Could not inspect Burst assembly: {Unwrap(exception).Message}");
+                return Error($"Could not inspect Burst output: {Unwrap(exception).Message}");
             }
 #else
             _ = targetName;
@@ -109,41 +110,43 @@ namespace Conduit
             );
         }
 
-        static BridgeCommandResult Compile(BurstTarget target, BurstCpuTarget cpu)
+        static BridgeCommandResult Compile(BurstTarget target, BurstOutputTarget outputTarget)
         {
             DirtyBurstAssemblyCache();
-            var options = BuildOptions(target, cpu);
-            var rawDisassembly = GetInspectorDisassembly(target.Method!, options.Assembly);
-            if (IsBurstError(rawDisassembly))
-                return Error(rawDisassembly.Trim());
+            var options = BuildOptions(target, outputTarget);
+            var rawOutput = GetInspectorDisassembly(target.Method!, options.Output);
+            if (IsBurstError(rawOutput))
+                return Error(rawOutput.Trim());
 
-            if (string.IsNullOrWhiteSpace(rawDisassembly))
-                return Error(BuildEmptyDisassemblyDiagnostic(target));
+            if (string.IsNullOrWhiteSpace(rawOutput))
+                return Error(BuildEmptyOutputDiagnostic(target, outputTarget.DisplayName));
+
+            if (outputTarget.OutputKind != BurstOutputKind.Assembly)
+            {
+                var rawStats = new BurstAsmStats { Context = options.Context };
+                if (outputTarget.OutputKind == BurstOutputKind.OptimizedLlvmIr)
+                    ReadOptimizationRemarks(target, options.OptimizationRemarks, rawStats);
+
+                return CompleteRawOutput(target, rawOutput.Trim(), outputTarget, rawStats);
+            }
 
             var disassembly = StripTrailingTemporaryLabelBlocks(
-                CleanDisassembly(RenderEnhancedDisassembly(rawDisassembly, cpu.AsmKind).TrimStart('\n'))
+                CleanDisassembly(RenderEnhancedDisassembly(rawOutput, outputTarget.AsmKind).TrimStart('\n'))
             );
 
             if (string.IsNullOrWhiteSpace(disassembly))
                 return Error(BuildEmptyDisassemblyDiagnostic(target));
 
-            var rawRemarks = GetInspectorDisassembly(target.Method!, options.OptimizationRemarks);
-            // remarks use a separate Burst dump and may be unsupported even when assembly compilation succeeds.
-            var remarksError = IsBurstError(rawRemarks)
-                ? FirstLine(SimplifyBurstDiagnostic(rawRemarks))
-                : string.Empty;
-            var stats = AnalyzeAssembly(target, disassembly);
+            var stats = AnalyzeAssembly(target, disassembly, options.Context.Cpu);
             stats.Context = options.Context;
-            stats.RemarksError = remarksError;
-            if (remarksError.Length == 0)
-                ParseOptimizationRemarks(rawRemarks, stats.OptimizationRemarks);
+            ReadOptimizationRemarks(target, options.OptimizationRemarks, stats);
 
             return CompleteOutput(target, disassembly, stats);
         }
 
-        static (string Assembly, string OptimizationRemarks, BurstCompilationContext Context) BuildOptions(
+        static (string Output, string OptimizationRemarks, BurstCompilationContext Context) BuildOptions(
             BurstTarget target,
-            BurstCpuTarget cpu)
+            BurstOutputTarget outputTarget)
         {
             var options = target.Options!;
             ApplyInspectorOptionOverrides(options);
@@ -164,12 +167,28 @@ namespace Conduit
                 throw new InvalidOperationException($"Burst compiler options were not available for '{target.DisplayName}'.");
 
             var defaultOptions = (string?)args[1] ?? string.Empty;
-            var assembly = BuildInspectorOptions(defaultOptions, cpu.CompilerTarget);
-            return new(
-                assembly,
-                BuildInspectorOptions(defaultOptions, cpu.CompilerTarget, "1", "IRPassAnalysis"),
-                ParseCompilationContext(assembly, cpu.Name)
+            var output = BuildInspectorOptions(
+                defaultOptions,
+                outputTarget.CompilerTarget,
+                outputTarget.DebugLevel,
+                outputTarget.Dump
             );
+            return new(
+                output,
+                BuildInspectorOptions(defaultOptions, outputTarget.CompilerTarget, "1", "IRPassAnalysis"),
+                ParseCompilationContext(output, outputTarget.Name)
+            );
+        }
+
+        static void ReadOptimizationRemarks(BurstTarget target, string options, BurstAsmStats stats)
+        {
+            // remarks use a separate Burst dump and may be unsupported even when the requested output succeeds.
+            var rawRemarks = GetInspectorDisassembly(target.Method!, options);
+            stats.RemarksError = IsBurstError(rawRemarks)
+                ? FirstLine(SimplifyBurstDiagnostic(rawRemarks))
+                : string.Empty;
+            if (stats.RemarksError.Length == 0)
+                ParseOptimizationRemarks(rawRemarks, stats.OptimizationRemarks);
         }
 
         static string GetInspectorDisassembly(MethodInfo method, string options)
@@ -219,6 +238,7 @@ namespace Conduit
 
         static string RenderEnhancedDisassembly(string disassembly, string asmKindName)
         {
+            disassembly = NormalizeSourceFileDirectives(disassembly);
             var disassemblerType = Type.GetType("Unity.Burst.Editor.BurstDisassembler, Unity.Burst.Editor", true)!;
             var asmKindType = Type.GetType("Unity.Burst.Editor.BurstDisassembler+AsmKind, Unity.Burst.Editor", true)!;
             var asmKind = Enum.Parse(asmKindType, asmKindName);
@@ -233,6 +253,16 @@ namespace Conduit
         }
 #endif
 
+        // Burst's renderer expects one quoted path and otherwise mistakes the directory for the filename.
+        internal static string NormalizeSourceFileDirectives(string disassembly) =>
+            splitSourceFileDirective.Replace(disassembly, static match =>
+            {
+                var directory = match.Groups["directory"].Value.TrimEnd('/', '\\');
+                var file = match.Groups["file"].Value.TrimStart('/', '\\');
+                var path = directory.Length == 0 ? file : directory + "/" + file;
+                return $"{match.Groups["prefix"].Value}\"{path}\"{match.Groups["rest"].Value}";
+            });
+
         internal static void ApplyInspectorOptionOverrides(object options)
         {
             SetBool(options, "EnableBurstSafetyChecks", false);
@@ -240,10 +270,10 @@ namespace Conduit
             SetBool(options, "EnableBurstDebug", false);
         }
 
-        internal static bool TryParseCpuTarget(string? cpu, out BurstCpuTarget target)
+        internal static bool TryParseOutputTarget(string? selector, out BurstOutputTarget target)
         {
             // explicit targets keep reports reproducible when the same project is inspected from different editor hosts.
-            switch (cpu?.Trim().ToLowerInvariant())
+            switch (selector?.Trim().ToLowerInvariant())
             {
                 case null or "" or "x86":
                     target = new("x86", "AVX2", "Intel");
@@ -256,6 +286,12 @@ namespace Conduit
                     return true;
                 case "armv9":
                     target = new("armv9", "ARMV9A", "ARM");
+                    return true;
+                case "cil":
+                    target = new("cil", "Auto", BurstOutputKind.Cil);
+                    return true;
+                case "llvmir":
+                    target = new("llvmir", "Auto", BurstOutputKind.OptimizedLlvmIr);
                     return true;
                 default:
                     target = default;
@@ -385,7 +421,7 @@ namespace Conduit
         }
 
         internal static string BuildOutput(BurstTarget target, string disassembly)
-            => BuildOutput(target, disassembly, AnalyzeAssembly(target, disassembly));
+            => BuildOutput(target, disassembly, AnalyzeAssembly(target, disassembly, string.Empty));
 
         internal static string BuildOutput(
             BurstTarget target,
@@ -393,17 +429,35 @@ namespace Conduit
             BurstCompilationContext context,
             string optimizationRemarks)
         {
-            var stats = AnalyzeAssembly(target, disassembly);
+            var stats = AnalyzeAssembly(target, disassembly, context.Cpu);
             stats.Context = context;
             ParseOptimizationRemarks(optimizationRemarks, stats.OptimizationRemarks);
             return BuildOutput(target, disassembly, stats);
         }
 
         internal static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly)
-            => CompleteOutput(target, disassembly, AnalyzeAssembly(target, disassembly));
+            => CompleteOutput(target, disassembly, AnalyzeAssembly(target, disassembly, string.Empty));
 
         static string BuildOutput(BurstTarget target, string disassembly, BurstAsmStats stats) =>
-            $"**Assembly:** `{CleanDisplayName(target.DisplayName)}`\n\n{FormatStats(stats)}\n\n```asm\n{disassembly}\n```";
+            $"{FormatReport(target, stats)}\n\n# Asm\n\n```asm\n{disassembly}\n```";
+
+        internal static string BuildRawOutput(
+            BurstTarget target,
+            string output,
+            BurstOutputTarget outputTarget,
+            BurstCompilationContext context = default,
+            string optimizationRemarks = "")
+        {
+            var stats = new BurstAsmStats { Context = context };
+            ParseOptimizationRemarks(optimizationRemarks, stats.OptimizationRemarks);
+            return BuildRawOutput(target, output, outputTarget, stats);
+        }
+
+        internal static BridgeCommandResult CompleteRawOutput(
+            BurstTarget target,
+            string output,
+            BurstOutputTarget outputTarget)
+            => CompleteRawOutput(target, output, outputTarget, new BurstAsmStats());
 
         static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly, BurstAsmStats stats)
         {
@@ -411,17 +465,71 @@ namespace Conduit
             if (CountLines(output) <= LargeOutputLineThreshold)
                 return Success(output);
 
-            var path = SaveLargeOutput(target, output);
+            var path = SaveLargeOutput(target, output, ".txt");
             var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
-            return Success($"**Assembly:** `{CleanDisplayName(target.DisplayName)}`\n\n{FormatStats(stats)}\n\n*Assembly output very large ({kilobytes} KB); saved to `{path}`.*");
+            return Success($"{FormatReport(target, stats)}\n\n*Assembly output very large ({kilobytes} KB); saved to `{path}`.*");
         }
 
-        static BurstAsmStats AnalyzeAssembly(BurstTarget target, string disassembly)
+        static string BuildRawOutput(
+            BurstTarget target,
+            string output,
+            BurstOutputTarget outputTarget,
+            BurstAsmStats stats)
+        {
+            var report = FormatRawReport(target, outputTarget, stats);
+            return $"{report}\n\n## {outputTarget.DisplayName}\n\n```{outputTarget.CodeFence}\n{output}\n```";
+        }
+
+        static BridgeCommandResult CompleteRawOutput(
+            BurstTarget target,
+            string output,
+            BurstOutputTarget outputTarget,
+            BurstAsmStats stats)
+        {
+            var formatted = BuildRawOutput(target, output, outputTarget, stats);
+            if (CountLines(formatted) <= LargeOutputLineThreshold)
+                return Success(formatted);
+
+            var path = SaveLargeOutput(target, output, outputTarget.FileExtension);
+            var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
+            return Success(
+                $"{FormatRawReport(target, outputTarget, stats)}\n\n" +
+                $"*{outputTarget.DisplayName} output very large ({kilobytes} KB); saved to `{path}`.*"
+            );
+        }
+
+        static string FormatReport(BurstTarget target, BurstAsmStats stats)
+        {
+            var function = ReportFunction(target, stats);
+            return FormatStats(stats, function);
+        }
+
+        static string FormatRawReport(BurstTarget target, BurstOutputTarget outputTarget, BurstAsmStats stats)
+        {
+            var function = CleanDisplayName(target.DisplayName);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.Append($"**Function:** `{function}`");
+            if (outputTarget.OutputKind == BurstOutputKind.OptimizedLlvmIr)
+            {
+                builder.Append("\n\n");
+                AppendCompilation(builder, stats.Context, false);
+                AppendOptimizationRemarks(builder, stats, function);
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        static string ReportFunction(BurstTarget target, BurstAsmStats stats) =>
+            stats.EntryForwarders.Count > 0 ? stats.EntryForwarders[0]
+            : stats.AnalyzedFunction.Length > 0 ? stats.AnalyzedFunction
+            : CleanDisplayName(target.DisplayName);
+
+        static BurstAsmStats AnalyzeAssembly(BurstTarget target, string disassembly, string cpu)
         {
             var lines = disassembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
             var blocks = GetFunctionBlocks(lines);
             if (blocks.Count == 0)
-                return AnalyzeLines(lines, 0, lines.Length);
+                return AnalyzeLines(lines, 0, lines.Length, SupportsNativeLoopAnalysis(cpu, lines, 0, lines.Length));
 
             var selected = SelectMainBlock(target, blocks);
             var forwarders = new List<string>();
@@ -438,7 +546,12 @@ namespace Conduit
                 selected = forwarded;
             }
 
-            var stats = AnalyzeLines(lines, selected.Start, selected.End);
+            var stats = AnalyzeLines(
+                lines,
+                selected.Start,
+                selected.End,
+                SupportsNativeLoopAnalysis(cpu, lines, selected.Start, selected.End)
+            );
             stats.AnalyzedFunction = selected.Label.Trim('"');
             stats.EntryForwarders.AddRange(forwarders);
             return stats;
@@ -665,30 +778,31 @@ namespace Conduit
             return builder.ToString();
         }
 
-        static BurstAsmStats AnalyzeLines(string[] lines, int start, int end)
+        static BurstAsmStats AnalyzeLines(string[] lines, int start, int end, bool analyzeLoops)
         {
             var stats = new BurstAsmStats();
             var labels = new Dictionary<string, int>(StringComparer.Ordinal);
-            var branches = new List<BurstAsmBranch>();
-            var source = string.Empty;
+            var labelsByInstruction = new Dictionary<int, List<string>>();
+            var instructions = new List<BurstAnalyzedInstruction>();
+            var currentSource = string.Empty;
             for (int index = start; index < end; ++index)
             {
                 var line = lines[index];
-                if (TryParseRenderedSourceLocation(line, out var nextSource))
+                if (TryReadRenderedSourceLocation(line, out var source))
                 {
-                    source = nextSource;
-                    continue;
-                }
-
-                if (IsUnknownSourceLocation(line))
-                {
-                    source = string.Empty;
+                    currentSource = source;
                     continue;
                 }
 
                 if (TryParseCodeLabel(line, out var label))
                 {
                     labels[label] = stats.InstructionCount;
+                    if (!labelsByInstruction.TryGetValue(stats.InstructionCount, out var instructionLabels))
+                    {
+                        instructionLabels = new();
+                        labelsByInstruction.Add(stats.InstructionCount, instructionLabels);
+                    }
+                    instructionLabels.Add(label);
                     continue;
                 }
 
@@ -696,41 +810,64 @@ namespace Conduit
                     continue;
 
                 var parsedOperands = SplitOperands(operands);
-                var instructionIndex = stats.InstructionCount;
                 stats.InstructionCount++;
-                AnalyzeInstruction(stats, mnemonic, operands, parsedOperands);
+                stats.InstructionCounts.TryGetValue(mnemonic, out var mnemonicCount);
+                stats.InstructionCounts[mnemonic] = mnemonicCount + 1;
+                var facts = AnalyzeInstruction(stats, mnemonic, operands, parsedOperands);
+                var isConditionalBranch = IsConditionalBranch(mnemonic, parsedOperands);
+                var isUnconditionalBranch = IsUnconditionalBranch(mnemonic);
 
-                if (IsConditionalBranch(mnemonic, parsedOperands))
-                {
+                if (isConditionalBranch)
                     stats.ConditionalBranchCount++;
-                    AddBranch();
-                }
-                else if (IsUnconditionalBranch(mnemonic))
-                {
+                else if (isUnconditionalBranch)
                     stats.UnconditionalBranchCount++;
-                    AddBranch();
-                }
 
-                void AddBranch()
+                instructions.Add(new(
+                    mnemonic,
+                    parsedOperands,
+                    currentSource,
+                    facts,
+                    isConditionalBranch,
+                    isUnconditionalBranch
+                ));
+
+                if (currentSource.Length > 0)
                 {
-                    if (TryGetDirectBranchTarget(parsedOperands, out var target))
-                        branches.Add(new(instructionIndex, mnemonic, target, source));
+                    stats.MappedInstructionCount++;
+                    if (!stats.SourceAttribution.TryGetValue(currentSource, out var sourceStats))
+                    {
+                        sourceStats = new(currentSource, stats.SourceAttribution.Count);
+                        stats.SourceAttribution.Add(currentSource, sourceStats);
+                    }
+                    sourceStats.Add(facts, isConditionalBranch || isUnconditionalBranch);
                 }
+                else
+                    stats.UnmappedInstructionCount++;
             }
 
-            foreach (var branch in branches)
-            {
-                if (!labels.TryGetValue(branch.Target, out var targetIndex) || targetIndex >= branch.InstructionIndex)
-                    continue;
-
-                // a backward direct branch is only a loop candidate; this deliberately avoids implying CFG knowledge.
-                stats.BackwardBranches.Add(branch);
-            }
+            if (analyzeLoops)
+                AnalyzeNativeLoops(stats, instructions, labels, labelsByInstruction);
 
             return stats;
         }
 
-        static void AnalyzeInstruction(
+        static bool TryReadRenderedSourceLocation(string line, out string source)
+        {
+            source = string.Empty;
+            var trimmed = line.TrimStart();
+            if (trimmed.Length < 2 || trimmed[0] is not ('#' or ';') || !char.IsWhiteSpace(trimmed[1]))
+                return false;
+
+            var match = renderedSourceLocation.Match(line);
+            if (!match.Success)
+                return true;
+
+            var file = Path.GetFileName(match.Groups["file"].Value.Replace('\\', '/'));
+            source = $"{file}:{match.Groups["line"].Value}";
+            return true;
+        }
+
+        static BurstInstructionFacts AnalyzeInstruction(
             BurstAsmStats stats,
             string mnemonic,
             string operands,
@@ -739,6 +876,7 @@ namespace Conduit
             var baseMnemonic = BaseMnemonic(mnemonic);
             var isXor = IsXorMnemonic(baseMnemonic);
             var isZeroingXor = isXor && IsZeroingIdiom(parsedOperands);
+            AnalyzeNotableOpcode(stats, mnemonic, baseMnemonic, parsedOperands);
 
             if (isXor)
             {
@@ -818,6 +956,81 @@ namespace Conduit
                     stats.SimdOtherInstructionCount++;
                     break;
             }
+
+            var callKind = IsCall(mnemonic)
+                ? IsDirectCall(mnemonic, parsedOperands) ? BurstCallKind.Direct : BurstCallKind.Indirect
+                : BurstCallKind.None;
+            return new(memoryAccess, simdRole, callKind);
+        }
+
+        static void AnalyzeNotableOpcode(
+            BurstAsmStats stats,
+            string mnemonic,
+            string baseMnemonic,
+            IReadOnlyList<string> operands)
+        {
+            // these classes report explicit opcode evidence; unrecognized spellings remain visible in the histogram.
+            if (baseMnemonic is "lfence" or "mfence" or "sfence" or "dmb" or "dsb" or "atomic.fence")
+            {
+                stats.FenceInstructionCount++;
+                return;
+            }
+
+            if (baseMnemonic is "cpuid" or "serialize" or "iret" or "iretd" or "iretq" or "rsm" or "isb" or "sb")
+            {
+                stats.SerializingInstructionCount++;
+                return;
+            }
+
+            if (baseMnemonic.IndexOf("gather", StringComparison.Ordinal) >= 0)
+            {
+                stats.GatherInstructionCount++;
+                return;
+            }
+
+            if (baseMnemonic.IndexOf("scatter", StringComparison.Ordinal) >= 0)
+            {
+                stats.ScatterInstructionCount++;
+                return;
+            }
+
+            if (StartsWithAny(
+                    baseMnemonic,
+                    "vfmadd", "vfmsub", "vfnmadd", "vfnmsub",
+                    "fmadd", "fmsub", "fnmadd", "fnmsub",
+                    "fmla", "fmls", "fmad", "fmsb", "fnmad", "fnmsb"))
+            {
+                stats.FusedMultiplyAddInstructionCount++;
+                return;
+            }
+
+            if (baseMnemonic.IndexOf("sqrt", StringComparison.Ordinal) >= 0)
+            {
+                stats.SquareRootInstructionCount++;
+                return;
+            }
+
+            if (baseMnemonic.IndexOf("div", StringComparison.Ordinal) >= 0)
+            {
+                stats.DivideInstructionCount++;
+                return;
+            }
+
+            var hasMemoryOperand = false;
+            foreach (var operand in operands)
+                if (HasMemorySyntax(operand))
+                {
+                    hasMemoryOperand = true;
+                    break;
+                }
+
+            if (mnemonic.StartsWith("lock ", StringComparison.Ordinal)
+                || baseMnemonic == "xchg" && hasMemoryOperand
+                || baseMnemonic.IndexOf(".atomic.", StringComparison.Ordinal) >= 0
+                || baseMnemonic.StartsWith("atomic.", StringComparison.Ordinal)
+                || IsArmReadModifyWrite(baseMnemonic)
+                || StartsWithAny(baseMnemonic, "ldar", "ldaxr", "ldxr", "stlr", "stlxr", "stxr"))
+                stats.AtomicInstructionCount++;
         }
 
         static void AnalyzeCall(BurstAsmStats stats, string mnemonic, IReadOnlyList<string> operands)
@@ -1174,24 +1387,6 @@ namespace Conduit
             return result;
         }
 
-        static bool TryParseRenderedSourceLocation(string line, out string source)
-        {
-            source = string.Empty;
-            var match = renderedSourceLocation.Match(line);
-            if (!match.Success)
-                return false;
-
-            source = $"{Path.GetFileName(match.Groups["file"].Value)}:{match.Groups["line"].Value}";
-            return true;
-        }
-
-        static bool IsUnknownSourceLocation(string line)
-        {
-            var text = line.TrimStart();
-            return (text.StartsWith("#", StringComparison.Ordinal) || text.StartsWith(";", StringComparison.Ordinal))
-                   && text.IndexOf("unknown", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
         static bool TryParseCodeLabel(string line, out string label)
         {
             label = string.Empty;
@@ -1365,33 +1560,52 @@ namespace Conduit
             }
         }
 
-        static string FormatStats(BurstAsmStats stats)
+        static string FormatStats(BurstAsmStats stats, string function)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            if (!stats.Context.IsEmpty)
-            {
-                builder.Append("**Compilation:** ");
-                builder.Append($"`{stats.Context.Cpu}/{stats.Context.CompilerTarget}` · ");
-                builder.Append($"`{stats.Context.Optimization}` · ");
-                builder.Append($"floats `{stats.Context.FloatMode}/{stats.Context.FloatPrecision}` · ");
-                builder.Append($"safety checks `{stats.Context.SafetyChecks}`\n\n");
-            }
-
-            if (stats.AnalyzedFunction.Length > 0)
-                builder.Append($"**Selected function:** `{stats.AnalyzedFunction}`\n\n");
-            if (stats.EntryForwarders.Count > 0)
-                builder.Append($"**Entry forwarder:** `{string.Join("` → `", stats.EntryForwarders)}`\n\n");
-
-            builder.Append("**Static code summary**\n\n");
+            builder.Append("# Summary\n\n");
+            builder.Append($"**Function:** `{function}`\n\n");
+            AppendCompilation(builder, stats.Context, true);
             builder.Append($"- Instructions: {stats.InstructionCount}\n");
             AppendControlFlow(builder, stats);
+            AppendLoopSummary(builder, stats);
+            AppendCalls(builder, stats);
             AppendSimd(builder, stats);
             AppendMemory(builder, stats);
             AppendIntegerIdioms(builder, stats);
+            AppendNotableOpcodes(builder, stats);
 
+            AppendMnemonicHistogram(builder, stats);
+            AppendLoops(builder, stats);
+            AppendSourceAttribution(builder, stats);
+            AppendNotes(builder, stats);
+            AppendOptimizationRemarks(builder, stats, function);
+            return builder.ToString().TrimEnd();
+        }
+
+        static void AppendCompilation(
+            StringBuilder builder,
+            BurstCompilationContext context,
+            bool includeArchitecture)
+        {
+            if (context.IsEmpty)
+                return;
+
+            builder.Append("**Compilation:** ");
+            builder.Append(includeArchitecture
+                ? $"`{context.Cpu}/{context.CompilerTarget}` · "
+                : "target `Compiler default` · ");
+            builder.Append($"`{context.Optimization}` · ");
+            builder.Append($"floats `{context.FloatMode}/{context.FloatPrecision}` · ");
+            builder.Append($"safety checks `{context.SafetyChecks}`\n\n");
+        }
+
+        static void AppendCalls(StringBuilder builder, BurstAsmStats stats)
+        {
+            builder.Append($"- Calls: direct {stats.DirectCallCount}");
             if (stats.DirectCallTargets.Count > 0)
             {
-                builder.Append("- Direct callees: ");
+                builder.Append(" (");
                 var count = Math.Min(stats.DirectCallTargets.Count, MaxDirectCalleeDetails);
                 for (int index = 0; index < count; ++index)
                 {
@@ -1401,13 +1615,9 @@ namespace Conduit
                 }
                 if (stats.DirectCallTargets.Count > count)
                     builder.Append($"; {stats.DirectCallTargets.Count - count} more");
-                builder.Append('\n');
+                builder.Append(')');
             }
-
-            AppendBackwardBranches(builder, stats);
-            AppendNotes(builder, stats);
-            AppendOptimizationRemarks(builder, stats);
-            return builder.ToString().TrimEnd();
+            builder.Append($", indirect {stats.IndirectCallCount}\n");
         }
 
         static void AppendControlFlow(StringBuilder builder, BurstAsmStats stats)
@@ -1415,10 +1625,7 @@ namespace Conduit
             var parts = new List<string>();
             Add(stats.ConditionalBranchCount, "conditional branch", "conditional branches");
             Add(stats.UnconditionalBranchCount, "jump", "jumps");
-            Add(stats.DirectCallCount, "direct call", "direct calls");
-            Add(stats.IndirectCallCount, "indirect call", "indirect calls");
             Add(stats.ReturnCount, "return", "returns");
-            Add(stats.BackwardBranches.Count, "backward branch", "backward branches");
             if (parts.Count > 0)
                 builder.Append($"- Control flow: {string.Join(", ", parts)}\n");
 
@@ -1516,23 +1723,27 @@ namespace Conduit
             builder.Append($"- `movabs` materialization: {string.Join(", ", parts)}\n");
         }
 
-        static void AppendBackwardBranches(StringBuilder builder, BurstAsmStats stats)
+        static void AppendNotableOpcodes(StringBuilder builder, BurstAsmStats stats)
         {
-            if (stats.BackwardBranches.Count == 0)
+            var parts = new List<string>();
+            Add(stats.DivideInstructionCount, "divide");
+            Add(stats.SquareRootInstructionCount, "square root");
+            Add(stats.FusedMultiplyAddInstructionCount, "FMA");
+            Add(stats.GatherInstructionCount, "gather");
+            Add(stats.ScatterInstructionCount, "scatter");
+            Add(stats.AtomicInstructionCount, "atomic");
+            Add(stats.FenceInstructionCount, "fence");
+            Add(stats.SerializingInstructionCount, "serializing");
+            if (parts.Count == 0)
                 return;
 
-            builder.Append("\n**Backward branches (loop candidates)**\n\n");
-            var count = Math.Min(stats.BackwardBranches.Count, MaxBackwardBranchDetails);
-            for (int index = 0; index < count; ++index)
+            builder.Append($"- Notable opcode classes: {string.Join(", ", parts)}\n");
+
+            void Add(int count, string name)
             {
-                var branch = stats.BackwardBranches[index];
-                builder.Append($"- `{branch.Mnemonic} → {branch.Target}`");
-                if (branch.Source.Length > 0)
-                    builder.Append($" — `{branch.Source}`");
-                builder.Append('\n');
+                if (count > 0)
+                    parts.Add($"{name} {count}");
             }
-            if (stats.BackwardBranches.Count > count)
-                builder.Append($"- {stats.BackwardBranches.Count - count} more backward branches omitted.\n");
         }
 
         static void AppendNotes(StringBuilder builder, BurstAsmStats stats)
@@ -1545,22 +1756,24 @@ namespace Conduit
             if (!movementOnly && !fastCompilation)
                 return;
 
-            builder.Append("\n**Notes**\n\n");
+            builder.Append("\n## Notes\n\n");
             if (movementOnly)
                 builder.Append("- Vector registers are used only for transfers or lane manipulation; packed computation was not established.\n");
             if (fastCompilation)
                 builder.Append("- Fast compilation limits Burst vectorization, inlining, and loop optimization.\n");
         }
 
-        static void AppendOptimizationRemarks(StringBuilder builder, BurstAsmStats stats)
+        static void AppendOptimizationRemarks(StringBuilder builder, BurstAsmStats stats, string function)
         {
             if (stats.OptimizationRemarks.Count > 0)
             {
-                builder.Append("\n**Compiler optimization remarks**\n\n");
-                var count = Math.Min(stats.OptimizationRemarks.Count, MaxOptimizationRemarks);
-                for (int index = 0; index < count; ++index)
+                if (builder.Length == 0 || builder[^1] != '\n')
+                    builder.Append('\n');
+                if (builder.Length < 2 || builder[^2] != '\n')
+                    builder.Append('\n');
+                builder.Append("## Compiler optimization remarks\n\n");
+                foreach (var remark in stats.OptimizationRemarks)
                 {
-                    var remark = stats.OptimizationRemarks[index];
                     builder.Append($"- `{remark.Type}`");
                     if (remark.Pass.Length > 0)
                     {
@@ -1569,16 +1782,86 @@ namespace Conduit
                             builder.Append($"/{remark.Reason}");
                         builder.Append('`');
                     }
+                    if (remark.Function.Length > 0
+                        && NormalizeAsmText(remark.Function) != NormalizeAsmText(function))
+                        builder.Append($" · function `{remark.Function}`");
                     if (remark.Source.Length > 0)
                         builder.Append($" · `{remark.Source}`");
                     builder.Append($" — {remark.Message}\n");
                 }
-                if (stats.OptimizationRemarks.Count > count)
-                    builder.Append($"- {stats.OptimizationRemarks.Count - count} more compiler remarks omitted.\n");
             }
 
             if (stats.RemarksError.Length > 0)
                 builder.Append($"\n*Compiler optimization remarks could not be retrieved: {stats.RemarksError}*\n");
+        }
+
+        static void AppendSourceAttribution(StringBuilder builder, BurstAsmStats stats)
+        {
+            if (stats.MappedInstructionCount == 0)
+                return;
+
+            var rows = new List<BurstSourceStats>(stats.SourceAttribution.Values);
+            rows.Sort(static (left, right) =>
+            {
+                var count = right.InstructionCount.CompareTo(left.InstructionCount);
+                return count != 0 ? count : left.Ordinal.CompareTo(right.Ordinal);
+            });
+
+            builder.Append("\n# Source attribution\n\n");
+            builder.Append($"- Coverage: {stats.MappedInstructionCount}/{stats.InstructionCount} instructions mapped");
+            if (stats.UnmappedInstructionCount > 0)
+                builder.Append($"; {stats.UnmappedInstructionCount} unmapped/compiler-generated");
+            builder.Append('\n');
+
+            var count = Math.Min(rows.Count, MaxSourceAttributionRows);
+            for (int index = 0; index < count; ++index)
+            {
+                var row = rows[index];
+                builder.Append($"- `{row.Source}`: {row.InstructionCount} instr");
+                var details = new List<string>();
+                Add(row.LoadCount, "loads");
+                Add(row.StoreCount, "stores");
+                Add(row.PackedComputeCount, "packed compute");
+                Add(row.BranchCount, "branches");
+                Add(row.CallCount, "calls");
+                if (details.Count > 0)
+                    builder.Append($" ({string.Join(", ", details)})");
+                builder.Append('\n');
+
+                void Add(int value, string name)
+                {
+                    if (value > 0)
+                        details.Add($"{name} {value}");
+                }
+            }
+
+            if (rows.Count > count)
+                builder.Append($"- {rows.Count - count} more source mappings omitted.\n");
+        }
+
+        static void AppendMnemonicHistogram(StringBuilder builder, BurstAsmStats stats)
+        {
+            if (stats.InstructionCounts.Count == 0)
+                return;
+
+            var entries = new List<KeyValuePair<string, int>>(stats.InstructionCounts);
+            entries.Sort(static (left, right) =>
+            {
+                var count = right.Value.CompareTo(left.Value);
+                return count != 0
+                    ? count
+                    : string.Compare(left.Key, right.Key, StringComparison.Ordinal);
+            });
+
+            builder.Append("- Top instructions: ");
+            var count = Math.Min(entries.Count, MaxTopInstructions);
+            for (int index = 0; index < count; ++index)
+            {
+                if (index > 0)
+                    builder.Append(", ");
+                builder.Append($"{entries[index].Key}={entries[index].Value}");
+            }
+            builder.Append('\n');
         }
 
         internal static BurstCompilationContext ParseCompilationContext(string options, string cpu)
@@ -1733,7 +2016,14 @@ namespace Conduit
                 function = CleanDiagnosticLine(function);
                 var key = $"{type}\0{message}\0{pass}\0{reason}\0{function}";
                 if (seen.Add(key))
-                    destination.Add(new(type.Length == 0 ? "Remark" : type, message, pass, reason, source));
+                    destination.Add(new(
+                        type.Length == 0 ? "Remark" : type,
+                        message,
+                        pass,
+                        reason,
+                        function,
+                        source
+                    ));
                 Reset();
             }
 
@@ -2435,9 +2725,9 @@ namespace Conduit
             return lines;
         }
 
-        static string SaveLargeOutput(BurstTarget target, string output)
+        static string SaveLargeOutput(BurstTarget target, string output, string extension)
         {
-            var path = Path.Combine("Temp", SafeFileName(OutputFileName(target)) + ".txt");
+            var path = Path.Combine("Temp", "Conduit", "Burst", SafeFileName(OutputFileName(target)) + extension);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, output);
             return path.Replace('\\', '/');
@@ -2498,7 +2788,10 @@ namespace Conduit
             || burstError.IsMatch(disassembly);
 
         internal static string BuildEmptyDisassemblyDiagnostic(BurstTarget target)
-            => $"Failed to compile '{CleanDisplayName(target.DisplayName)}': Burst returned no assembly or diagnostic text.";
+            => BuildEmptyOutputDiagnostic(target, "assembly");
+
+        static string BuildEmptyOutputDiagnostic(BurstTarget target, string outputName) =>
+            $"Failed to compile '{CleanDisplayName(target.DisplayName)}': Burst returned no {outputName.ToLowerInvariant()} or diagnostic text.";
 
         static void SetBool(object target, string name, bool value)
         {
@@ -2701,18 +2994,63 @@ namespace Conduit
         }
     }
 
-    readonly struct BurstCpuTarget
+    readonly struct BurstOutputTarget
     {
         public readonly string Name;
         public readonly string CompilerTarget;
         public readonly string AsmKind;
+        public readonly BurstOutputKind OutputKind;
+        public string Dump => OutputKind switch
+        {
+            BurstOutputKind.Cil             => "IL",
+            BurstOutputKind.OptimizedLlvmIr => "IROptimized",
+            _                               => "Asm",
+        };
+        public string DebugLevel => OutputKind == BurstOutputKind.Assembly ? "2" : "0";
+        public string DisplayName => OutputKind switch
+        {
+            BurstOutputKind.Cil             => "CIL",
+            BurstOutputKind.OptimizedLlvmIr => "Optimized LLVM IR",
+            _                               => "Assembly",
+        };
+        public string CodeFence => OutputKind switch
+        {
+            BurstOutputKind.Cil             => "cil",
+            BurstOutputKind.OptimizedLlvmIr => "llvm",
+            _                               => "asm",
+        };
+        public string FileExtension => OutputKind switch
+        {
+            BurstOutputKind.Cil             => ".il",
+            BurstOutputKind.OptimizedLlvmIr => ".ll",
+            _                               => ".txt",
+        };
 
-        public BurstCpuTarget(string name, string compilerTarget, string asmKind)
+        public BurstOutputTarget(string name, string compilerTarget, string asmKind)
         {
             Name = name;
             CompilerTarget = compilerTarget;
             AsmKind = asmKind;
+            OutputKind = BurstOutputKind.Assembly;
         }
+
+        public BurstOutputTarget(
+            string name,
+            string compilerTarget,
+            BurstOutputKind outputKind)
+        {
+            Name = name;
+            CompilerTarget = compilerTarget;
+            AsmKind = string.Empty;
+            OutputKind = outputKind;
+        }
+    }
+
+    enum BurstOutputKind : byte
+    {
+        Assembly,
+        Cil,
+        OptimizedLlvmIr,
     }
 
     readonly struct BurstCompilationContext
@@ -2763,23 +3101,60 @@ namespace Conduit
         Other,
     }
 
-    readonly struct BurstAsmBranch
+    enum BurstCallKind : byte
     {
-        public readonly int InstructionIndex;
-        public readonly string Mnemonic;
-        public readonly string Target;
-        public readonly string Source;
+        None,
+        Direct,
+        Indirect,
+    }
 
-        public BurstAsmBranch(
-            int instructionIndex,
-            string mnemonic,
-            string target,
-            string source)
+    readonly struct BurstInstructionFacts
+    {
+        public readonly BurstMemoryAccessKind MemoryAccess;
+        public readonly BurstSimdRole SimdRole;
+        public readonly BurstCallKind CallKind;
+
+        public BurstInstructionFacts(
+            BurstMemoryAccessKind memoryAccess,
+            BurstSimdRole simdRole,
+            BurstCallKind callKind)
         {
-            InstructionIndex = instructionIndex;
-            Mnemonic = mnemonic;
-            Target = target;
+            MemoryAccess = memoryAccess;
+            SimdRole = simdRole;
+            CallKind = callKind;
+        }
+    }
+
+    sealed class BurstSourceStats
+    {
+        public readonly string Source;
+        public readonly int Ordinal;
+        public int InstructionCount;
+        public int LoadCount;
+        public int StoreCount;
+        public int PackedComputeCount;
+        public int BranchCount;
+        public int CallCount;
+
+        public BurstSourceStats(string source, int ordinal)
+        {
             Source = source;
+            Ordinal = ordinal;
+        }
+
+        public void Add(BurstInstructionFacts facts, bool isBranch)
+        {
+            InstructionCount++;
+            if (facts.MemoryAccess is BurstMemoryAccessKind.Load or BurstMemoryAccessKind.ReadModifyWrite)
+                LoadCount++;
+            if (facts.MemoryAccess is BurstMemoryAccessKind.Store or BurstMemoryAccessKind.ReadModifyWrite)
+                StoreCount++;
+            if (facts.SimdRole == BurstSimdRole.PackedCompute)
+                PackedComputeCount++;
+            if (isBranch)
+                BranchCount++;
+            if (facts.CallKind != BurstCallKind.None)
+                CallCount++;
         }
     }
 
@@ -2789,6 +3164,7 @@ namespace Conduit
         public readonly string Message;
         public readonly string Pass;
         public readonly string Reason;
+        public readonly string Function;
         public readonly string Source;
 
         public BurstOptimizationRemark(
@@ -2796,28 +3172,39 @@ namespace Conduit
             string message,
             string pass,
             string reason,
+            string function,
             string source)
         {
             Type = type;
             Message = message;
             Pass = pass;
             Reason = reason;
+            Function = function;
             Source = source;
         }
     }
 
     sealed class BurstAsmStats
     {
+        public readonly Dictionary<string, int> InstructionCounts = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, BurstSourceStats> SourceAttribution = new(StringComparer.Ordinal);
         public readonly List<string> DirectCallTargets = new();
         public readonly List<string> EntryForwarders = new();
-        public readonly List<BurstAsmBranch> BackwardBranches = new();
         public readonly List<BurstOptimizationRemark> OptimizationRemarks = new();
+        public readonly List<BurstLoopStats> Loops = new();
         public BurstCompilationContext Context;
         public string AnalyzedFunction = string.Empty;
         public string RemarksError = string.Empty;
         public int InstructionCount;
+        public int MappedInstructionCount;
+        public int UnmappedInstructionCount;
         public int ConditionalBranchCount;
         public int UnconditionalBranchCount;
+        public bool LoopAnalysisCompleted;
+        public string LoopAnalysisDiagnostic = string.Empty;
+        public int LoopBackedgeCount;
+        public int LoopMaxDepth;
+        public int LoopRegionInstructionCount;
         public int DirectCallCount;
         public int IndirectCallCount;
         public int ReturnCount;
@@ -2842,5 +3229,13 @@ namespace Conduit
         public int ZeroingXorInstructionCount;
         public int NumericMovabsCount;
         public int SymbolMovabsCount;
+        public int DivideInstructionCount;
+        public int SquareRootInstructionCount;
+        public int FusedMultiplyAddInstructionCount;
+        public int GatherInstructionCount;
+        public int ScatterInstructionCount;
+        public int AtomicInstructionCount;
+        public int FenceInstructionCount;
+        public int SerializingInstructionCount;
     }
 }
