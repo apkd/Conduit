@@ -691,7 +691,7 @@ public sealed class ConduitMcpEndToEndTests
             }
 
             if (snippetFileName is not null)
-                foreach (var extension in new[] { ".cs", ".kind", ".dll", ".pdb" })
+                foreach (var extension in new[] { ".cs", ".dll", ".pdb" })
                     File.Delete(
                         Path.Combine(
                             storageRoot,
@@ -862,6 +862,76 @@ public sealed class ConduitMcpEndToEndTests
 
     [Test]
     [Order(17)]
+    public async Task ScriptFilesSupportArbitraryNamesAndBothCodeTools()
+    {
+        const string methodName = "ConduitMcpEndToEndTests.DetourProbe";
+        var marker = Guid.NewGuid().ToString("N");
+        var storageRoot = Path.Combine(
+            editorProjectPath,
+            ConduitSnippetStorage.PreserveSnippets ? "Library" : "Temp",
+            "Conduit"
+        );
+        var customFileName = $"Shared Script {marker}.cs";
+        var customPath = Path.Combine(storageRoot, customFileName);
+        Directory.CreateDirectory(storageRoot);
+        File.WriteAllText(customPath, $"return 303; // {marker}");
+
+        try
+        {
+            var customExecution = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(("projectPath", projectPath), ("snippet", customFileName))
+            );
+            AssertSuccessful(customExecution, "303");
+            Assert.That(customExecution.Text, Does.StartWith($"NAME: `{customFileName}`\n"));
+
+            var customDetour = await CallDetourAsync(methodName, customFileName);
+            AssertSuccessful(customDetour, "Detoured", methodName);
+            Assert.That(DetourProbe(1), Is.EqualTo(303));
+            AssertSuccessful(
+                await CallDetourAsync(methodName, "restore"),
+                "Restored the original implementation"
+            );
+
+            var executeSource = $"return 101; // {Guid.NewGuid():N}";
+            var executeResult = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(("projectPath", projectPath), ("snippet", executeSource))
+            );
+            var executeFileName = GetSnippetFileName(executeResult.Text);
+            var executeDetour = await CallDetourAsync(methodName, executeFileName);
+            AssertSuccessful(executeDetour, "Detoured", methodName);
+            Assert.That(DetourProbe(1), Is.EqualTo(101));
+            AssertSuccessful(
+                await CallDetourAsync(methodName, "restore"),
+                "Restored the original implementation"
+            );
+
+            var detourSource = $"return 202; // {Guid.NewGuid():N}";
+            var detourResult = await CallDetourAsync(methodName, detourSource);
+            AssertSuccessful(detourResult, "Detoured", methodName);
+            var detourFileName = GetSnippetFileName(detourResult.Text);
+            Assert.That(DetourProbe(1), Is.EqualTo(202));
+            AssertSuccessful(
+                await CallDetourAsync(methodName, "restore"),
+                "Restored the original implementation"
+            );
+
+            var detourExecution = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(("projectPath", projectPath), ("snippet", detourFileName))
+            );
+            AssertSuccessful(detourExecution, "202");
+        }
+        finally
+        {
+            await CallDetourAsync(methodName, "restore");
+            File.Delete(customPath);
+        }
+    }
+
+    [Test]
+    [Order(18)]
     public async Task Detour_TestsAppliesAndRestoresPrivateStaticMethod()
     {
         const string methodName = "ConduitMcpEndToEndTests.DetourProbe";
@@ -889,7 +959,7 @@ public sealed class ConduitMcpEndToEndTests
     static int DetourProbe(int value) => value + 1;
 
     [Test]
-    [Order(18)]
+    [Order(19)]
     public async Task Detour_SupportsInstanceReceiversAndPrivateMemberAccess()
     {
         const string methodName = "ConduitMcpEndToEndTests.DetourReceiver.Add";
@@ -927,7 +997,7 @@ public sealed class ConduitMcpEndToEndTests
     }
 
     [Test]
-    [Order(19)]
+    [Order(20)]
     public async Task Detour_SupportsSpanAndRefReadonlyReturnSignatures()
     {
         const string spanMethod = "ConduitMcpEndToEndTests.DetourSpanProbe";

@@ -69,7 +69,7 @@ static class HelpTool
                 - inspect support and get the canonical selector: `detour("Game.Player.TakeDamage", "test")`
                 - replace an instance method: `detour("Game.Player.TakeDamage", "@this.health -= arg0 * 2;")`
                 - replace a returning method: `detour("Game.Player.GetHealth", "return 100;")`
-                - reapply a saved replacement: `detour("Game.Player.GetHealth", "5.cs")`
+                - apply any saved Conduit script: `detour("Game.Player.GetHealth", "MyReplacement.cs")`
                 - restore the original method: `detour("Game.Player.GetHealth", "restore")`
 
                 You can use `detour` with most managed methods loaded from any assembly, including packages and UnityEngine/UnityEditor.

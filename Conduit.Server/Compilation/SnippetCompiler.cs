@@ -68,42 +68,36 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         try
         {
             var source = snippet;
-            string? requestedArtifactId = null;
-            if (TryParseSnippetFileName(snippet, out var named))
+            string? requestedFileName = null;
+            if (TryParseScriptFileName(snippet, out var named))
             {
                 if (cache.ByName.TryGetValue(named, out var namedCompilation))
                     return SnippetCompilation.Success(namedCompilation);
 
-                var sourcePath = snippetRoot is null ? null : Path.Combine(snippetRoot, named);
-                var kindPath = snippetRoot is null ? null : Path.Combine(snippetRoot, Path.ChangeExtension(named, ".kind"));
-                if (sourcePath is null || !File.Exists(sourcePath))
+                source = await LoadScriptSourceAsync(cache, snippetRoot, named, ct);
+                if (source is null)
                     return SnippetCompilation.FromFailure(
                         CompileError($"Snippet '{snippet}' was not found in the current target session.")
                     );
 
-                if (kindPath is null || !File.Exists(kindPath)
-                    || File.ReadAllText(kindPath).Trim() != "execute")
-                    return SnippetCompilation.FromFailure(
-                        CompileError($"Snippet '{snippet}' is not an execute_code artifact.")
-                    );
-
-                source = await File.ReadAllTextAsync(sourcePath, ct);
-                requestedArtifactId = named[..^3];
+                requestedFileName = named;
             }
 
-            if (requestedArtifactId is null && cache.BySource.TryGetValue(source, out var cached))
+            if (requestedFileName is null && cache.BySource.TryGetValue(source, out var cached))
                 return SnippetCompilation.Success(cached);
 
-            var artifactId = requestedArtifactId
-                ?? (++cache.NextArtifactId).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var sourceFileName = artifactId + ".cs";
+            var artifactId = GetNextArtifactId(cache, snippetRoot);
+            var sourceFileName = requestedFileName ?? artifactId + ".cs";
             var typeName = "SnippetHost_" + artifactId;
             var fullTypeName = $"{SnippetNamespace}.{typeName}";
-            if (snippetRoot is not null && requestedArtifactId is null)
+            if (requestedFileName is null)
             {
-                Directory.CreateDirectory(snippetRoot);
-                await File.WriteAllTextAsync(Path.Combine(snippetRoot, sourceFileName), source, ct);
-                await File.WriteAllTextAsync(Path.Combine(snippetRoot, artifactId + ".kind"), "execute\n", ct);
+                cache.SourcesByName[sourceFileName] = source;
+                if (snippetRoot is not null)
+                {
+                    Directory.CreateDirectory(snippetRoot);
+                    await File.WriteAllTextAsync(Path.Combine(snippetRoot, sourceFileName), source, ct);
+                }
             }
 
             SnippetParseResult parsed;
@@ -320,35 +314,31 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         await cache.Gate.WaitAsync(ct);
         try
         {
-            if (TryParseSnippetFileName(source, out var fileName))
+            if (TryParseScriptFileName(source, out var fileName))
             {
                 if (cache.DetoursByName.TryGetValue(fileName, out var cachedArtifact))
                     return SourceArtifactResult.Succeeded(cachedArtifact);
 
-                var sourcePath = snippetRoot is null ? null : Path.Combine(snippetRoot, fileName);
-                var kindPath = snippetRoot is null ? null : Path.Combine(snippetRoot, Path.ChangeExtension(fileName, ".kind"));
-                if (sourcePath is null || !File.Exists(sourcePath))
+                var loadedSource = await LoadScriptSourceAsync(cache, snippetRoot, fileName, ct);
+                if (loadedSource is null)
                     return SourceArtifactResult.Failed(CompileError($"Detour source '{source}' was not found."));
-                if (kindPath is null || !File.Exists(kindPath)
-                    || File.ReadAllText(kindPath).Trim() != "detour")
-                    return SourceArtifactResult.Failed(CompileError($"Source '{source}' is not a detour artifact."));
 
                 var artifact = new SourceArtifact(
-                    fileName[..^3],
+                    GetNextArtifactId(cache, snippetRoot),
                     fileName,
-                    await File.ReadAllTextAsync(sourcePath, ct)
+                    loadedSource
                 );
                 cache.DetoursByName[fileName] = artifact;
                 return SourceArtifactResult.Succeeded(artifact);
             }
 
-            var artifactId = (++cache.NextArtifactId).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var artifactId = GetNextArtifactId(cache, snippetRoot);
             var sourceFileName = artifactId + ".cs";
+            cache.SourcesByName[sourceFileName] = source;
             if (snippetRoot is not null)
             {
                 Directory.CreateDirectory(snippetRoot);
                 await File.WriteAllTextAsync(Path.Combine(snippetRoot, sourceFileName), source, ct);
-                await File.WriteAllTextAsync(Path.Combine(snippetRoot, artifactId + ".kind"), "detour\n", ct);
             }
 
             var sourceArtifact = new SourceArtifact(artifactId, sourceFileName, source);
@@ -672,18 +662,52 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 GetSnippetDirectory(preserveSnippets)
             );
 
+    static async Task<string?> LoadScriptSourceAsync(
+        TargetCompilationCache cache,
+        string? snippetRoot,
+        string fileName,
+        CancellationToken ct)
+    {
+        if (cache.SourcesByName.TryGetValue(fileName, out var cached))
+            return cached;
+
+        var path = snippetRoot is null ? null : Path.Combine(snippetRoot, fileName);
+        if (path is null || !File.Exists(path))
+            return null;
+
+        var source = await File.ReadAllTextAsync(path, ct);
+        cache.SourcesByName[fileName] = source;
+        return source;
+    }
+
+    static string GetNextArtifactId(TargetCompilationCache cache, string? snippetRoot)
+    {
+        // each tool compiles shared sources differently, so their binary outputs need distinct names.
+        string artifactId;
+        do
+            artifactId = (++cache.NextArtifactId).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        while (snippetRoot is not null
+               && (File.Exists(Path.Combine(snippetRoot, artifactId + ".cs"))
+                   || File.Exists(Path.Combine(snippetRoot, artifactId + ".dll"))
+                   || File.Exists(Path.Combine(snippetRoot, artifactId + ".pdb"))));
+
+        return artifactId;
+    }
+
     static int GetHighestArtifactId(string? snippetRoot)
     {
         if (snippetRoot is null || !Directory.Exists(snippetRoot))
             return 0;
 
         int highest = 0;
-        foreach (var path in Directory.EnumerateFiles(snippetRoot, "*.cs"))
-            if (TryParseSnippetFileName(Path.GetFileName(path), out var fileName))
-                highest = Math.Max(
-                    highest,
-                    int.Parse(fileName.AsSpan(0, fileName.Length - 3), System.Globalization.CultureInfo.InvariantCulture)
-                );
+        foreach (var path in Directory.EnumerateFiles(snippetRoot))
+        {
+            var name = Path.GetFileNameWithoutExtension(path);
+            if (int.TryParse(name, out var id)
+                && id > 0
+                && name == id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                highest = Math.Max(highest, id);
+        }
 
         return highest;
     }
@@ -1083,13 +1107,12 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             Diagnostic = diagnostic,
         };
 
-    static bool TryParseSnippetFileName(string value, out string fileName)
+    static bool TryParseScriptFileName(string value, out string fileName)
     {
         fileName = string.Empty;
-        if (!value.EndsWith(".cs", StringComparison.Ordinal)
-            || !int.TryParse(value.AsSpan(0, value.Length - 3), out var id)
-            || id <= 0
-            || value != id.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".cs")
+        if (value.Length <= 3
+            || !value.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+            || value != Path.GetFileName(value))
             return false;
 
         fileName = value;
@@ -1127,6 +1150,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         internal int NextArtifactId { get; set; } = nextArtifactId;
         internal Dictionary<string, CompiledSnippet> BySource { get; } = new(StringComparer.Ordinal);
         internal Dictionary<string, CompiledSnippet> ByName { get; } = new(StringComparer.Ordinal);
+        // raw sources remain available when editor files cannot be shared with a player target.
+        internal Dictionary<string, string> SourcesByName { get; } = new(StringComparer.Ordinal);
         internal Dictionary<string, SourceArtifact> DetoursByName { get; } = new(StringComparer.Ordinal);
     }
 
