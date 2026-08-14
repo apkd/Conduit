@@ -1274,24 +1274,47 @@ jobs:
           native Linux server
               ── compiled snippet DLL ──▶ shared endpoint ──▶ Windows player
               ◀─ player reference DLL ── shared endpoint ◀── Windows player
-                                                        (UMU-Proton + Xvfb)
+                                                        (UMU-Proton + sniper + Xvfb)
           ```
 
-          The Ubuntu runner installs the latest published Ubuntu Noble UMU launcher package, then
-          runs the common player MCP scenario with `PROTONPATH=UMU-Proton`. In addition to normal
-          tool calls, the scenario requires both assembly transfers shown above and follows a player
-          restart through to discovery of the new endpoint.
+          A BuildKit-cached Ubuntu Noble image supplies .NET, the graphical host libraries, a pinned
+          UMU launcher and Proton build, and a checksum-verified Steam Runtime 3 (`sniper`). Runtime
+          updates are disabled, so the E2E step performs no launcher, Proton, or runtime setup.
 
-          A pass applies to the Windows player artifact, native Linux server, hosted-runner image,
-          and UMU/Proton versions resolved during this run. Other Wine or Proton versions,
-          distributions, GPUs, and native Windows execution have different compatibility boundaries.
+          The common player scenario requires both assembly transfers shown above and follows a
+          restart through to discovery of the new endpoint. A pass applies to the versions pinned in
+          `Proton.Dockerfile`; other Wine/Proton builds, distributions, GPUs, and native Windows
+          execution have different compatibility boundaries.
           EOF
 
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-dotnet@v5
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
         with:
-          dotnet-version: 10.0.201
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Proton image variables
+        shell: bash
+        run: |
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_TAG=ghcr.io/$repo_lc/proton-player-ci:${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "CACHE_REF=ghcr.io/$repo_lc/proton-player-ci:cache-v1" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          file: ./.github/workflows/Proton.Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_TAG }}
+          outputs: type=docker
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
 
       - uses: actions/download-artifact@v8
         with:
@@ -1303,46 +1326,23 @@ jobs:
           name: test-player-windows
           path: ${{ runner.temp }}/conduit-player
 
-      - name: Install umu and player dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -o Acquire::Retries=10
-          sudo apt-get install -y --no-install-recommends \
-            xvfb xauth libgtk-3-0 libglu1-mesa libxrandr2 libxinerama1 \
-            libxcursor1 libxi6 libxss1 libnss3 libgbm1 jq curl
-
-          release="$(curl -fsSL https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest)"
-          python_deb="$(jq -er '[.assets[].browser_download_url | select(test("python3-umu-launcher_.*_amd64_ubuntu-noble\\.deb$"))] | first' <<<"$release")"
-          launcher_deb="$(jq -er '[.assets[].browser_download_url | select(test("umu-launcher_.*_all_ubuntu-noble\\.deb$"))] | first' <<<"$release")"
-          curl -fsSL "$python_deb" -o "$RUNNER_TEMP/python3-umu-launcher.deb"
-          curl -fsSL "$launcher_deb" -o "$RUNNER_TEMP/umu-launcher.deb"
-          sudo apt-get install -y \
-            "$RUNNER_TEMP/python3-umu-launcher.deb" \
-            "$RUNNER_TEMP/umu-launcher.deb"
-          umu-run --version
-
       - name: Run Proton player E2E
         shell: bash
-        env:
-          GAMEID: umu-conduit-ci
-          STORE: none
-          PROTONPATH: UMU-Proton
-          WINEPREFIX: ${{ runner.temp }}/umu-prefix
-          XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
-          # pressure-vessel shares the runner's home, while its /tmp can be isolated.
-          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          mkdir -p "$XDG_RUNTIME_DIR"
-          chmod 700 "$XDG_RUNTIME_DIR"
           chmod +x "$RUNNER_TEMP/conduit-server/conduit-linux-x64"
-          xvfb-run -a dotnet run --file run-unity-player-mcp-e2e.cs -- \
-            --server "$RUNNER_TEMP/conduit-server/conduit-linux-x64" \
-            --player "$RUNNER_TEMP/conduit-player/conduit-player.exe" \
-            --launcher "$(command -v umu-run)" \
-            --expect-reverse-artifacts
+
+          # pressure-vessel needs nested mount and user namespaces inside the test container.
+          docker run --rm --init --privileged --shm-size=8g \
+            -v "$GITHUB_WORKSPACE:/mnt/conduit:ro" \
+            -v "$RUNNER_TEMP/conduit-server:/mnt/conduit-server:ro" \
+            -v "$RUNNER_TEMP/conduit-player:/mnt/conduit-player:ro" \
+            "$IMAGE_TAG" \
+            xvfb-run -a dotnet run --file /mnt/conduit/run-unity-player-mcp-e2e.cs -- \
+              --server /mnt/conduit-server/conduit-linux-x64 \
+              --player /mnt/conduit-player/conduit-player.exe \
+              --launcher /usr/bin/umu-run \
+              --expect-reverse-artifacts
 
   prepare:
     if: needs.version.outputs.release_requested == 'true' && github.ref == 'refs/heads/master'
