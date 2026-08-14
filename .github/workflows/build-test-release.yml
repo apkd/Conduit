@@ -22,6 +22,8 @@ permissions:
   packages: write
 
 concurrency:
+  # Scope contention to one ref, so unrelated branches and pull requests can run together.
+  # For the same ref, finish the active run; GitHub retains only the newest pending run.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
@@ -40,6 +42,26 @@ jobs:
       PACKAGE_JSON: Conduit.Unity/package.json
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Version decision
+
+          `version` validates the SemVer in `Conduit.Unity/package.json`, then makes one release
+          decision for the rest of the workflow:
+
+          | Trigger             | Condition                                             | Plan                                          |
+          | ------------------- | ----------------------------------------------------- | --------------------------------------------- |
+          | `push`              | `master`, without `[skip release]` in the head commit | bump patch                                    |
+          | `workflow_dispatch` | `master`                                              | apply the selected patch, minor or major bump |
+          | any other run       |                                                       | validate only; retain the package version     |
+
+          The job also selects the most recently created `vMAJOR.MINOR.PATCH` tag for release-note
+          comparisons. Its outputs are the release decision, the package/assembly/file/informational
+          versions and that previous tag. No repository or GitHub Release state changes here.
+          EOF
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -149,6 +171,28 @@ jobs:
             publish_target: conduit-win-x64.exe
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Release binary: `${{ matrix.rid }}`
+
+          | Artifact contract | Value                                           |
+          | ----------------- | ----------------------------------------------- |
+          | Workflow artifact | `${{ matrix.publish_name }}`                    |
+          | File              | `${{ matrix.publish_target }}`                  |
+          | Publish mode      | `Release`, self-contained, single file          |
+          | Version metadata  | values fixed by `version` for this workflow run |
+
+          The native Linux build is invoked on the runner. The musl build is invoked in Alpine
+          3.22 with its runtime libraries installed. Windows execution is deferred to the Windows
+          smoke job, where the downloaded artifact runs on its target OS.
+
+          This job establishes that the target can be published and packages the result for every
+          downstream consumer. Protocol behavior and Unity interoperability are tested later,
+          against this exact artifact rather than a rebuild.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -217,6 +261,31 @@ jobs:
             transport: http
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### `${{ matrix.platform }}` / `${{ matrix.transport }}` binary smoke
+
+          The test runs the downloaded release executable on its target hosted OS. The protocol
+          trace is deliberately short:
+
+          ```text
+          --version
+              ↓
+          launch against an isolated Unity-project fixture and fake bridge
+              ↓
+          initialize → initialized → tools/list → status
+          ```
+
+          Every message uses `${{ matrix.transport }}` (stdio or loopback HTTP). A startup error,
+          broken exchange, invalid sequence or unexpected response fails the matrix case.
+
+          The fake bridge keeps this check focused on the packaged server and transport boundary.
+          Real Unity Editor integration, broader tool coverage, musl, and sustained-load behavior
+          have dedicated jobs or remain outside this smoke test.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -244,6 +313,30 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Alpine is the test boundary
+
+          ```text
+          Ubuntu runner
+          ├─ publish smoke harness for linux-musl-x64
+          └─ Alpine 3.22 container
+             ├─ musl smoke harness
+             └─ conduit-linux-musl-x64
+                └─ stdio: initialize → tools/list → status
+          ```
+
+          Both the harness and downloaded server execute inside Alpine. This avoids treating a
+          successful build on the runner's glibc host as evidence that the musl executable can
+          start. The build matrix has already invoked `--version` in Alpine; this job advances the
+          check through the MCP exchange.
+
+          A pass covers x64 startup and the minimal stdio MCP exchange on Alpine 3.22. HTTP,
+          other distributions and architectures, and the remaining tools are outside this case.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -296,6 +389,28 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Server tests on `${{ matrix.os }}`
+
+          The repository's TUnit suite writes `test-results/dotnet.trx`; the test reporter turns
+          that file into GitHub check annotations.
+
+          | Test command | Report step                     | Final job state                  |
+          | ------------ | ------------------------------- | -------------------------------- |
+          | passes       | publishes the TRX results       | pass                             |
+          | fails        | still publishes any TRX results | fail in the explicit final guard |
+
+          `continue-on-error` applies only to the test-command step. It preserves the report path
+          while the later guard reads the command's original outcome, so a red suite cannot become
+          a green job.
+
+          Ubuntu and Windows each run the source-level server suite. The packaged executables,
+          Unity bridge and standalone players are validated elsewhere in the workflow.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -355,6 +470,31 @@ jobs:
         ]
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Unity `${{ matrix.UNITY_VERSION }}` coverage point
+
+          | Axis           | Configuration under test                         |
+          | -------------- | ------------------------------------------------ |
+          | Host           | Linux container                                  |
+          | Package        | current checkout, mounted as an embedded package |
+          | Runtime bridge | enabled through the debug-build opt-in           |
+          | Server         | this run's `conduit-linux-x64` artifact          |
+          | Suites         | EditMode, then PlayMode in the Editor            |
+
+          Unity must finish both suites and leave their NUnit XML reports behind. Reports are
+          published as check annotations even when the Unity command fails; the original command
+          outcome or missing reports then fail the job.
+
+          This is one entry in a seven-version Unity 6 matrix. Standalone player behavior is tested
+          by the player jobs; native Windows Editor behavior runs in a separate job.
+
+          > The version-scoped GHCR BuildKit cache shortens image construction. It is disposable
+          > and supplies no test evidence.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/download-artifact@v8
@@ -484,6 +624,29 @@ jobs:
       UNITY_VERSION: 6000.0.80f1
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Production exclusion invariant
+
+          ```text
+          embedded Conduit package
+          + empty consumer manifest
+          + CONDUIT_INCLUDE_IN_DEBUG_BUILDS disabled
+          + non-development Linux Mono build
+          = player build succeeds without Conduit.Unity.Runtime.dll
+          ```
+
+          Unity 6000.0.80f1 builds the fixture scene in Docker. Afterward, the job searches both
+          the project's compiled assemblies and the player output; finding the runtime MCP bridge
+          in either location is a failure.
+
+          The temporary player is build evidence only. It is neither launched nor uploaded. This
+          gate models a normal production consumer whose installed Editor tooling must stay out of
+          the shipped player.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v4
@@ -562,6 +725,31 @@ jobs:
       UNITY_VERSION: 6000.4.12f1
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Required native-Windows evidence
+
+          Unity 6000.4.12f1 is installed on the hosted Windows runner. The job creates a minimal
+          project, embeds the current package, injects this run's `conduit-win-x64` binary and runs
+          the Windows-compatible EditMode selection.
+
+          A green job requires all of the following evidence:
+
+          - Unity must exit successfully and write an NUnit report. This catches launch,
+            compilation, and test failures.
+          - Exactly one passing `ConduitMcpEndToEndTests.Initialize_Succeeds` case confirms that
+            the filter reached native MCP initialization.
+          - The report must also contain exactly one passing
+            `ConduitSetupWizardTests.ExistingConfigWithWindowsWslPathCountsAsDownloadedAndConfigured`
+            case. This is the required Windows/WSL command-path coverage.
+
+          The explicit test-case checks prevent an accidentally empty filtered run from passing.
+          PlayMode and Windows-player coverage belong to later jobs. Caching the Editor installer
+          changes download time only.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/download-artifact@v8
@@ -728,6 +916,31 @@ jobs:
       UNITY_VERSION: 6000.4.12f1
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Linux player handoff
+
+          ```text
+          current package + player manifest
+                    ↓
+          Unity 6000.4.12f1 in Docker
+          development · StandaloneLinux64 · Mono · runtime bridge enabled
+                    ↓
+          complete test-player-linux workflow artifact
+                    ↓
+          test-player-linux (launch and MCP E2E)
+          ```
+
+          This producer job stops after Unity builds the fixture scene and the complete player
+          directory is uploaded. All runtime assertions happen in the downstream job against that
+          downloaded directory.
+
+          The GHCR BuildKit cache affects Docker image preparation time only; the package checkout
+          and generated player artifact still come from this workflow run.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v4
@@ -807,6 +1020,27 @@ jobs:
       UNITY_VERSION: 6000.4.12f1
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### One Windows build, two runtime environments
+
+          Unity 6000.4.12f1 builds the fixture scene on a Windows runner using these settings:
+          development player, `StandaloneWindows64`, Mono, embedded package, and
+          `CONDUIT_INCLUDE_IN_DEBUG_BUILDS` enabled.
+
+          ```text
+          test-player-windows artifact
+          ├─ native Windows player E2E
+          └─ Ubuntu + UMU-Proton player E2E
+          ```
+
+          Uploading the complete player directory is this job's finish line. The two consumers
+          launch the same bits independently, which separates a Unity build failure from a native
+          Windows or Proton runtime failure. The cached Unity installer changes setup time only.
+          EOF
+
       - uses: actions/checkout@v6
 
       - name: Configure paths
@@ -923,6 +1157,27 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Development-player lifecycle on Linux
+
+          The E2E runner launches the downloaded Linux player under Xvfb and connects it to the
+          native `conduit-linux-x64` artifact. Its scenario advances through four phases:
+
+          1. Discover the player's endpoint, associate the project, and confirm `status` routing.
+          2. Exercise help, scene search/show, JSON mutation, and managed reflection.
+          3. Compile code on the server and run ordinary, repeated, namespace-inferred, and
+             asynchronous `execute_code` calls in the player. Screenshot and Editor-only routing
+             diagnostics are checked here as well.
+          4. Restart the player, discard the old endpoint, and discover the replacement.
+
+          Any launch, IPC, tool assertion, server, or restart-lifecycle error fails the job. The
+          scenario targets the MCP behavior of one development-player fixture; production stripping,
+          performance, rendering quality, and wider Linux compatibility require different evidence.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -958,6 +1213,28 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Native Windows pairing
+
+          | Process      | Runtime                                            |
+          | ------------ | -------------------------------------------------- |
+          | E2E driver   | .NET on the Windows hosted runner                  |
+          | MCP server   | downloaded `conduit-win-x64.exe`                   |
+          | Unity player | downloaded `test-player-windows` development build |
+
+          The shared player scenario covers endpoint discovery and project association, status/help,
+          scene reads and mutation, reflection, compiled `execute_code`, screenshot and Editor-only
+          diagnostics, then restart and replacement-endpoint discovery.
+
+          Here every process is native Windows. Failures therefore expose Windows launch, path, IPC,
+          tool, or lifecycle behavior without a compatibility layer in the middle. Production-player
+          stripping and performance are separate concerns; the Proton job reuses the player artifact
+          under translation.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -987,6 +1264,29 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Cross-runtime artifact path
+
+          ```text
+          native Linux server
+              ── compiled snippet DLL ──▶ shared endpoint ──▶ Windows player
+              ◀─ player reference DLL ── shared endpoint ◀── Windows player
+                                                        (UMU-Proton + Xvfb)
+          ```
+
+          The Ubuntu runner installs the latest published Ubuntu Noble UMU launcher package, then
+          runs the common player MCP scenario with `PROTONPATH=UMU-Proton`. In addition to normal
+          tool calls, the scenario requires both assembly transfers shown above and follows a player
+          restart through to discovery of the new endpoint.
+
+          A pass applies to the Windows player artifact, native Linux server, hosted-runner image,
+          and UMU/Proton versions resolved during this run. Other Wine or Proton versions,
+          distributions, GPUs, and native Windows execution have different compatibility boundaries.
+          EOF
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v5
@@ -1070,6 +1370,34 @@ jobs:
       PACKAGE_JSON: Conduit.Unity/package.json
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Guarded stable-release mutation
+
+          This job is reachable only for a release-requesting `master` run after every server,
+          Unity, production-consumer, and player gate has passed.
+
+          ```text
+          apply planned version to Conduit.Unity/package.json
+                            ↓
+          create local [release] [skip ci] bot commit
+                            ↓
+          fetch master and compare its tip with the tested workflow SHA
+             ├─ changed   → stop successfully; emit no release SHA
+             └─ unchanged → push commit normally
+                                  ↓
+                            push vMAJOR.MINOR.PATCH tag
+                                  ↓
+                            expose commit SHA to release
+          ```
+
+          The comparison is a snapshot. A normal, non-force branch push supplies the final guard
+          if `master` advances after that comparison. The branch and semantic tag are separate
+          pushes; GitHub Release metadata and binaries are untouched in this job.
+          EOF
+
       - name: Record target ref
         id: target
         shell: bash
@@ -1127,6 +1455,30 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Rolling stable release update
+
+          The inputs are the exact commit emitted by `prepare` and the three x64 server artifacts
+          built and tested earlier in this run: `conduit-linux-musl-x64`, `conduit-linux-x64`, and
+          `conduit-win-x64.exe`. No rebuild occurs during publication.
+
+          1. Generate installation, Unity-compatibility, and recent-commit notes from repository
+             history.
+          2. Fetch `master` again. If its tip differs from the release commit, record a skipped
+             release and leave the existing rolling release unchanged.
+          3. Force-move the `release` tag to the prepared commit, then create or edit its GitHub
+             Release and mark it Latest.
+          4. Replace the three named assets and remove every stale extra asset.
+
+          > The branch comparison is a point-in-time freshness check. Publication is serialized,
+          > but the tag push, release edit, uploads, and deletions are separate remote operations.
+          > In particular, `--clobber` deletes an existing same-name asset before uploading its
+          > replacement.
+          EOF
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -1176,7 +1528,7 @@ jobs:
           Latest changes
           --------------
           | Author | Release | Commit | SHA |
-          |---|---|---|---|
+          | ------ | ------- | ------ | --- |
           MD
 
           limit=16

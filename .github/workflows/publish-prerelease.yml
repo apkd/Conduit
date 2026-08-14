@@ -8,6 +8,8 @@ permissions:
   contents: write
 
 concurrency:
+  # Every dispatch rewrites the shared prerelease tag, metadata, and assets. Serialize those writes
+  # and let an active multi-step update finish; only the newest pending dispatch is retained.
   group: publish-prerelease
   cancel-in-progress: false
 
@@ -25,6 +27,44 @@ jobs:
       SOURCE_WORKFLOW: build-test-release.yml
 
     steps:
+      - name: Describe job
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ### Prerelease promotion contract
+
+          This manual workflow promotes existing CI output; it never rebuilds the selected commit.
+          A dispatch is eligible only when:
+
+          - the selected ref is a non-default branch;
+          - a successful push or manual `build-test-release.yml` run exists for the exact dispatch
+            branch and SHA; and
+          - that run still owns all three unexpired server artifacts.
+
+          The artifacts are downloaded by source run ID. Before any remote write, the job validates
+          the package SemVer, requires each asset to be non-empty, and resolves the branch again.
+          A moved or deleted branch fails the promotion as stale.
+
+          The requested published state is:
+
+          ```text
+          tag         prerelease → selected branch SHA
+          release     prerelease=true, draft=false, latest=false
+          assets      conduit-linux-x64
+                      conduit-linux-musl-x64
+                      conduit-win-x64.exe
+          ```
+
+          An existing release under this tag must already be a prerelease. After create or edit,
+          stale assets are deleted and the job verifies the prerelease/draft flags plus the exact
+          asset names.
+
+          The source artifacts remain subject to GitHub retention, and the shared tag can later be
+          moved to another branch. The branch check is a snapshot. On update, `--clobber` removes a
+          same-name asset before uploading its replacement, so the serialized publication sequence
+          still has a partial-update window.
+          EOF
+
       - name: Validate source branch
         shell: bash
         run: |
