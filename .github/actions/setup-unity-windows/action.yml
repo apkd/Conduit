@@ -1,5 +1,5 @@
 name: Setup cached Windows Unity Editor
-description: Restores a stripped Unity Editor or installs it on a cache miss.
+description: Restores a stripped Unity Editor or directly extracts it on a cache miss.
 
 inputs:
   unity-version:
@@ -17,7 +17,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ inputs.unity-root }}
-        key: unity-windows-editor-v1-${{ inputs.unity-version }}
+        key: unity-windows-editor-v2-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
 
     - name: Provision stripped Unity Editor
       if: steps.unity-editor-cache.outputs.cache-hit != 'true'
@@ -26,11 +26,6 @@ runs:
         UNITY_ROOT: ${{ inputs.unity-root }}
         UNITY_VERSION: ${{ inputs.unity-version }}
       run: '& "$env:GITHUB_ACTION_PATH/setup.ps1"'
-
-    - name: Install cached Editor runtime prerequisite
-      if: steps.unity-editor-cache.outputs.cache-hit == 'true'
-      shell: pwsh
-      run: '& "$env:GITHUB_ACTION_PATH/install-runtime.ps1"'
 
     - name: Validate stripped Unity Editor
       shell: pwsh
@@ -44,6 +39,9 @@ runs:
         }
         if (-not (Test-Path "$env:UNITY_ROOT\Editor\Unity.exe" -PathType Leaf)) {
           throw "Unity.exe is missing from the cached Editor."
+        }
+        if (-not (Test-Path "$env:UNITY_ROOT\Editor\Unity.dll" -PathType Leaf)) {
+          throw "Unity.dll is missing from the cached Editor."
         }
         if (-not (Test-Path "$env:UNITY_ROOT\Editor\Data\PlaybackEngines\WindowsStandaloneSupport" -PathType Container)) {
           throw "Windows Standalone support is missing from the cached Editor."

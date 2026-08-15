@@ -742,7 +742,8 @@ jobs:
 
           The explicit test-case checks prevent an accidentally empty filtered run from passing.
           PlayMode and Windows-player coverage belong to later jobs. The stripped Editor is restored
-          directly from cache; only a cache miss downloads and runs the installer.
+          directly from cache; a miss uses a parallel download and direct payload extraction without
+          running Unity's installer.
           EOF
 
       - uses: actions/checkout@v6

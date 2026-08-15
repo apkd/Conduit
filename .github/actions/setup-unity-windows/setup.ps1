@@ -49,9 +49,17 @@ $work = Join-Path $env:RUNNER_TEMP "unity-windows-editor-$env:UNITY_VERSION"
 $releasePage = Join-Path $work "whats-new.html"
 $archivePage = Join-Path $work "archive.html"
 $installer = Join-Path $work "UnitySetup64-$env:UNITY_VERSION.exe"
+$extractorRoot = Join-Path $PSScriptRoot "nsisbi-extract"
+$extractorManifest = Join-Path $extractorRoot "Cargo.toml"
+$extractor = Join-Path $extractorRoot "target\release\unity-nsisbi-extract.exe"
 
 Remove-Item -Recurse -Force $work, $env:UNITY_ROOT -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $work | Out-Null
+
+# Compile concurrently with the much larger Editor download so this cold-only cost is hidden.
+$escapedManifest = $extractorManifest.Replace('"', '\"')
+$extractorBuild = Start-Process cargo.exe -NoNewWindow -PassThru -ArgumentList `
+    "build --release --locked --manifest-path `"$escapedManifest`""
 
 Invoke-SegmentedDownload `
     -Uri "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION" `
@@ -81,14 +89,14 @@ if ($downloadMatch.Success) {
 }
 
 Write-Host "Downloading $editorUrl"
+$downloadTimer = [Diagnostics.Stopwatch]::StartNew()
 Invoke-SegmentedDownload -Uri $editorUrl -Output $installer
+$downloadTimer.Stop()
+Write-Host ("Editor download completed in {0:N1}s" -f $downloadTimer.Elapsed.TotalSeconds)
 
-$process = Start-Process $installer -Wait -PassThru -ArgumentList @(
-    "/S",
-    "/D=$env:UNITY_ROOT"
-)
-if ($process.ExitCode -ne 0) {
-    throw "Unity installer exited with code $($process.ExitCode)."
+$extractorBuild.WaitForExit()
+if ($extractorBuild.ExitCode -ne 0) {
+    throw "NSISBI extractor build exited with code $($extractorBuild.ExitCode)."
 }
 
 $unusedPaths = @(
@@ -114,9 +122,21 @@ $unusedPaths = @(
     "Editor\Data\Tools\macosx",
     "Editor\Data\Tools\usymtool"
 )
+$extractorArguments = @($installer, $env:UNITY_ROOT)
 foreach ($relativePath in $unusedPaths) {
-    Remove-Item -Recurse -Force (Join-Path $env:UNITY_ROOT $relativePath) -ErrorAction SilentlyContinue
+    $extractorArguments += "--exclude-prefix", $relativePath
 }
+foreach ($suffix in ".a", ".dbg", ".la", ".mdb", ".pdb", "_s.debug") {
+    $extractorArguments += "--exclude-suffix", $suffix
+}
+
+$extractTimer = [Diagnostics.Stopwatch]::StartNew()
+& $extractor @extractorArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "NSISBI extraction exited with code $LASTEXITCODE."
+}
+$extractTimer.Stop()
+Write-Host ("Editor extraction completed in {0:N1}s" -f $extractTimer.Elapsed.TotalSeconds)
 
 $packageManagerEditor = Join-Path $env:UNITY_ROOT "Editor\Data\Resources\PackageManager\Editor"
 if (Test-Path $packageManagerEditor) {
@@ -124,9 +144,6 @@ if (Test-Path $packageManagerEditor) {
         Where-Object { $_.Name -ne "manifest.json" } |
         Remove-Item -Force
 }
-
-Get-ChildItem -Path $env:UNITY_ROOT -File -Recurse -Include *.a,*.dbg,*.la,*.mdb,*.pdb,*_s.debug |
-    Remove-Item -Force
 
 Set-Content -NoNewline -Path "$env:UNITY_ROOT\.conduit-cache-version" -Value $env:UNITY_VERSION
 Remove-Item -Recurse -Force $work
