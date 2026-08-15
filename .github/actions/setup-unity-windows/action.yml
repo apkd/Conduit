@@ -1,5 +1,5 @@
 name: Setup cached Windows Unity Editor
-description: Restores a stripped Unity Editor or directly extracts it on a cache miss.
+description: Restores a stripped Unity Editor archive or directly extracts it on a cache miss.
 
 inputs:
   unity-version:
@@ -12,12 +12,34 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Restore stripped Unity Editor
+    - name: Restore stripped Unity Editor archive
       id: unity-editor-cache
       uses: actions/cache@v5
       with:
-        path: ${{ inputs.unity-root }}
-        key: unity-windows-editor-v2-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
+        path: ${{ runner.temp }}/unity-editor-${{ inputs.unity-version }}.tar.zst
+        key: unity-windows-editor-archive-v1-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
+
+    - name: Expand stripped Unity Editor archive
+      if: steps.unity-editor-cache.outputs.cache-hit == 'true'
+      shell: pwsh
+      env:
+        UNITY_ARCHIVE: ${{ runner.temp }}/unity-editor-${{ inputs.unity-version }}.tar.zst
+        UNITY_ROOT: ${{ inputs.unity-root }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        Remove-Item -Recurse -Force $env:UNITY_ROOT -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force $env:UNITY_ROOT | Out-Null
+        & "$env:ProgramFiles\Git\usr\bin\tar.exe" `
+          -xf $env:UNITY_ARCHIVE `
+          --force-local `
+          --use-compress-program "zstd -d" `
+          -C $env:UNITY_ROOT
+        if ($LASTEXITCODE -ne 0) {
+          throw "Unity Editor archive extraction exited with code $LASTEXITCODE."
+        }
+        $timer.Stop()
+        Write-Host ("Editor archive expansion completed in {0:N1}s" -f $timer.Elapsed.TotalSeconds)
 
     - name: Provision stripped Unity Editor
       if: steps.unity-editor-cache.outputs.cache-hit != 'true'
@@ -52,3 +74,26 @@ runs:
         if (-not (Test-Path "$env:UNITY_ROOT\Editor\Data\PlaybackEngines\WindowsStandaloneSupport" -PathType Container)) {
           throw "Windows Standalone support is missing from the cached Editor."
         }
+
+    - name: Pack stripped Unity Editor archive
+      if: steps.unity-editor-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        UNITY_ARCHIVE: ${{ runner.temp }}/unity-editor-${{ inputs.unity-version }}.tar.zst
+        UNITY_ROOT: ${{ inputs.unity-root }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        & "$env:ProgramFiles\Git\usr\bin\tar.exe" `
+          --posix `
+          -cf $env:UNITY_ARCHIVE `
+          --force-local `
+          --use-compress-program "zstd -T0 -3" `
+          -C $env:UNITY_ROOT `
+          .
+        if ($LASTEXITCODE -ne 0) {
+          throw "Unity Editor archive creation exited with code $LASTEXITCODE."
+        }
+        $timer.Stop()
+        $size = (Get-Item $env:UNITY_ARCHIVE).Length
+        Write-Host ("Editor archive creation completed in {0:N1}s ({1:N2} GiB)" -f $timer.Elapsed.TotalSeconds, ($size / 1GB))
