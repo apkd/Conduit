@@ -84,7 +84,7 @@ if ($downloadMatch.Success) {
 Write-Host "Downloading $editorUrl"
 Invoke-SegmentedDownload -Uri $editorUrl -Output $installer
 
-& 7z.exe x -y -bd -bb0 "-o$extracted" $installer
+& 7z.exe x -tNSIS -y -bd -bb0 "-o$extracted" $installer
 if ($LASTEXITCODE -ne 0) {
     throw "7-Zip failed to extract the Unity Editor."
 }
