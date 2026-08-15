@@ -741,8 +741,8 @@ jobs:
             case. This is the required Windows/WSL command-path coverage.
 
           The explicit test-case checks prevent an accidentally empty filtered run from passing.
-          PlayMode and Windows-player coverage belong to later jobs. Caching the Editor installer
-          changes download time only.
+          PlayMode and Windows-player coverage belong to later jobs. The stripped Editor is restored
+          directly from cache; a cache miss downloads and extracts it without running the installer.
           EOF
 
       - uses: actions/checkout@v6
@@ -756,42 +756,15 @@ jobs:
         shell: pwsh
         run: |
           "UNITY_ROOT=$env:RUNNER_TEMP\Unity" >> $env:GITHUB_ENV
-          "UNITY_INSTALLER=$env:RUNNER_TEMP\UnitySetup64.exe" >> $env:GITHUB_ENV
           "PROJECT=$env:RUNNER_TEMP\ConduitEditorCI" >> $env:GITHUB_ENV
           "TEST_RESULTS=$env:GITHUB_WORKSPACE\test-results\unity-editmode-windows.xml" >> $env:GITHUB_ENV
           "CONDUIT_REPO_ROOT=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
           "CONDUIT_SERVER_EXECUTABLE=$env:RUNNER_TEMP\conduit-server\conduit-win-x64.exe" >> $env:GITHUB_ENV
 
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/setup-unity-windows
         with:
-          path: ${{ runner.temp }}\UnitySetup64.exe
-          key: unity-windows-installer-v1-${{ env.UNITY_VERSION }}
-
-      - name: Install Unity Editor
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Test-Path $env:UNITY_INSTALLER)) {
-            $release = (Invoke-WebRequest "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION").Content
-            $escaped = [regex]::Escape($env:UNITY_VERSION)
-            $match = [regex]::Match(
-              $release,
-              "https://download\.unity3d\.com/download_unity/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escaped\.exe"
-            )
-            if (-not $match.Success) {
-              throw "Could not find the Windows Unity installer for $env:UNITY_VERSION."
-            }
-
-            Invoke-WebRequest $match.Value -OutFile $env:UNITY_INSTALLER
-          }
-
-          $process = Start-Process $env:UNITY_INSTALLER -Wait -PassThru -ArgumentList @(
-            "/S",
-            "/D=$env:UNITY_ROOT"
-          )
-          if ($process.ExitCode -ne 0) {
-            throw "Unity installer exited with code $($process.ExitCode)."
-          }
+          unity-version: ${{ env.UNITY_VERSION }}
+          unity-root: ${{ env.UNITY_ROOT }}
 
       - name: Prepare Unity project
         shell: pwsh
@@ -1032,7 +1005,7 @@ jobs:
 
           Uploading the complete player directory is this job's finish line. The two consumers
           launch the same bits independently, which separates a Unity build failure from a native
-          Windows or Proton runtime failure. The cached Unity installer changes setup time only.
+          Windows or Proton runtime failure. The stripped Editor cache changes setup time only.
           EOF
 
       - uses: actions/checkout@v6
@@ -1041,39 +1014,12 @@ jobs:
         shell: pwsh
         run: |
           "UNITY_ROOT=$env:RUNNER_TEMP\Unity" >> $env:GITHUB_ENV
-          "UNITY_INSTALLER=$env:RUNNER_TEMP\UnitySetup64.exe" >> $env:GITHUB_ENV
           "PROJECT=$env:RUNNER_TEMP\ConduitPlayerCI" >> $env:GITHUB_ENV
 
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/setup-unity-windows
         with:
-          path: ${{ runner.temp }}\UnitySetup64.exe
-          key: unity-windows-installer-v1-${{ env.UNITY_VERSION }}
-
-      - name: Install Unity Editor
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Test-Path $env:UNITY_INSTALLER)) {
-            $release = (Invoke-WebRequest "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION").Content
-            $escaped = [regex]::Escape($env:UNITY_VERSION)
-            $match = [regex]::Match(
-              $release,
-              "https://download\.unity3d\.com/download_unity/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escaped\.exe"
-            )
-            if (-not $match.Success) {
-              throw "Could not find the Windows Unity installer for $env:UNITY_VERSION."
-            }
-
-            Invoke-WebRequest $match.Value -OutFile $env:UNITY_INSTALLER
-          }
-
-          $process = Start-Process $env:UNITY_INSTALLER -Wait -PassThru -ArgumentList @(
-            "/S",
-            "/D=$env:UNITY_ROOT"
-          )
-          if ($process.ExitCode -ne 0) {
-            throw "Unity installer exited with code $($process.ExitCode)."
-          }
+          unity-version: ${{ env.UNITY_VERSION }}
+          unity-root: ${{ env.UNITY_ROOT }}
 
       - name: Prepare Unity project
         shell: pwsh
