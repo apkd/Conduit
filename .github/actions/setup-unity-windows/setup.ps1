@@ -49,10 +49,9 @@ $work = Join-Path $env:RUNNER_TEMP "unity-windows-editor-$env:UNITY_VERSION"
 $releasePage = Join-Path $work "whats-new.html"
 $archivePage = Join-Path $work "archive.html"
 $installer = Join-Path $work "UnitySetup64-$env:UNITY_VERSION.exe"
-$extracted = Join-Path $work "extracted"
 
 Remove-Item -Recurse -Force $work, $env:UNITY_ROOT -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $work, $extracted | Out-Null
+New-Item -ItemType Directory -Force $work | Out-Null
 
 Invoke-SegmentedDownload `
     -Uri "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION" `
@@ -84,23 +83,13 @@ if ($downloadMatch.Success) {
 Write-Host "Downloading $editorUrl"
 Invoke-SegmentedDownload -Uri $editorUrl -Output $installer
 
-& 7z.exe x -tNSIS -y -bd -bb0 "-o$extracted" $installer
-if ($LASTEXITCODE -ne 0) {
-    throw "7-Zip failed to extract the Unity Editor."
-}
-
-$unityExecutables = @(
-    Get-ChildItem -Path $extracted -Filter Unity.exe -File -Recurse |
-        Where-Object { $_.Directory.Name -eq "Editor" }
+$process = Start-Process $installer -Wait -PassThru -ArgumentList @(
+    "/S",
+    "/D=$env:UNITY_ROOT"
 )
-if ($unityExecutables.Count -ne 1) {
-    throw "Expected one extracted Editor/Unity.exe, found $($unityExecutables.Count)."
+if ($process.ExitCode -ne 0) {
+    throw "Unity installer exited with code $($process.ExitCode)."
 }
-
-$extractedRoot = $unityExecutables[0].Directory.Parent.FullName
-New-Item -ItemType Directory -Force $env:UNITY_ROOT | Out-Null
-Get-ChildItem -LiteralPath $extractedRoot -Force |
-    Move-Item -Destination $env:UNITY_ROOT
 
 $unusedPaths = @(
     "Editor\BugReporter",

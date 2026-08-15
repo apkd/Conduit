@@ -1,5 +1,5 @@
 name: Setup cached Windows Unity Editor
-description: Restores a stripped Unity Editor or provisions it without running the installer.
+description: Restores a stripped Unity Editor or installs it on a cache miss.
 
 inputs:
   unity-version:
