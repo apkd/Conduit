@@ -128,7 +128,7 @@ $extractorArguments += "--force-include", '$PLUGINSDIR\vcredist_x64.exe'
 foreach ($relativePath in $unusedPaths) {
     $extractorArguments += "--exclude-prefix", $relativePath
 }
-foreach ($suffix in ".a", ".dbg", ".la", ".mdb", ".pdb", "_s.debug") {
+foreach ($suffix in ".a", ".dbg", ".la", ".mdb", ".pdb", ".tgz", "_s.debug") {
     $extractorArguments += "--exclude-suffix", $suffix
 }
 
