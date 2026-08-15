@@ -27,7 +27,7 @@ runs:
         UNITY_VERSION: ${{ inputs.unity-version }}
       run: '& "$env:GITHUB_ACTION_PATH/setup.ps1"'
 
-    - name: Install Visual C++ 2010 runtime
+    - name: Prepare Visual C++ 2010 runtime
       shell: pwsh
       env:
         UNITY_ROOT: ${{ inputs.unity-root }}
