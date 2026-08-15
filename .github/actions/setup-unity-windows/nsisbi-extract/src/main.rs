@@ -25,6 +25,7 @@ struct Args {
     installer: PathBuf,
     output: PathBuf,
     include_prefixes: Vec<String>,
+    force_include_paths: Vec<String>,
     exclude_prefixes: Vec<String>,
     exclude_suffixes: Vec<String>,
     threads: Option<usize>,
@@ -47,6 +48,7 @@ impl Args {
             installer,
             output,
             include_prefixes: Vec::new(),
+            force_include_paths: Vec::new(),
             exclude_prefixes: Vec::new(),
             exclude_suffixes: Vec::new(),
             threads: None,
@@ -58,6 +60,9 @@ impl Args {
                 .with_context(|| format!("invalid option: {}", option.to_string_lossy()))?;
             match option {
                 "--include-prefix" => result.include_prefixes.push(next_filter(&mut arguments)?),
+                "--force-include" => result
+                    .force_include_paths
+                    .push(next_filter(&mut arguments)?),
                 "--exclude-prefix" => result.exclude_prefixes.push(next_filter(&mut arguments)?),
                 "--exclude-suffix" => result.exclude_suffixes.push(next_filter(&mut arguments)?),
                 "--threads" => {
@@ -74,6 +79,7 @@ impl Args {
 
         for filters in [
             &mut result.include_prefixes,
+            &mut result.force_include_paths,
             &mut result.exclude_prefixes,
             &mut result.exclude_suffixes,
         ] {
@@ -100,19 +106,20 @@ impl Args {
             .to_string_lossy()
             .replace('\\', "/")
             .to_ascii_lowercase();
-        (self.include_prefixes.is_empty()
-            || self
-                .include_prefixes
-                .iter()
-                .any(|prefix| has_path_prefix(&path, prefix)))
-            && !self
-                .exclude_prefixes
-                .iter()
-                .any(|prefix| has_path_prefix(&path, prefix))
-            && !self
-                .exclude_suffixes
-                .iter()
-                .any(|suffix| path.ends_with(suffix))
+        self.force_include_paths.contains(&path)
+            || ((self.include_prefixes.is_empty()
+                || self
+                    .include_prefixes
+                    .iter()
+                    .any(|prefix| has_path_prefix(&path, prefix)))
+                && !self
+                    .exclude_prefixes
+                    .iter()
+                    .any(|prefix| has_path_prefix(&path, prefix))
+                && !self
+                    .exclude_suffixes
+                    .iter()
+                    .any(|suffix| path.ends_with(suffix)))
     }
 }
 
@@ -224,10 +231,10 @@ fn safe_relative_path(path: PathBuf) -> Option<PathBuf> {
     }) {
         return None;
     }
-    if path
-        .components()
-        .any(|component| component.as_os_str().to_string_lossy().starts_with('$'))
-    {
+    if path.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        component.starts_with('$') && component != "$PLUGINSDIR"
+    }) {
         return None;
     }
     Some(path)
@@ -502,7 +509,10 @@ fn collect_files(header: &[u8], args: &Args) -> Result<BTreeMap<u64, Vec<PathBuf
                     continue;
                 }
                 let offset = read_u64(header, entry + 12)?;
-                files.entry(offset).or_default().push(relative);
+                let paths = files.entry(offset).or_default();
+                if !paths.contains(&relative) {
+                    paths.push(relative);
+                }
             }
             ASSIGN_VARIABLE_COMMAND if read_u32(header, entry + 4)? == 31 => {
                 let value = read_string(strings, unicode, read_u32(header, entry + 8)?)?;

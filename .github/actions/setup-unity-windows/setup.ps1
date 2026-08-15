@@ -123,6 +123,8 @@ $unusedPaths = @(
     "Editor\Data\Tools\usymtool"
 )
 $extractorArguments = @($installer, $env:UNITY_ROOT)
+$extractorArguments += "--exclude-prefix", '$PLUGINSDIR'
+$extractorArguments += "--force-include", '$PLUGINSDIR\vcredist_x64.exe'
 foreach ($relativePath in $unusedPaths) {
     $extractorArguments += "--exclude-prefix", $relativePath
 }
@@ -137,6 +139,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 $extractTimer.Stop()
 Write-Host ("Editor extraction completed in {0:N1}s" -f $extractTimer.Elapsed.TotalSeconds)
+
+$pluginRoot = Join-Path $env:UNITY_ROOT '$PLUGINSDIR'
+$prerequisiteRoot = Join-Path $env:UNITY_ROOT ".conduit-prerequisites"
+New-Item -ItemType Directory -Force $prerequisiteRoot | Out-Null
+Move-Item (Join-Path $pluginRoot "vcredist_x64.exe") $prerequisiteRoot
+Remove-Item -Recurse -Force $pluginRoot
 
 $packageManagerEditor = Join-Path $env:UNITY_ROOT "Editor\Data\Resources\PackageManager\Editor"
 if (Test-Path $packageManagerEditor) {
