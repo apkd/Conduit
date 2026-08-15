@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $runtimeNames = "msvcp100.dll", "msvcr100.dll"
 $editorRoot = Join-Path $env:UNITY_ROOT "Editor"
 $cachedRuntimeFiles = $runtimeNames | ForEach-Object { Join-Path $editorRoot $_ }
-if (($cachedRuntimeFiles | Where-Object { -not (Test-Path $_ -PathType Leaf) }).Count -eq 0) {
+if (@($cachedRuntimeFiles | Where-Object { -not (Test-Path $_ -PathType Leaf) }).Count -eq 0) {
     # Unity.dll resolves these beside Unity.exe; PATH also covers helper processes launched by Unity.
     $editorRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     Write-Host "Using the cached app-local Visual C++ 2010 runtime."
@@ -17,7 +17,7 @@ if (-not (Test-Path $installer -PathType Leaf)) {
     throw "The embedded Visual C++ 2010 redistributable is missing."
 }
 
-if (($systemRuntimeFiles | Where-Object { -not (Test-Path $_ -PathType Leaf) }).Count -ne 0) {
+if (@($systemRuntimeFiles | Where-Object { -not (Test-Path $_ -PathType Leaf) }).Count -ne 0) {
     $process = Start-Process $installer -Wait -PassThru -ArgumentList "/q", "/norestart"
     if ($process.ExitCode -notin 0, 1638, 3010) {
         throw "Visual C++ 2010 redistributable exited with code $($process.ExitCode)."
