@@ -144,10 +144,17 @@ public sealed class UnityBridgeClient
             commandCancellation
         );
 
+        // compilation phases exchange large player payloads; isolate each phase on a fresh fifo.
         if (!connection.IsConnected
+            || command.CommandType is BridgeCommandTypes.CompilationReferences
+                or BridgeCommandTypes.AssemblyBlob
             || result.FailureKind is BridgeRuntimeFailureKind.ProcessExited
                 or BridgeRuntimeFailureKind.SendFailed
-                or BridgeRuntimeFailureKind.SendTimedOut)
+                or BridgeRuntimeFailureKind.SendTimedOut
+                or BridgeRuntimeFailureKind.StartAckDisconnected
+                or BridgeRuntimeFailureKind.StartAckTimedOut
+                or BridgeRuntimeFailureKind.ResultDisconnected
+                or BridgeRuntimeFailureKind.ResultTimedOut)
         {
             await cacheEntry.Gate.WaitAsync(CancellationToken.None);
             try

@@ -135,22 +135,9 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: conduit-linux-x64
+          pattern: conduit-*-x64
           path: ${{ runner.temp }}/release-assets
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.source.outputs.run_id }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: conduit-linux-musl-x64
-          path: ${{ runner.temp }}/release-assets
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.source.outputs.run_id }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: conduit-win-x64
-          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
           github-token: ${{ github.token }}
           run-id: ${{ steps.source.outputs.run_id }}
 

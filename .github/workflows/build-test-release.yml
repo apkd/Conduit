@@ -18,7 +18,6 @@ on:
 permissions:
   contents: read
   checks: write
-  actions: write
   packages: write
 
 concurrency:
@@ -450,7 +449,6 @@ jobs:
       REPO_ROOT: /UnityConduitRepo
     strategy:
       fail-fast: false
-      max-parallel: 10
       matrix:
         UNITY_VERSION: [
           # 6.6
@@ -529,7 +527,7 @@ jobs:
         with:
           context: .
           file: ./.github/workflows/Dockerfile
-          push: false
+          load: true
           tags: ${{ env.IMAGE_TAG }}
           build-args: |
             UNITY_VERSION=${{ matrix.UNITY_VERSION }}
@@ -538,8 +536,6 @@ jobs:
             unity_serial=${{ secrets.UNITY_SERIAL }}
             unity_user=${{ secrets.UNITY_USER }}
             unity_password=${{ secrets.UNITY_PASSWORD }}
-          outputs: |
-            type=docker
           cache-from: type=registry,ref=${{ env.CACHE_REF }}
           cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
 
@@ -670,14 +666,13 @@ jobs:
         with:
           context: .
           file: ./.github/workflows/Dockerfile
-          push: false
+          load: true
           tags: ${{ env.IMAGE_TAG }}
           build-args: |
             UNITY_VERSION=${{ env.UNITY_VERSION }}
             PROJECT=${{ env.PROJECT }}
             PROJECT_MANIFEST=consumer
             CONDUIT_RUNTIME_DEFINE=0
-          outputs: type=docker
           cache-from: type=registry,ref=${{ env.CACHE_REF }}
           cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
 
@@ -964,13 +959,12 @@ jobs:
         with:
           context: .
           file: ./.github/workflows/Dockerfile
-          push: false
+          load: true
           tags: ${{ env.IMAGE_TAG }}
           build-args: |
             UNITY_VERSION=${{ env.UNITY_VERSION }}
             PROJECT=${{ env.PROJECT }}
             PROJECT_MANIFEST=player
-          outputs: type=docker
           cache-from: type=registry,ref=${{ env.CACHE_REF }}
           cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
 
@@ -1260,7 +1254,7 @@ jobs:
 
   test-player-proton:
     needs: [build, build-player-windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -1281,6 +1275,10 @@ jobs:
           UMU launcher and Proton build, and a checksum-verified Steam Runtime 3 (`sniper`). Runtime
           updates are disabled, so the E2E step performs no launcher, Proton, or runtime setup.
 
+          Ubuntu's host AppArmor policy normally denies the nested UID map used by Pressure Vessel.
+          The job permits unprivileged user namespaces only for its disposable runner VM, then runs
+          UMU as the image's regular user inside the privileged container.
+
           The common player scenario requires both assembly transfers shown above and follows a
           restart through to discovery of the new endpoint. A pass applies to the versions pinned in
           `Proton.Dockerfile`; other Wine/Proton builds, distributions, GPUs, and native Windows
@@ -1288,6 +1286,13 @@ jobs:
           EOF
 
       - uses: actions/checkout@v6
+
+      - name: Allow Pressure Vessel user namespaces
+        shell: bash
+        run: |
+          # Ubuntu 24.04 otherwise denies bwrap's nested UID map inside Docker. This setting
+          # disappears with the ephemeral runner VM and the Proton process remains non-root.
+          sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
 
       - uses: docker/setup-buildx-action@v4
 
@@ -1310,9 +1315,8 @@ jobs:
         with:
           context: .
           file: ./.github/workflows/Proton.Dockerfile
-          push: false
+          load: true
           tags: ${{ env.IMAGE_TAG }}
-          outputs: type=docker
           cache-from: type=registry,ref=${{ env.CACHE_REF }}
           cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=min
 
