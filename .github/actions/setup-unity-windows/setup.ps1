@@ -101,7 +101,6 @@ if ($extractorBuild.ExitCode -ne 0) {
 
 $unusedPaths = @(
     "Editor\BugReporter",
-    "Editor\Data\il2cpp",
     "Editor\Data\MonoEmbedRuntime",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_development_mono",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_nondevelopment_mono",
