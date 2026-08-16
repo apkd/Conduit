@@ -30,11 +30,13 @@ runs:
         $timer = [Diagnostics.Stopwatch]::StartNew()
         Remove-Item -Recurse -Force $env:UNITY_ROOT -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force $env:UNITY_ROOT | Out-Null
+        $archive = $env:UNITY_ARCHIVE.Replace("\", "/")
+        $unityRoot = $env:UNITY_ROOT.Replace("\", "/")
         & "$env:ProgramFiles\Git\usr\bin\tar.exe" `
-          -xf $env:UNITY_ARCHIVE `
+          -xf $archive `
           --force-local `
           --use-compress-program "zstd -d" `
-          -C $env:UNITY_ROOT
+          -C $unityRoot
         if ($LASTEXITCODE -ne 0) {
           throw "Unity Editor archive extraction exited with code $LASTEXITCODE."
         }
@@ -84,12 +86,14 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         $timer = [Diagnostics.Stopwatch]::StartNew()
+        $archive = $env:UNITY_ARCHIVE.Replace("\", "/")
+        $unityRoot = $env:UNITY_ROOT.Replace("\", "/")
         & "$env:ProgramFiles\Git\usr\bin\tar.exe" `
           --posix `
-          -cf $env:UNITY_ARCHIVE `
+          -cf $archive `
           --force-local `
           --use-compress-program "zstd -T0 -3" `
-          -C $env:UNITY_ROOT `
+          -C $unityRoot `
           .
         if ($LASTEXITCODE -ne 0) {
           throw "Unity Editor archive creation exited with code $LASTEXITCODE."
