@@ -785,11 +785,30 @@ jobs:
 
           Write-ChildSizes "$root\Editor"
           Write-ChildSizes "$root\Editor\Data"
+          Write-ChildSizes "$root\Editor\Data\MonoBleedingEdge"
+          Write-ChildSizes "$root\Editor\Data\Resources\PackageManager\BuiltInPackages"
+          Write-ChildSizes "$root\Editor\Data\Tools"
           Write-ChildSizes "$root\Editor\Data\PlaybackEngines\WindowsStandaloneSupport"
+          Write-ChildSizes "$root\Editor\Data\PlaybackEngines\WindowsStandaloneSupport\External"
           Write-ChildSizes "$root\Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations"
 
+          $files = Get-ChildItem $root -File -Recurse
+
+          Write-Host "File extension sizes"
+          $files | Group-Object Extension | ForEach-Object {
+            [pscustomobject]@{
+              Extension = if ($_.Name) { $_.Name } else { "<none>" }
+              Size = ($_.Group | Measure-Object Length -Sum).Sum
+            }
+          } | Sort-Object Size -Descending | Select-Object -First 60 | ForEach-Object {
+            Write-Host ("{0,14:N0}  {1}" -f $_.Size, $_.Extension)
+          }
+
+          $sampleSize = ($files | Where-Object FullName -Match '[\\/]Samples~[\\/]' | Measure-Object Length -Sum).Sum
+          Write-Host ("Optional package Samples~: {0:N0} bytes" -f $sampleSize)
+
           Write-Host "Largest files"
-          Get-ChildItem $root -File -Recurse |
+          $files |
             Sort-Object Length -Descending |
             Select-Object -First 80 |
             ForEach-Object {
