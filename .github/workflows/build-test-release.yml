@@ -767,6 +767,35 @@ jobs:
           unity-version: ${{ env.UNITY_VERSION }}
           unity-root: ${{ env.UNITY_ROOT }}
 
+      - name: Inventory cached Windows Unity Editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Resolve-Path $env:UNITY_ROOT).Path
+
+          function Write-ChildSizes([string] $path) {
+            Write-Host "Directory sizes under $($path.Substring($root.Length).TrimStart('\'))"
+            Get-ChildItem $path -Directory | ForEach-Object {
+              $size = (Get-ChildItem $_.FullName -File -Recurse | Measure-Object Length -Sum).Sum
+              [pscustomobject]@{ Path = $_.FullName.Substring($root.Length + 1); Size = $size }
+            } | Sort-Object Size -Descending | ForEach-Object {
+              Write-Host ("{0,14:N0}  {1}" -f $_.Size, $_.Path)
+            }
+          }
+
+          Write-ChildSizes "$root\Editor"
+          Write-ChildSizes "$root\Editor\Data"
+          Write-ChildSizes "$root\Editor\Data\PlaybackEngines\WindowsStandaloneSupport"
+          Write-ChildSizes "$root\Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations"
+
+          Write-Host "Largest files"
+          Get-ChildItem $root -File -Recurse |
+            Sort-Object Length -Descending |
+            Select-Object -First 80 |
+            ForEach-Object {
+              Write-Host ("{0,14:N0}  {1}" -f $_.Length, $_.FullName.Substring($root.Length + 1))
+            }
+
       - name: Prepare Unity project
         shell: pwsh
         run: |
