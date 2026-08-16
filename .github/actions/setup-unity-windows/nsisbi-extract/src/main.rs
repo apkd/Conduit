@@ -5,6 +5,10 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
+    sync::{
+        mpsc::{sync_channel, Receiver},
+        Arc,
+    },
 };
 
 use anyhow::{bail, Context, Result};
@@ -254,30 +258,36 @@ fn decode_chunk(input: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 // Unity's NSIS fork splits one solid data stream into independent LZMA chunks.
-// Decoding a small batch in parallel preserves stream order without retaining the 7+ GiB payload.
-struct SolidReader<'a> {
-    input: &'a [u8],
+// Decode one batch ahead so output and filtering overlap the next batch's CPU work.
+struct SolidReader {
+    input: Arc<Mmap>,
     compressed_position: usize,
     decoded: Vec<Vec<u8>>,
     decoded_chunk: usize,
     decoded_position: usize,
     logical_position: u64,
+    pool: Arc<rayon::ThreadPool>,
+    pending: Option<Receiver<io::Result<Vec<Vec<u8>>>>>,
 }
 
-impl<'a> SolidReader<'a> {
-    fn new(input: &'a [u8]) -> Self {
-        Self {
+impl SolidReader {
+    fn new(input: Arc<Mmap>, compressed_position: usize, pool: Arc<rayon::ThreadPool>) -> Self {
+        let mut reader = Self {
             input,
-            compressed_position: 0,
+            compressed_position,
             decoded: Vec::new(),
             decoded_chunk: 0,
             decoded_position: 0,
             logical_position: 0,
-        }
+            pool,
+            pending: None,
+        };
+        reader.schedule_batch();
+        reader
     }
 
-    fn load_batch(&mut self) -> io::Result<bool> {
-        let mut chunks = Vec::with_capacity(rayon::current_num_threads() * 2);
+    fn schedule_batch(&mut self) -> bool {
+        let mut chunks = Vec::with_capacity(self.pool.current_num_threads() * 2);
         while chunks.len() < chunks.capacity() {
             let Some(length) = self
                 .input
@@ -287,25 +297,43 @@ impl<'a> SolidReader<'a> {
             };
             let length = u32::from_le_bytes([length[0], length[1], length[2], 0]) as usize;
             let start = self.compressed_position + 3;
-            let Some(chunk) = self.input.get(start..start.saturating_add(length)) else {
+            let end = start.saturating_add(length);
+            if self.input.get(start..end).is_none() {
                 break;
-            };
+            }
             if length < 5 {
                 break;
             }
-            chunks.push(chunk);
-            self.compressed_position = start + length;
+            chunks.push((start, end));
+            self.compressed_position = end;
         }
         if chunks.is_empty() {
-            return Ok(false);
+            return false;
         }
 
-        self.decoded = chunks
-            .par_iter()
-            .map(|chunk| decode_chunk(chunk))
-            .collect::<io::Result<Vec<_>>>()?;
+        let input = Arc::clone(&self.input);
+        let (sender, receiver) = sync_channel(1);
+        self.pool.spawn_fifo(move || {
+            let decoded = chunks
+                .par_iter()
+                .map(|&(start, end)| decode_chunk(&input[start..end]))
+                .collect::<io::Result<Vec<_>>>();
+            let _ = sender.send(decoded);
+        });
+        self.pending = Some(receiver);
+        true
+    }
+
+    fn load_batch(&mut self) -> io::Result<bool> {
+        let Some(receiver) = self.pending.take() else {
+            return Ok(false);
+        };
+        self.decoded = receiver
+            .recv()
+            .map_err(|_| invalid_data("NSISBI decoder stopped unexpectedly"))??;
         self.decoded_chunk = 0;
         self.decoded_position = 0;
+        self.schedule_batch();
         Ok(true)
     }
 
@@ -338,7 +366,7 @@ impl<'a> SolidReader<'a> {
     }
 }
 
-impl Read for SolidReader<'_> {
+impl Read for SolidReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() || !self.ensure_data()? {
             return Ok(0);
@@ -360,27 +388,28 @@ fn invalid_data(error: impl ToString) -> io::Error {
 
 fn main() -> Result<()> {
     let args = Args::parse()?;
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-        }))
-        .build()?;
-    pool.install(|| extract(&args))
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(1)
+            }))
+            .build()?,
+    );
+    extract(&args, pool)
 }
 
-fn extract(args: &Args) -> Result<()> {
+fn extract(args: &Args, pool: Arc<rayon::ThreadPool>) -> Result<()> {
     let file = File::open(&args.installer)?;
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
+    let mmap = Arc::new(unsafe { MmapOptions::new().map(&file)? });
     let (header, data_offset) = read_header(&mmap)?;
     let files = collect_files(&header, args)?;
     let file_count = files.values().map(Vec::len).sum::<usize>();
 
-    let data = mmap
-        .get(data_offset..)
+    mmap.get(data_offset..)
         .context("missing NSISBI data block")?;
-    let mut reader = SolidReader::new(data);
+    let mut reader = SolidReader::new(mmap, data_offset, pool);
     let mut extracted_bytes = 0u64;
     let mut buffer = vec![0; 1024 * 1024];
     for (offset, paths) in files {
