@@ -102,11 +102,6 @@ if ($extractorBuild.ExitCode -ne 0) {
 $unusedPaths = @(
     "Editor\BugReporter",
     "Editor\Data\MonoEmbedRuntime",
-    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_development_mono",
-    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_nondevelopment_mono",
-    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win64_player_nondevelopment_mono",
-    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_development_mono",
-    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_nondevelopment_mono",
     "Editor\Data\Resources\GI",
     "Editor\Data\Resources\OpenRL",
     "Editor\Data\Resources\PackageManager\Diagnostics",
@@ -128,12 +123,13 @@ $unusedPaths = @(
     "Editor\Data\Tools\usymtool"
 )
 $extractorArguments = @($installer, $env:UNITY_ROOT)
+$extractorArguments += "--exclude-component", "Samples~"
 $extractorArguments += "--exclude-prefix", '$PLUGINSDIR'
 $extractorArguments += "--force-include", '$PLUGINSDIR\vcredist_x64.exe'
 foreach ($relativePath in $unusedPaths) {
     $extractorArguments += "--exclude-prefix", $relativePath
 }
-foreach ($suffix in ".a", ".dbg", ".la", ".mdb", ".pdb", ".tgz", "_s.debug") {
+foreach ($suffix in ".a", ".dbg", ".dylib", ".la", ".mdb", ".pdb", ".tgz", "_s.debug") {
     $extractorArguments += "--exclude-suffix", $suffix
 }
 

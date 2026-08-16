@@ -30,6 +30,7 @@ struct Args {
     output: PathBuf,
     include_prefixes: Vec<String>,
     force_include_paths: Vec<String>,
+    exclude_components: Vec<String>,
     exclude_prefixes: Vec<String>,
     exclude_suffixes: Vec<String>,
     threads: Option<usize>,
@@ -53,6 +54,7 @@ impl Args {
             output,
             include_prefixes: Vec::new(),
             force_include_paths: Vec::new(),
+            exclude_components: Vec::new(),
             exclude_prefixes: Vec::new(),
             exclude_suffixes: Vec::new(),
             threads: None,
@@ -67,6 +69,9 @@ impl Args {
                 "--force-include" => result
                     .force_include_paths
                     .push(next_filter(&mut arguments)?),
+                "--exclude-component" => {
+                    result.exclude_components.push(next_filter(&mut arguments)?)
+                }
                 "--exclude-prefix" => result.exclude_prefixes.push(next_filter(&mut arguments)?),
                 "--exclude-suffix" => result.exclude_suffixes.push(next_filter(&mut arguments)?),
                 "--threads" => {
@@ -84,6 +89,7 @@ impl Args {
         for filters in [
             &mut result.include_prefixes,
             &mut result.force_include_paths,
+            &mut result.exclude_components,
             &mut result.exclude_prefixes,
             &mut result.exclude_suffixes,
         ] {
@@ -116,6 +122,10 @@ impl Args {
                     .include_prefixes
                     .iter()
                     .any(|prefix| has_path_prefix(&path, prefix)))
+                && !self
+                    .exclude_components
+                    .iter()
+                    .any(|component| path.split('/').any(|part| part == component))
                 && !self
                     .exclude_prefixes
                     .iter()
