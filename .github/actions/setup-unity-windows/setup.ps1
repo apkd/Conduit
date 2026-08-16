@@ -48,55 +48,67 @@ function Invoke-SegmentedDownload {
 $work = Join-Path $env:RUNNER_TEMP "unity-windows-editor-$env:UNITY_VERSION"
 $releasePage = Join-Path $work "whats-new.html"
 $archivePage = Join-Path $work "archive.html"
-$installer = Join-Path $work "UnitySetup64-$env:UNITY_VERSION.exe"
+$installer = $env:UNITY_INSTALLER
 $extractorRoot = Join-Path $PSScriptRoot "nsisbi-extract"
 $extractorManifest = Join-Path $extractorRoot "Cargo.toml"
-$extractor = Join-Path $extractorRoot "target\release\unity-nsisbi-extract.exe"
+$builtExtractor = Join-Path $extractorRoot "target\release\unity-nsisbi-extract.exe"
+$extractor = $env:UNITY_EXTRACTOR
 
 Remove-Item -Recurse -Force $work, $env:UNITY_ROOT -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $work | Out-Null
 
-# Compile concurrently with the much larger Editor download so this cold-only cost is hidden.
-$escapedManifest = $extractorManifest.Replace('"', '\"')
-$extractorBuild = Start-Process cargo.exe -NoNewWindow -PassThru -ArgumentList `
-    "build --release --locked --manifest-path `"$escapedManifest`""
-
-Invoke-SegmentedDownload `
-    -Uri "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION" `
-    -Output $releasePage `
-    -Connections 1
-
-$escapedVersion = [regex]::Escape($env:UNITY_VERSION)
-$downloadPattern = "https?://(?:download\.unity3d\.com/download_unity|beta\.unity3d\.com/download)/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escapedVersion\.exe"
-$downloadMatch = [regex]::Match((Get-Content -Raw $releasePage), $downloadPattern)
-if ($downloadMatch.Success) {
-    $editorUrl = $downloadMatch.Value
-} else {
-    Invoke-SegmentedDownload `
-        -Uri "https://unity.com/releases/editor/archive" `
-        -Output $archivePage `
-        -Connections 1
-    $revisionMatch = [regex]::Match(
-        (Get-Content -Raw $archivePage),
-        "unityhub://$escapedVersion/(?<revision>[0-9a-f]+)"
-    )
-    if (-not $revisionMatch.Success) {
-        throw "Could not resolve the Unity revision for $env:UNITY_VERSION."
-    }
-
-    $revision = $revisionMatch.Groups["revision"].Value
-    $editorUrl = "https://download.unity3d.com/download_unity/$revision/Windows64EditorInstaller/UnitySetup64-$env:UNITY_VERSION.exe"
+$extractorBuild = $null
+if (-not (Test-Path $extractor -PathType Leaf)) {
+    # Compile concurrently with the much larger Editor download so this cold-only cost is hidden.
+    $escapedManifest = $extractorManifest.Replace('"', '\"')
+    $extractorBuild = Start-Process cargo.exe -NoNewWindow -PassThru -ArgumentList `
+        "build --release --locked --manifest-path `"$escapedManifest`""
 }
 
-Write-Host "Downloading $editorUrl"
-$downloadTimer = [Diagnostics.Stopwatch]::StartNew()
-Invoke-SegmentedDownload -Uri $editorUrl -Output $installer
-$downloadTimer.Stop()
-Write-Host ("Editor download completed in {0:N1}s" -f $downloadTimer.Elapsed.TotalSeconds)
+if (-not (Test-Path $installer -PathType Leaf)) {
+    Invoke-SegmentedDownload `
+        -Uri "https://unity.com/releases/editor/whats-new/$env:UNITY_VERSION" `
+        -Output $releasePage `
+        -Connections 1
 
-$extractorBuild.WaitForExit()
-if ($extractorBuild.ExitCode -ne 0) {
-    throw "NSISBI extractor build exited with code $($extractorBuild.ExitCode)."
+    $escapedVersion = [regex]::Escape($env:UNITY_VERSION)
+    $downloadPattern = "https?://(?:download\.unity3d\.com/download_unity|beta\.unity3d\.com/download)/[0-9a-f]+/Windows64EditorInstaller/UnitySetup64-$escapedVersion\.exe"
+    $downloadMatch = [regex]::Match((Get-Content -Raw $releasePage), $downloadPattern)
+    if ($downloadMatch.Success) {
+        $editorUrl = $downloadMatch.Value
+    } else {
+        Invoke-SegmentedDownload `
+            -Uri "https://unity.com/releases/editor/archive" `
+            -Output $archivePage `
+            -Connections 1
+        $revisionMatch = [regex]::Match(
+            (Get-Content -Raw $archivePage),
+            "unityhub://$escapedVersion/(?<revision>[0-9a-f]+)"
+        )
+        if (-not $revisionMatch.Success) {
+            throw "Could not resolve the Unity revision for $env:UNITY_VERSION."
+        }
+
+        $revision = $revisionMatch.Groups["revision"].Value
+        $editorUrl = "https://download.unity3d.com/download_unity/$revision/Windows64EditorInstaller/UnitySetup64-$env:UNITY_VERSION.exe"
+    }
+
+    Write-Host "Downloading $editorUrl"
+    $downloadTimer = [Diagnostics.Stopwatch]::StartNew()
+    Invoke-SegmentedDownload -Uri $editorUrl -Output $installer
+    $downloadTimer.Stop()
+    Write-Host ("Editor download completed in {0:N1}s" -f $downloadTimer.Elapsed.TotalSeconds)
+} else {
+    Write-Host "Using the cached Unity Editor installer."
+}
+
+if ($null -ne $extractorBuild) {
+    $extractorBuild.WaitForExit()
+    if ($extractorBuild.ExitCode -ne 0) {
+        throw "NSISBI extractor build exited with code $($extractorBuild.ExitCode)."
+    }
+
+    Copy-Item $builtExtractor $extractor
 }
 
 $unusedPaths = @(

@@ -1,5 +1,5 @@
 name: Setup cached Windows Unity Editor
-description: Restores a stripped Unity Editor or directly extracts it on a cache miss.
+description: Restores the Unity installer and directly extracts a stripped Editor for every job.
 
 inputs:
   unity-version:
@@ -12,17 +12,20 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Restore stripped Unity Editor
-      id: unity-editor-cache
+    - name: Restore Unity installer and extraction tools
       uses: actions/cache@v5
       with:
-        path: ${{ inputs.unity-root }}
-        key: unity-windows-editor-v2-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
+        path: |
+          ${{ runner.temp }}/UnitySetup64-${{ inputs.unity-version }}.exe
+          ${{ runner.temp }}/unity-nsisbi-extract-${{ inputs.unity-version }}.exe
+          ${{ runner.temp }}/unity-vc100
+        key: unity-windows-installer-v1-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
 
     - name: Provision stripped Unity Editor
-      if: steps.unity-editor-cache.outputs.cache-hit != 'true'
       shell: pwsh
       env:
+        UNITY_EXTRACTOR: ${{ runner.temp }}/unity-nsisbi-extract-${{ inputs.unity-version }}.exe
+        UNITY_INSTALLER: ${{ runner.temp }}/UnitySetup64-${{ inputs.unity-version }}.exe
         UNITY_ROOT: ${{ inputs.unity-root }}
         UNITY_VERSION: ${{ inputs.unity-version }}
       run: '& "$env:GITHUB_ACTION_PATH/setup.ps1"'
@@ -31,6 +34,7 @@ runs:
       shell: pwsh
       env:
         UNITY_ROOT: ${{ inputs.unity-root }}
+        UNITY_RUNTIME_CACHE: ${{ runner.temp }}/unity-vc100
       run: '& "$env:GITHUB_ACTION_PATH/install-runtime.ps1"'
 
     - name: Validate stripped Unity Editor
