@@ -123,6 +123,7 @@ $unusedPaths = @(
     "Editor\Data\Tools\usymtool"
 )
 $extractorArguments = @($installer, $env:UNITY_ROOT)
+$extractorArguments += "--threads", "8"
 $extractorArguments += "--exclude-prefix", '$PLUGINSDIR'
 $extractorArguments += "--force-include", '$PLUGINSDIR\vcredist_x64.exe'
 foreach ($relativePath in $unusedPaths) {
@@ -133,6 +134,7 @@ foreach ($suffix in ".a", ".dbg", ".la", ".mdb", ".pdb", ".tgz", "_s.debug") {
 }
 
 $extractTimer = [Diagnostics.Stopwatch]::StartNew()
+Write-Host "Extracting with 8 workers on $env:NUMBER_OF_PROCESSORS logical processors."
 & $extractor @extractorArguments
 if ($LASTEXITCODE -ne 0) {
     throw "NSISBI extraction exited with code $LASTEXITCODE."
