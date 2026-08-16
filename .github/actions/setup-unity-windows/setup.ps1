@@ -101,9 +101,14 @@ if ($extractorBuild.ExitCode -ne 0) {
 
 $unusedPaths = @(
     "Editor\BugReporter",
+    "Editor\embree.dll",
+    "Editor\nvngx_dlss.dll",
+    "Editor\OpenImageDenoise.dll",
+    "Editor\OpenRL.dll",
     "Editor\Data\MonoEmbedRuntime",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_development_mono",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_nondevelopment_mono",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win64_player_development_mono\nvngx_dlss.dll",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win64_player_nondevelopment_mono",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_development_mono",
     "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_nondevelopment_mono",
@@ -131,6 +136,8 @@ $unusedPaths = @(
     "Editor\Data\Resources\PackageManager\BuiltInPackages\com.unity.ugui",
     "Editor\Data\Resources\PackageManager\BuiltInPackages\com.unity.visualeffectgraph",
     "Editor\Data\Tools\LightBaker",
+    "Editor\Data\Tools\embree.dll",
+    "Editor\Data\Tools\OpenRL.dll",
     "Editor\Data\Tools\PVRTexTool",
     "Editor\Data\Tools\VersionControl",
     "Editor\Data\Tools\macosx",
