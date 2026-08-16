@@ -102,6 +102,11 @@ if ($extractorBuild.ExitCode -ne 0) {
 $unusedPaths = @(
     "Editor\BugReporter",
     "Editor\Data\MonoEmbedRuntime",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_development_mono",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win32_player_nondevelopment_mono",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win64_player_nondevelopment_mono",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_development_mono",
+    "Editor\Data\PlaybackEngines\WindowsStandaloneSupport\Variations\win_arm64_player_nondevelopment_mono",
     "Editor\Data\Resources\GI",
     "Editor\Data\Resources\OpenRL",
     "Editor\Data\Resources\PackageManager\Diagnostics",
