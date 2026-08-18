@@ -443,7 +443,6 @@ public sealed class UnityBridgeClientTests
 
         var outcome = await connection.WaitForCommandStartedAsync(
             pending,
-            TimeSpan.FromSeconds(1),
             CancellationToken.None,
             CancellationToken.None
         );

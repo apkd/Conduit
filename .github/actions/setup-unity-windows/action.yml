@@ -1,0 +1,44 @@
+name: Setup cached Windows Unity Editor
+description: Restores a stripped Unity Editor or directly extracts it on a cache miss.
+
+inputs:
+  unity-version:
+    description: Unity Editor version to provision.
+    required: true
+  unity-root:
+    description: Destination for the runnable Unity Editor.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # cache the runnable tree rather than the installer so hot jobs avoid both extraction and setup.
+    # hashing this action's complete source invalidates the payload whenever its filters change.
+    - name: Restore stripped Unity Editor
+      id: unity-editor-cache
+      uses: actions/cache@v5
+      with:
+        path: ${{ inputs.unity-root }}
+        key: unity-windows-editor-${{ inputs.unity-version }}-${{ hashFiles('.github/actions/setup-unity-windows/**') }}
+
+    - name: Provision stripped Unity Editor
+      if: steps.unity-editor-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        UNITY_ROOT: ${{ inputs.unity-root }}
+        UNITY_VERSION: ${{ inputs.unity-version }}
+      run: '& "$env:GITHUB_ACTION_PATH/setup.ps1"'
+
+    # a miss seeds app-local runtime DLLs into the tree before actions/cache saves it.
+    - name: Prepare Visual C++ 2010 runtime
+      if: steps.unity-editor-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        UNITY_ROOT: ${{ inputs.unity-root }}
+      run: '& "$env:GITHUB_ACTION_PATH/install-runtime.ps1"'
+
+    - name: Add Unity Editor to PATH
+      shell: pwsh
+      env:
+        UNITY_ROOT: ${{ inputs.unity-root }}
+      run: 'Add-Content -Path $env:GITHUB_PATH -Value "$env:UNITY_ROOT\Editor"'

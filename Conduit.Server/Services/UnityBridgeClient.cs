@@ -15,7 +15,6 @@ public sealed class UnityBridgeClient
     static readonly TimeSpan connectAttemptTimeout = TimeSpan.FromMilliseconds(750);
     static readonly TimeSpan initialConnectWindow = TimeSpan.FromSeconds(15);
     static readonly TimeSpan connectRetryDelay = TimeSpan.FromMilliseconds(250);
-    static readonly TimeSpan commandStartTimeout = TimeSpan.FromSeconds(5);
     static readonly TimeSpan commandCancellationSendTimeout = TimeSpan.FromSeconds(2);
     static readonly UTF8Encoding utf8NoBom = new(false);
     static readonly byte[] newline = [(byte)'\n'];
@@ -250,7 +249,7 @@ public sealed class UnityBridgeClient
                 cancellationMonitorCts.Token
             );
 
-            var startWaitTask = connection.WaitForCommandStartedAsync(pending, commandStartTimeout, effectiveToken, ct);
+            var startWaitTask = connection.WaitForCommandStartedAsync(pending, effectiveToken, ct);
             if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
             {
                 var completedStartTask = await Task.WhenAny(startWaitTask, processExitStartTask);
@@ -1347,15 +1346,12 @@ public sealed class UnityBridgeClient
 
         public async Task<CommandStartOutcome> WaitForCommandStartedAsync(
             PendingRequest pending,
-            TimeSpan timeout,
-            CancellationToken ct,
+            CancellationToken timeoutToken,
             CancellationToken callerToken)
         {
-            using var startTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            startTimeoutCts.CancelAfter(timeout);
             try
             {
-                return await pending.Started.WaitAsync(startTimeoutCts.Token);
+                return await pending.Started.WaitAsync(timeoutToken);
             }
             catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
             {
@@ -1367,7 +1363,7 @@ public sealed class UnityBridgeClient
                             ? BridgeRuntimeFailureKind.StartAckTimedOut
                             : BridgeRuntimeFailureKind.StartAckDisconnected,
                         IsConnected
-                            ? $"Unity did not acknowledge starting '{pending.CommandType}' within {timeout}."
+                            ? $"Unity did not acknowledge starting '{pending.CommandType}' before the command deadline."
                             : $"The Unity connection closed before '{pending.CommandType}' acknowledged starting.",
                         pending.CommandSent
                     )

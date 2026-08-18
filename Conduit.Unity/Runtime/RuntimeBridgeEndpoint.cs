@@ -109,7 +109,6 @@ namespace Conduit.Runtime
                 try
                 {
                     await Task.Delay(leaseInterval, ct).ConfigureAwait(false);
-                    descriptor.last_seen_utc = DateTimeOffset.UtcNow.ToString("O");
                     WriteDescriptor();
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -240,7 +239,8 @@ namespace Conduit.Runtime
                     && request.project.session_instance_id != descriptor.session_instance_id)
                     return;
 
-                handshake.last_seen_utc = DateTimeOffset.UtcNow.ToString("O");
+                // an accepted connection is direct proof of liveness even if the periodic lease was delayed.
+                handshake.last_seen_utc = WriteDescriptor();
                 await connection.WriteAsync(
                     BridgeProtocol.Serialize(BridgeMessage.CreateHello(handshake)),
                     endpointToken
@@ -308,15 +308,21 @@ namespace Conduit.Runtime
             }
         }
 
-        void WriteDescriptor()
+        string WriteDescriptor()
         {
-            var path = Path.Combine(endpointDirectory, "endpoint.json");
-            var temporaryPath = path + ".tmp";
-            File.WriteAllText(temporaryPath, JsonUtility.ToJson(descriptor), utf8NoBom);
-            if (File.Exists(path))
-                File.Replace(temporaryPath, path, null);
-            else
-                File.Move(temporaryPath, path);
+            lock (descriptor)
+            {
+                var lastSeenUtc = DateTimeOffset.UtcNow.ToString("O");
+                descriptor.last_seen_utc = lastSeenUtc;
+                var path = Path.Combine(endpointDirectory, "endpoint.json");
+                var temporaryPath = path + ".tmp";
+                File.WriteAllText(temporaryPath, JsonUtility.ToJson(descriptor), utf8NoBom);
+                if (File.Exists(path))
+                    File.Replace(temporaryPath, path, null);
+                else
+                    File.Move(temporaryPath, path);
+                return lastSeenUtc;
+            }
         }
 
         static async Task DelayAfterFailureAsync(CancellationToken ct)
