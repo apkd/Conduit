@@ -1021,7 +1021,6 @@ public sealed class UnityProjectOperations(
             }
 
             var execution = await ExecuteReplayableCommandAsync(commandTimeout);
-            await RecoverTimedOutTestCommandAsync(commandKind, queuedCommand.Session.ProjectPath, execution);
             var result = execution.Result
                          ?? ToToolExecutionResult(
                              queuedCommand.Session.ProjectPath,
@@ -1084,50 +1083,6 @@ public sealed class UnityProjectOperations(
             reachable = execution.FailureKind != BridgeRuntimeFailureKind.ProcessExited;
             monitoredProcessId = handshake.EditorProcessId > 0 ? handshake.EditorProcessId : monitoredProcessId;
             await projectRegistry.UpdateFromHandshakeAsync(handshake, ct);
-        }
-
-        async Task RecoverTimedOutTestCommandAsync(BridgeCommandKind currentCommandKind, string projectPath, BridgeClientResult execution)
-        {
-            if (!ShouldRecoverTimedOutTestCommand(currentCommandKind, execution))
-                return;
-
-            logger.LogWarning(
-                "Unity test command '{CommandType}' timed out for project {ProjectPath}. Starting automatic editor recovery.",
-                queuedCommand.Command.CommandType,
-                projectPath
-            );
-
-            using var recoveryCts = CancellationTokenSource.CreateLinkedTokenSource(applicationLifetime.ApplicationStopping);
-            recoveryCts.CancelAfter(UnityToolTimeouts.RestartStartupMax);
-
-            try
-            {
-                var recoveryResult = await RestartAsync(
-                    projectPath,
-                    trackUsage: false,
-                    recoveryCts.Token
-                );
-                logger.LogInformation(
-                    "Automatic recovery for timed out Unity test command '{CommandType}' completed with outcome {Outcome}.",
-                    queuedCommand.Command.CommandType,
-                    recoveryResult.Outcome
-                );
-            }
-            catch (OperationCanceledException) when (recoveryCts.IsCancellationRequested)
-            {
-                logger.LogWarning(
-                    "Automatic recovery for timed out Unity test command '{CommandType}' timed out or was cancelled.",
-                    queuedCommand.Command.CommandType
-                );
-            }
-            catch (Exception exception)
-            {
-                logger.LogError(
-                    exception,
-                    "Automatic recovery for timed out Unity test command '{CommandType}' failed.",
-                    queuedCommand.Command.CommandType
-                );
-            }
         }
     }
 
@@ -1277,13 +1232,6 @@ public sealed class UnityProjectOperations(
             or BridgeRuntimeFailureKind.StartAckTimedOut
             or BridgeRuntimeFailureKind.ResultDisconnected
             or BridgeRuntimeFailureKind.ResultTimedOut;
-
-    internal static bool ShouldRecoverTimedOutTestCommand(BridgeCommandKind currentCommandKind, BridgeClientResult execution) =>
-        BridgeCommandKinds.IsTest(currentCommandKind)
-        && execution.Handshake is not null
-        && (execution.FailureKind is BridgeRuntimeFailureKind.SendTimedOut
-            or BridgeRuntimeFailureKind.StartAckTimedOut
-            or BridgeRuntimeFailureKind.ResultTimedOut);
 
     public static bool ShouldReportReachableStatus(BridgeClientResult execution) =>
         execution.Handshake is not null
