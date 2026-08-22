@@ -4,6 +4,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using Unity.Collections;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -43,6 +44,7 @@ namespace Conduit
                 Mathf.Max(1, source.width),
                 Mathf.Max(1, source.height)
             );
+            var previousActive = RenderTexture.active;
             try
             {
                 Graphics.Blit(
@@ -55,6 +57,7 @@ namespace Conduit
             }
             finally
             {
+                RenderTexture.active = previousActive;
                 staging.Release();
                 Object.DestroyImmediate(staging);
             }
@@ -66,7 +69,8 @@ namespace Conduit
             int quality = 95)
         {
 #if MODULE_IMAGECONVERSION
-            if (!SystemInfo.supportsAsyncGPUReadback)
+            // inactive editors can stop dispatching async readback callbacks until an OS window is focused
+            if (!SystemInfo.supportsAsyncGPUReadback || !InternalEditorUtility.isApplicationActive)
             {
                 SaveSynchronously(source, path, quality);
                 return;
@@ -82,14 +86,18 @@ namespace Conduit
                 var completion = new TaskCompletionSource<AsyncGPUReadbackRequest>(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 );
-                AsyncGPUReadback.RequestIntoNativeArray(
+                var request = AsyncGPUReadback.RequestIntoNativeArray(
                     ref pixels,
                     source,
                     0,
                     TextureFormat.RGBA32,
                     request => completion.TrySetResult(request)
                 );
-                var request = await completion.Task;
+                if (await Task.WhenAny(completion.Task, Task.Delay(1000)) == completion.Task)
+                    request = await completion.Task;
+                else
+                    request.WaitForCompletion();
+
                 if (request.hasError)
                     throw new InvalidOperationException("Unity reported an asynchronous GPU readback error.");
 

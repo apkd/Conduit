@@ -121,12 +121,17 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(target["window:".Length..].Trim()))
                 throw new InvalidOperationException("Editor window screenshot target was empty.");
 
+            var initialState = EditorCaptureSource.EditorWindowState.Capture();
             return ConduitSearchUtility.Resolve(target) switch
             {
                 { Count: 0 }           => $"No matches for '{target}'.",
                 { Count: 1 } matches   => matches[0].Target is EditorWindow window
                     ? await CaptureLiveEditorSourceAsync(
-                        target,
+                        await EditorCaptureSource.CreateWindowAsync(
+                            window,
+                            ConduitSearchUtility.GetEditorWindowDisplayName(window),
+                            initialState
+                        ),
                         ConduitSearchUtility.GetEditorWindowDisplayName(window)
                     )
                     : throw new InvalidOperationException($"Target '{matches[0].Name}' is not an editor window."),
@@ -402,25 +407,35 @@ namespace Conduit
         }
 
         static async Task<string> CaptureLiveEditorSourceAsync(string target, string prefix)
-        {
-            using var source = await EditorCaptureSource.CreateAsync(target);
-            var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
-            try
-            {
-                if (!source.TryCapture(staging, out var diagnostic))
-                    throw new InvalidOperationException(diagnostic);
+            => await CaptureLiveEditorSourceAsync(
+                await EditorCaptureSource.CreateAsync(target),
+                prefix
+            );
 
-                var outputPath = AllocateOutputPath(
-                    ConduitAssetPathUtility.GetProjectRootPath(),
-                    prefix
-                );
-                await GpuCapture.SavePreparedJpegAsync(staging, outputPath.absolute_path);
-                return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
-            }
-            finally
+        static async Task<string> CaptureLiveEditorSourceAsync(
+            EditorCaptureSource source,
+            string prefix)
+        {
+            using (source)
             {
-                staging.Release();
-                Object.DestroyImmediate(staging);
+                var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
+                try
+                {
+                    if (!source.TryCapture(staging, out var diagnostic))
+                        throw new InvalidOperationException(diagnostic);
+
+                    var outputPath = AllocateOutputPath(
+                        ConduitAssetPathUtility.GetProjectRootPath(),
+                        prefix
+                    );
+                    await GpuCapture.SavePreparedJpegAsync(staging, outputPath.absolute_path);
+                    return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+                }
+                finally
+                {
+                    staging.Release();
+                    Object.DestroyImmediate(staging);
+                }
             }
         }
 

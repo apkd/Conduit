@@ -11,6 +11,7 @@ namespace Conduit
     // attaches feature-created tabs to the existing editor layout without creating auxiliary containers
     static class ConduitEditorWindowDocking
     {
+        const int MainWindowShowMode = 4;
         const BindingFlags InstanceMembers =
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         internal static readonly Type? DockAreaType = typeof(EditorWindow).Assembly.GetType("UnityEditor.DockArea");
@@ -19,6 +20,18 @@ namespace Conduit
             "floatingWindow",
             InstanceMembers
         );
+        static readonly PropertyInfo? containerWindowProperty = typeof(EditorWindow).Assembly
+            .GetType("UnityEditor.GUIView")
+            ?.GetProperty("window", InstanceMembers);
+        static readonly PropertyInfo? containerWindowShowModeProperty = typeof(EditorWindow).Assembly
+            .GetType("UnityEditor.ContainerWindow")
+            ?.GetProperty("showMode", InstanceMembers);
+        static readonly MethodInfo? getMaximizedWindowMethod = typeof(EditorWindow).Assembly
+            .GetType("UnityEditor.WindowLayout")
+            ?.GetMethod(
+                "GetMaximizedWindow",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic
+            );
         static readonly MethodInfo? addTabMethod = DockAreaType?.GetMethod(
             "AddTab",
             InstanceMembers,
@@ -48,6 +61,25 @@ namespace Conduit
 
         internal static bool IsDockedInMainWindow(EditorWindow window)
             => GetDockArea(window) is { } dockArea && IsMainDockArea(dockArea);
+
+        internal static EditorWindow? GetMaximizedWindow()
+            => getMaximizedWindowMethod?.Invoke(null, null) as EditorWindow;
+
+        internal static void EnsureCanShow(EditorWindow window, string target)
+        {
+            var maximized = GetMaximizedWindow();
+            if (maximized == null || ReferenceEquals(maximized, window))
+                return;
+
+            var targetContainer = GetContainerWindow(window);
+            if (targetContainer == null
+                || !ReferenceEquals(targetContainer, GetContainerWindow(maximized)))
+                return;
+
+            throw new InvalidOperationException(
+                $"Cannot show '{target}' while editor window '{maximized.titleContent.text}' is maximized. Restore the editor layout first."
+            );
+        }
 
         internal static EditorWindow? FindPreferredMainDockTarget(Type excludedWindowType)
         {
@@ -88,10 +120,17 @@ namespace Conduit
 
         internal static EditorWindow CreateDockedTab(Type windowType)
         {
+            var maximized = GetMaximizedWindow();
+            if (maximized != null && IsMainContainer(GetContainerWindow(maximized)))
+                throw new InvalidOperationException(
+                    $"Cannot show '{windowType.Name}' while editor window '{maximized.titleContent.text}' is maximized. Restore the editor layout first."
+                );
+
             var target = FindPreferredMainDockTarget(windowType)
                          ?? throw new InvalidOperationException(
                              $"Could not find a docked main-editor window for '{windowType.Name}'."
                          );
+            EnsureCanShow(target, windowType.Name);
             var window = ScriptableObject.CreateInstance(windowType) as EditorWindow
                          ?? throw new InvalidOperationException($"Could not create editor window '{windowType.Name}'.");
             try
@@ -139,6 +178,18 @@ namespace Conduit
 
             removeTab.Invoke(dockArea, new object[] { window, true, false });
         }
+
+        static object? GetContainerWindow(EditorWindow window)
+            => parentField?.GetValue(window) is { } parent
+                ? containerWindowProperty?.GetValue(parent)
+                : null;
+
+        static bool IsMainContainer(object? container)
+            => container != null
+               && Convert.ToInt32(
+                   containerWindowShowModeProperty?.GetValue(container),
+                   CultureInfo.InvariantCulture
+               ) == MainWindowShowMode;
     }
 
     static class ConduitGameView

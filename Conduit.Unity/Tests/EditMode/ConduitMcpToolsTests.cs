@@ -2702,9 +2702,19 @@ public sealed class ConduitMcpToolsTests
 
         if (SupportsRenderedScreenshots())
         {
-            var result = await InvokeScreenshotAsync(ConduitUtility.FormatObjectId(camera));
-            Assert.That(result, Does.Contain("Main_Camera image captured: Temp/screenshot/"));
-            DeleteCapturedImage(result);
+            var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(
+                ConduitUtility.FormatObjectId(camera)
+            );
+            try
+            {
+                Assert.That(result, Does.Contain("Main_Camera image captured: Temp/screenshot/"));
+                AssertCapturedImageHasVisualVariation(result);
+            }
+            finally
+            {
+                DeleteCapturedImage(result);
+            }
+
             return;
         }
 
@@ -2723,9 +2733,16 @@ public sealed class ConduitMcpToolsTests
         {
             if (SupportsRenderedScreenshots())
             {
-                var result = await InvokeScreenshotAsync(assetPath);
-                Assert.That(result, Does.Contain("ScreenshotScene_").And.Contain(" image captured: Temp/screenshot/"));
-                DeleteCapturedImage(result);
+                var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(assetPath);
+                try
+                {
+                    Assert.That(result, Does.Contain("ScreenshotScene_").And.Contain(" image captured: Temp/screenshot/"));
+                    AssertCapturedImageHasVisualVariation(result);
+                }
+                finally
+                {
+                    DeleteCapturedImage(result);
+                }
             }
             else
             {
@@ -2737,6 +2754,92 @@ public sealed class ConduitMcpToolsTests
         finally
         {
             AssetDatabase.DeleteAsset(assetPath);
+        }
+    }
+
+    [Test]
+    public async Task Screenshot_GameObjectPreviewPreservesDesktopFocus()
+    {
+        RequireInteractiveEditorWindows();
+        var previewScene = EditorSceneManager.NewPreviewScene();
+        var gameObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        SceneManager.MoveGameObjectToScene(gameObject, previewScene);
+
+        try
+        {
+            var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(
+                ConduitUtility.FormatObjectId(gameObject)
+            );
+            try
+            {
+                AssertCapturedImageHasVisualVariation(result);
+            }
+            finally
+            {
+                DeleteCapturedImage(result);
+            }
+        }
+        finally
+        {
+            EditorSceneManager.ClosePreviewScene(previewScene);
+        }
+    }
+
+    [Test]
+    public async Task Screenshot_AssetPreviewPreservesDesktopFocus()
+    {
+        RequireInteractiveEditorWindows();
+
+        var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(MaterialAsset);
+        try
+        {
+            AssertCapturedImageHasVisualVariation(result);
+        }
+        finally
+        {
+            DeleteCapturedImage(result);
+        }
+    }
+
+    [Test]
+    public async Task GpuCapture_SaveJpegRestoresActiveRenderTexture()
+    {
+        RequireInteractiveEditorWindows();
+        var previousActive = RenderTexture.active;
+        var sentinel = RenderTexture.GetTemporary(4, 4, 0);
+        var source = RenderTexture.GetTemporary(4, 4, 0);
+        var path = Path.Combine(Path.GetTempPath(), $"conduit-gpu-capture-{Guid.NewGuid():N}.jpg");
+        try
+        {
+            RenderTexture.active = sentinel;
+            await GpuCapture.SaveJpegAsync(source, path, flipVertically: false);
+            Assert.That(RenderTexture.active, Is.SameAs(sentinel));
+        }
+        finally
+        {
+            RenderTexture.active = previousActive;
+            RenderTexture.ReleaseTemporary(source);
+            RenderTexture.ReleaseTemporary(sentinel);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [TestCase("game_view")]
+    [TestCase("scene_view")]
+    public async Task Screenshot_EditorViewTargetPreservesDesktopFocus(string target)
+    {
+        RequireInteractiveEditorWindows();
+
+        var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(target);
+        try
+        {
+            Assert.That(result, Does.Contain(" image captured: Temp/screenshot/"));
+            AssertCapturedImageHasVisualVariation(result);
+        }
+        finally
+        {
+            DeleteCapturedImage(result);
         }
     }
 
@@ -2934,28 +3037,118 @@ public sealed class ConduitMcpToolsTests
     }
 
     [Test]
-    public async Task Screenshot_WindowTarget_OpensMatchingWindowTypeAndCapturesImage()
+    public async Task Screenshot_WindowTargetCapturesWithoutChangingDesktopFocus()
     {
         if (SupportsRenderedScreenshots())
         {
+            var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync("window:CaptureProbe");
             try
             {
-                var result = await InvokeScreenshotAsync("window:CaptureProbe");
                 Assert.That(result, Does.Contain("Conduit_Capture_Probe image captured: Temp/screenshot/"));
+                AssertCapturedImageHasVisualVariation(result);
+            }
+            finally
+            {
                 DeleteCapturedImage(result);
             }
-            catch (InvalidOperationException captureException)
-            {
-                Assert.That(captureException.Message, Is.EqualTo("Editor window 'Conduit Capture Probe' could not be focused for capture."));
-            }
 
-            Assert.That(Resources.FindObjectsOfTypeAll<ConduitCaptureProbeWindow>(), Is.Not.Empty);
+            Assert.That(Resources.FindObjectsOfTypeAll<ConduitCaptureProbeWindow>(), Is.Empty);
             return;
         }
 
         var exception = Assert.ThrowsAsync<InvalidOperationException>(async () => await InvokeScreenshotAsync("window:CaptureProbe"));
         Assert.That(exception, Is.Not.Null);
         Assert.That(exception!.Message, Does.Contain("graphics device").Or.Contain("interactive Unity editor window"));
+    }
+
+    [Test]
+    public async Task Screenshot_HiddenEditorWindowRestoresSelectedTab()
+    {
+        RequireInteractiveEditorWindows();
+        var target = OpenScreenshotTestWindow<ConduitCaptureProbeWindow>();
+        var selected = OpenScreenshotTestWindow<ConduitWindowMatchAlphaWindow>();
+        Assert.That(
+            EditorCaptureSource.EditorWindowState.Capture().GetTabToRestore(target),
+            Is.SameAs(selected)
+        );
+
+        var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync("window:CaptureProbe");
+        try
+        {
+            AssertCapturedImageHasVisualVariation(result);
+            Assert.That(
+                EditorCaptureSource.EditorWindowState.Capture().GetTabToRestore(target),
+                Is.SameAs(selected)
+            );
+        }
+        finally
+        {
+            DeleteCapturedImage(result);
+        }
+    }
+
+    [Test]
+    public async Task Screenshot_HiddenEditorTargetRejectsMaximizedLayoutWithoutChangingIt()
+    {
+        RequireInteractiveEditorWindows();
+        var maximized = OpenScreenshotTestWindow<ConduitCaptureProbeWindow>();
+        maximized.maximized = true;
+        await EditorCaptureSource.WaitForNextEditorUpdateAsync();
+
+        try
+        {
+            var previouslyFocusedWindow = EditorWindow.focusedWindow;
+            var wasApplicationActive = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+            var exception = Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await InvokeScreenshotAsync("game_view")
+            );
+
+            Assert.That(exception, Is.Not.Null);
+            Assert.That(exception!.Message, Does.Contain("maximized").And.Contain("Restore the editor layout"));
+            Assert.That(maximized.maximized, Is.True);
+            Assert.That(EditorWindow.focusedWindow, Is.SameAs(previouslyFocusedWindow));
+            Assert.That(
+                UnityEditorInternal.InternalEditorUtility.isApplicationActive,
+                Is.EqualTo(wasApplicationActive)
+            );
+        }
+        finally
+        {
+            maximized.maximized = false;
+            await EditorCaptureSource.WaitForNextEditorUpdateAsync();
+            maximized.Close();
+        }
+    }
+
+    [Test]
+    public async Task Screenshot_MaximizedTargetRemainsMaximized()
+    {
+        RequireInteractiveEditorWindows();
+        var target = OpenScreenshotTestWindow<ConduitCaptureProbeWindow>();
+        target.maximized = true;
+        await EditorCaptureSource.WaitForNextEditorUpdateAsync();
+
+        try
+        {
+            var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(
+                "window:CaptureProbe"
+            );
+            try
+            {
+                AssertCapturedImageHasVisualVariation(result);
+                Assert.That(target.maximized, Is.True);
+            }
+            finally
+            {
+                DeleteCapturedImage(result);
+            }
+        }
+        finally
+        {
+            target.maximized = false;
+            await EditorCaptureSource.WaitForNextEditorUpdateAsync();
+            target.Close();
+        }
     }
 
     [Test]
@@ -4162,6 +4355,31 @@ public sealed class ConduitMcpToolsTests
     static async Task<string> InvokeScreenshotAsync(string target)
         => await screenshot.CaptureAsync(target);
 
+    static async Task<string> InvokeScreenshotWithoutDesktopFocusChangeAsync(string target)
+    {
+        var previouslyFocusedWindow = EditorWindow.focusedWindow;
+        var wasApplicationActive = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+        var applicationFocusChanges = 0;
+        EditorApplication.focusChanged += TrackApplicationFocus;
+        try
+        {
+            var result = await InvokeScreenshotAsync(target);
+            Assert.That(applicationFocusChanges, Is.Zero, "Unity application focus changed during capture.");
+            Assert.That(EditorWindow.focusedWindow, Is.SameAs(previouslyFocusedWindow));
+            Assert.That(
+                UnityEditorInternal.InternalEditorUtility.isApplicationActive,
+                Is.EqualTo(wasApplicationActive)
+            );
+            return result;
+        }
+        finally
+        {
+            EditorApplication.focusChanged -= TrackApplicationFocus;
+        }
+
+        void TrackApplicationFocus(bool _) => applicationFocusChanges++;
+    }
+
     static TWindow OpenScreenshotTestWindow<TWindow>()
         where TWindow : EditorWindow
     {
@@ -4187,6 +4405,36 @@ public sealed class ConduitMcpToolsTests
     }
 
     static void DeleteCapturedImage(string resultText)
+        => File.Delete(GetCapturedImagePath(resultText));
+
+    static void AssertCapturedImageHasVisualVariation(string resultText)
+    {
+        var texture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+        try
+        {
+            Assert.That(
+                ImageConversion.LoadImage(texture, File.ReadAllBytes(GetCapturedImagePath(resultText))),
+                Is.True
+            );
+            var pixels = texture.GetPixels32();
+            var first = pixels[0];
+            var hasVariation = false;
+            foreach (var pixel in pixels)
+                if (!pixel.Equals(first))
+                {
+                    hasVariation = true;
+                    break;
+                }
+
+            Assert.That(hasVariation, Is.True, "The captured image is a uniform color.");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(texture);
+        }
+    }
+
+    static string GetCapturedImagePath(string resultText)
     {
         const string marker = " image captured: ";
         var markerIndex = resultText.IndexOf(marker, StringComparison.Ordinal);
@@ -4195,7 +4443,7 @@ public sealed class ConduitMcpToolsTests
         var relativePath = resultText[(markerIndex + marker.Length)..].Trim();
         var absolutePath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", relativePath));
         Assert.That(File.Exists(absolutePath), Is.True, absolutePath);
-        File.Delete(absolutePath);
+        return absolutePath;
     }
 
     static bool SupportsRenderedScreenshots()
