@@ -11,13 +11,20 @@ using Object = UnityEngine.Object;
 
 namespace Conduit
 {
-    /// <summary>Provides allocation-free GPU capture of a live Unity editor view.</summary>
+    /// <summary>A live Unity editor view that can be copied without activating its OS window.</summary>
     abstract class EditorCaptureSource : IDisposable
     {
         const string HdrpAssetTypeName = "UnityEngine.Rendering.HighDefinition.HDRenderPipelineAsset";
+        const string GrabPixelsMaterialPath = "SceneView/BlitSceneViewCapture.mat";
         const BindingFlags InstanceMembers =
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        const BindingFlags StaticMembers =
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
+        static readonly Type? containerWindowType = typeof(EditorWindow).Assembly
+            .GetType("UnityEditor.ContainerWindow");
+        static readonly Type? viewType = typeof(EditorWindow).Assembly.GetType("UnityEditor.View");
+        static readonly Type? guiViewType = typeof(EditorWindow).Assembly.GetType("UnityEditor.GUIView");
         static readonly Type? gameViewType = Type.GetType("UnityEditor.GameView,UnityEditor");
         static readonly Type? playModeViewType = Type.GetType("UnityEditor.PlayModeView,UnityEditor");
         static readonly MethodInfo? getMainPlayModeViewMethod = playModeViewType?.GetMethod(
@@ -39,9 +46,42 @@ namespace Conduit
         static readonly PropertyInfo? hostViewActualViewProperty = typeof(EditorWindow).Assembly
             .GetType("UnityEditor.HostView")
             ?.GetProperty("actualView", InstanceMembers);
-        static readonly MethodInfo? grabPixelsMethod = typeof(EditorWindow).Assembly
-            .GetType("UnityEditor.GUIView")
-            ?.GetMethod("GrabPixels", InstanceMembers);
+        static readonly PropertyInfo? containerWindowsProperty = containerWindowType?.GetProperty(
+            "windows",
+            StaticMembers
+        );
+        static readonly PropertyInfo? containerRootViewProperty = containerWindowType?.GetProperty(
+            "rootView",
+            InstanceMembers
+        );
+        static readonly PropertyInfo? containerShowModeProperty = containerWindowType?.GetProperty(
+            "showMode",
+            InstanceMembers
+        );
+        static readonly PropertyInfo? containerTitleProperty = containerWindowType?.GetProperty(
+            "title",
+            InstanceMembers
+        );
+        static readonly PropertyInfo? viewChildrenProperty = viewType?.GetProperty(
+            "children",
+            InstanceMembers
+        );
+        static readonly PropertyInfo? viewWindowPositionProperty = viewType?.GetProperty(
+            "windowPosition",
+            InstanceMembers
+        );
+        static readonly MethodInfo? guiViewRepaintMethod = guiViewType?.GetMethod(
+            "Repaint",
+            InstanceMembers
+        );
+        static readonly MethodInfo? guiViewBackingScaleFactorMethod = guiViewType?.GetMethod(
+            "GetBackingScaleFactor",
+            InstanceMembers
+        );
+        static readonly MethodInfo? grabPixelsMethod = guiViewType?.GetMethod(
+            "GrabPixels",
+            InstanceMembers
+        );
 
         protected EditorCaptureSource(string target, int width, int height)
         {
@@ -60,6 +100,7 @@ namespace Conduit
 
         public virtual void Dispose() { }
 
+        /// <summary>Creates a focus-free source for a supported editor view target.</summary>
         public static async Task<EditorCaptureSource> CreateAsync(string? target)
         {
             EnsureInteractive();
@@ -76,6 +117,158 @@ namespace Conduit
             throw new InvalidOperationException(
                 $"Unsupported recording target '{normalized}'. Use game_view, scene_view, or window:<name>."
             );
+        }
+
+        internal static async Task<EditorCaptureSource[]> CreateEditorSourcesAsync()
+        {
+            EnsureInteractive();
+            if (containerWindowsProperty?.GetValue(null) is not System.Collections.IEnumerable windows)
+                throw new MissingMemberException("Unity editor container windows");
+
+            // a ContainerWindow has no combined backing buffer, so each stable layout window is
+            // reconstructed from the GUIViews that Unity already rendered for it.
+            var containers = new List<(object rootView, string target)>();
+            bool hasMainWindow = false;
+            foreach (var container in windows)
+            {
+                if (container == null)
+                    continue;
+
+                var showMode = containerShowModeProperty?.GetValue(container)?.ToString();
+                // utility and auxiliary modes also host modal and transient surfaces;
+                // persistent editor layout windows use MainWindow or NormalWindow
+                if (showMode is not ("MainWindow" or "NormalWindow"))
+                    continue;
+
+                var rootView = containerRootViewProperty?.GetValue(container);
+                if (rootView is not Object unityRootView || unityRootView == null)
+                    continue;
+
+                if (showMode == "MainWindow")
+                {
+                    containers.Insert(0, (rootView, "editor"));
+                    hasMainWindow = true;
+                    continue;
+                }
+
+                var title = containerTitleProperty?.GetValue(container) as string;
+                containers.Add(
+                    (rootView, string.IsNullOrWhiteSpace(title) ? "editor window" : $"editor {title}")
+                );
+            }
+
+            if (!hasMainWindow)
+                throw new InvalidOperationException("Could not find Unity's main editor window.");
+
+            var views = new List<object>();
+            var repaint = guiViewRepaintMethod
+                          ?? throw new MissingMethodException("UnityEditor.GUIView.Repaint");
+            foreach (var container in containers)
+            {
+                views.Clear();
+                CollectGuiViews(container.rootView, views);
+                foreach (var view in views)
+                    repaint.Invoke(view, null);
+            }
+
+            // repaint is deferred; two updates let IMGUI and UI Toolkit publish the backing buffers
+            await WaitForNextEditorUpdateAsync();
+            await WaitForNextEditorUpdateAsync();
+
+            var sources = new List<EditorCaptureSource>(containers.Count);
+            foreach (var container in containers)
+                sources.Add(CreateSource(container.rootView, container.target));
+
+            return sources.ToArray();
+
+            static EditorCaptureSource CreateSource(object rootView, string target)
+            {
+                if (rootView is not Object unityRootView || unityRootView == null)
+                    throw new InvalidOperationException($"Unity editor window '{target}' closed during capture.");
+
+                var rootPosition = GetViewPosition(rootView);
+                var views = new List<object>();
+                CollectGuiViews(rootView, views);
+                if (views.Count == 0)
+                    throw new InvalidOperationException($"Unity editor window '{target}' has no visible GUI views.");
+
+                // GUIView geometry and GrabPixels regions use points; destinations use backing pixels
+                // query the view because detached windows may be on a different-DPI monitor
+                float scale = GetBackingScaleFactor(views[0]);
+                int width = Mathf.Max(1, Mathf.RoundToInt(rootPosition.width * scale));
+                int height = Mathf.Max(1, Mathf.RoundToInt(rootPosition.height * scale));
+                var captures = new List<GuiViewCapture>(views.Count);
+                foreach (var view in views)
+                {
+                    var position = GetViewPosition(view);
+                    int xMin = Mathf.Clamp(
+                        Mathf.RoundToInt((position.xMin - rootPosition.xMin) * scale),
+                        0,
+                        width
+                    );
+                    int xMax = Mathf.Clamp(
+                        Mathf.RoundToInt((position.xMax - rootPosition.xMin) * scale),
+                        0,
+                        width
+                    );
+                    int yMin = Mathf.Clamp(
+                        Mathf.RoundToInt((position.yMin - rootPosition.yMin) * scale),
+                        0,
+                        height
+                    );
+                    int yMax = Mathf.Clamp(
+                        Mathf.RoundToInt((position.yMax - rootPosition.yMin) * scale),
+                        0,
+                        height
+                    );
+                    var pixelRect = new RectInt(
+                        xMin,
+                        height - yMax,
+                        xMax - xMin,
+                        yMax - yMin
+                    );
+                    if (pixelRect is not { width: > 0, height: > 0 }
+                        || view is not Object unityView
+                        || unityView == null)
+                        continue;
+
+                    captures.Add(
+                        new(
+                            unityView,
+                            new(0f, 0f, position.width, position.height),
+                            pixelRect,
+                            CreateGrabPixelsDelegate(view)
+                        )
+                    );
+                }
+
+                if (captures.Count == 0)
+                    throw new InvalidOperationException($"Unity editor window '{target}' has no capturable GUI views.");
+
+                return new EditorCompositeSource(
+                    target,
+                    unityRootView,
+                    width,
+                    height,
+                    captures.ToArray()
+                );
+            }
+
+            static void CollectGuiViews(object view, List<object> destination)
+            {
+                if (guiViewType?.IsInstanceOfType(view) == true)
+                {
+                    destination.Add(view);
+                    return;
+                }
+
+                if (viewChildrenProperty?.GetValue(view) is not Array children)
+                    return;
+
+                foreach (var child in children)
+                    if (child != null)
+                        CollectGuiViews(child, destination);
+            }
         }
 
         static async Task<EditorCaptureSource> CreateGameViewAsync()
@@ -131,7 +324,7 @@ namespace Conduit
             bool flipVertically)
         {
             var previousTab = initialState.GetTabToRestore(window);
-            var ownsWindow = !initialState.Contains(window);
+            bool ownsWindow = !initialState.Contains(window);
             try
             {
                 ConduitEditorWindowDocking.EnsureCanShow(window, target);
@@ -183,7 +376,7 @@ namespace Conduit
             EditorWindowState initialState)
         {
             var previousTab = initialState.GetTabToRestore(window);
-            var ownsWindow = !initialState.Contains(window);
+            bool ownsWindow = !initialState.Contains(window);
             try
             {
                 ConduitEditorWindowDocking.EnsureCanShow(window, displayName);
@@ -192,13 +385,19 @@ namespace Conduit
                 await WaitForNextEditorUpdateAsync();
                 await WaitForNextEditorUpdateAsync();
 
-                var size = GetWindowPixelSize(window.position);
+                var parent = GetParent(window)
+                             ?? throw new InvalidOperationException(
+                                 $"Editor window '{window.titleContent.text}' has no host view."
+                             );
+                float scale = GetBackingScaleFactor(parent);
+                int width = Mathf.Max(1, Mathf.RoundToInt(window.position.width * scale));
+                int height = Mathf.Max(1, Mathf.RoundToInt(window.position.height * scale));
                 return new EditorWindowSource(
                     displayName,
                     window,
-                    Mathf.RoundToInt(size.x),
-                    Mathf.RoundToInt(size.y),
-                    CreateGrabPixelsDelegate(window),
+                    width,
+                    height,
+                    CreateGrabPixelsDelegate(parent),
                     previousTab,
                     ownsWindow
                 );
@@ -217,7 +416,7 @@ namespace Conduit
         {
             // hidden dock tabs can retain a valid but stale render texture
             window.ShowTab();
-            for (var attempt = 0; attempt < 2; attempt++)
+            for (int attempt = 0; attempt < 2; ++attempt)
             {
                 window.Repaint();
                 await WaitForNextEditorUpdateAsync();
@@ -255,15 +454,6 @@ namespace Conduit
             return false;
         }
 
-        internal static Vector2 GetWindowPixelSize(Rect position)
-        {
-            var pixelsPerPoint = EditorGUIUtility.pixelsPerPoint;
-            return new(
-                Mathf.Max(1, Mathf.RoundToInt(position.width * pixelsPerPoint)),
-                Mathf.Max(1, Mathf.RoundToInt(position.height * pixelsPerPoint))
-            );
-        }
-
         static RenderTexture? GetGameViewTexture(EditorWindow window)
         {
             var texture = gameViewRenderTextureField?.GetValue(window) as RenderTexture;
@@ -275,6 +465,16 @@ namespace Conduit
         static bool IsUsable(RenderTexture? texture)
             => texture != null && texture.IsCreated() && texture.width > 0 && texture.height > 0;
 
+        static float GetBackingScaleFactor(object guiView)
+        {
+            var value = guiViewBackingScaleFactorMethod?.Invoke(guiView, null);
+            if (value is float scale && float.IsFinite(scale) && scale > 0f)
+                return scale;
+
+            float fallback = EditorGUIUtility.pixelsPerPoint;
+            return float.IsFinite(fallback) && fallback > 0f ? fallback : 1f;
+        }
+
         static EditorWindow? FindOpenWindow(Type windowType)
         {
             foreach (var candidate in Resources.FindObjectsOfTypeAll(windowType))
@@ -284,15 +484,16 @@ namespace Conduit
             return null;
         }
 
-        static Action<RenderTexture, Rect> CreateGrabPixelsDelegate(EditorWindow window)
+        static Rect GetViewPosition(object view)
+            => viewWindowPositionProperty?.GetValue(view) is Rect position
+                ? position
+                : throw new MissingMemberException("Unity editor view position");
+
+        static Action<RenderTexture, Rect> CreateGrabPixelsDelegate(object guiView)
         {
-            var parent = GetParent(window)
-                         ?? throw new InvalidOperationException(
-                             $"Editor window '{window.titleContent.text}' has no host view."
-                         );
             var method = grabPixelsMethod
                          ?? throw new MissingMethodException("UnityEditor.GUIView.GrabPixels");
-            return method.CreateDelegate(typeof(Action<RenderTexture, Rect>), parent)
+            return method.CreateDelegate(typeof(Action<RenderTexture, Rect>), guiView)
                        as Action<RenderTexture, Rect>
                    ?? throw new InvalidOperationException(
                        "Unity did not expose focus-free editor window capture."
@@ -414,10 +615,129 @@ namespace Conduit
                 => RestoreWindowState(window, previousTab, ownsWindow);
         }
 
+        sealed class EditorCompositeSource : EditorCaptureSource
+        {
+            static readonly Material captureMaterial =
+                (Material)EditorGUIUtility.LoadRequired(GrabPixelsMaterialPath);
+
+            readonly Object rootView;
+            readonly GuiViewCapture[] views;
+
+            internal EditorCompositeSource(
+                string target,
+                Object rootView,
+                int width,
+                int height,
+                GuiViewCapture[] views)
+                : base(target, width, height)
+            {
+                this.rootView = rootView;
+                this.views = views;
+            }
+
+            public override bool TryCapture(RenderTexture destination, out string diagnostic)
+            {
+                if (rootView == null)
+                {
+                    diagnostic = $"Unity editor window '{Target}' was closed during capture.";
+                    return false;
+                }
+
+                var previousActive = RenderTexture.active;
+                try
+                {
+                    RenderTexture.active = destination;
+                    GL.Clear(false, true, new(0.1f, 0.1f, 0.1f, 1f));
+                    // every GUIView owns a separate backing buffer; copy each one to its container-relative position
+                    foreach (var view in views)
+                    {
+                        if (view.View == null)
+                        {
+                            diagnostic = $"Unity editor window '{Target}' changed during capture.";
+                            return false;
+                        }
+
+                        var raw = RenderTexture.GetTemporary(
+                            view.Pixels.width,
+                            view.Pixels.height,
+                            24,
+                            RenderTextureFormat.ARGB32,
+                            RenderTextureReadWrite.sRGB
+                        );
+                        var corrected = RenderTexture.GetTemporary(
+                            view.Pixels.width,
+                            view.Pixels.height,
+                            0,
+                            RenderTextureFormat.ARGB32,
+                            RenderTextureReadWrite.sRGB
+                        );
+                        try
+                        {
+                            view.GrabPixels(raw, view.Region);
+                            Graphics.Blit(raw, corrected, captureMaterial);
+                            Graphics.CopyTexture(
+                                corrected,
+                                0,
+                                0,
+                                0,
+                                0,
+                                view.Pixels.width,
+                                view.Pixels.height,
+                                destination,
+                                0,
+                                0,
+                                view.Pixels.x,
+                                view.Pixels.y
+                            );
+                        }
+                        finally
+                        {
+                            RenderTexture.ReleaseTemporary(corrected);
+                            RenderTexture.ReleaseTemporary(raw);
+                        }
+                    }
+
+                    diagnostic = string.Empty;
+                    return true;
+                }
+                catch (Exception exception)
+                {
+                    diagnostic = $"Unity failed to capture editor window '{Target}': {exception.Message}";
+                    return false;
+                }
+                finally
+                {
+                    RenderTexture.active = previousActive;
+                }
+            }
+
+            public override bool IsValid => rootView != null;
+        }
+
+        readonly struct GuiViewCapture
+        {
+            internal GuiViewCapture(
+                Object view,
+                Rect region,
+                RectInt pixels,
+                Action<RenderTexture, Rect> grabPixels)
+            {
+                View = view;
+                Region = region;
+                Pixels = pixels;
+                GrabPixels = grabPixels;
+            }
+
+            internal Object View { get; }
+            internal Rect Region { get; }
+            internal RectInt Pixels { get; }
+            internal Action<RenderTexture, Rect> GrabPixels { get; }
+        }
+
         sealed class EditorWindowSource : EditorCaptureSource
         {
             static readonly Material captureMaterial =
-                (Material)EditorGUIUtility.LoadRequired("SceneView/BlitSceneViewCapture.mat");
+                (Material)EditorGUIUtility.LoadRequired(GrabPixelsMaterialPath);
 
             readonly EditorWindow window;
             readonly RenderTexture source;
@@ -425,7 +745,7 @@ namespace Conduit
             readonly EditorWindow? previousTab;
             readonly bool ownsWindow;
 
-            public EditorWindowSource(
+            internal EditorWindowSource(
                 string target,
                 EditorWindow window,
                 int width,
@@ -439,14 +759,7 @@ namespace Conduit
                 this.grabPixels = grabPixels;
                 this.previousTab = previousTab;
                 this.ownsWindow = ownsWindow;
-                source = new(width, height, 24, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB)
-                {
-                    hideFlags = HideFlags.HideAndDontSave,
-                    antiAliasing = 1,
-                    useMipMap = false,
-                    autoGenerateMips = false,
-                };
-                source.Create();
+                source = GpuCapture.CreateStagingTexture(width, height, depth: 24);
             }
 
             public override bool TryCapture(RenderTexture destination, out string diagnostic)

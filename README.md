@@ -1402,7 +1402,7 @@ By the way: if your project doesn't have tests, *you're doing it wrong*.
 - ***`run_tests_editmode`***: run Edit Mode tests
 - ***`run_tests_playmode`***: run Play Mode tests
 - ***`run_tests_player`***: run player tests
-- ***`screenshot`***: captures the game view, scene view, or any other object
+- ***`screenshot`***: captures the editor layout, a specific editor view, or any renderable object
 - ***`record`***: records the game view, scene view, or an editor window through FFmpeg
 
 #### Profiling:

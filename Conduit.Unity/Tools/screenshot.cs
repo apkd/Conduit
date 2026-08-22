@@ -62,7 +62,7 @@ namespace Conduit
                 throw new InvalidOperationException("Screenshot target was empty.");
 
             if (string.Equals(normalizedTarget, "editor", StringComparison.OrdinalIgnoreCase))
-                return CaptureEditorWindow();
+                return await CaptureEditorAsync();
 
             if (string.Equals(normalizedTarget, "game_view", StringComparison.OrdinalIgnoreCase))
                 return await CaptureGameViewAsync();
@@ -110,10 +110,37 @@ namespace Conduit
             throw new InvalidOperationException($"Target '{match.Name}' could not be rendered as a screenshot.");
         }
 
-        static string CaptureEditorWindow()
-            => throw new InvalidOperationException(
-                "'editor' screenshots are not supported reliably. Unity only exposes screen-pixel capture for the full editor window, which depends on the editor being the frontmost OS window."
-            );
+        static async Task<string> CaptureEditorAsync()
+        {
+            EnsureCanRenderScreenshot("editor");
+            var sources = await EditorCaptureSource.CreateEditorSourcesAsync();
+            var outputs = new List<ScreenshotOutputPath>(sources.Length);
+            var results = new List<string>(sources.Length);
+            try
+            {
+                foreach (var source in sources)
+                {
+                    var output = await SaveLiveEditorSourceAsync(source, source.Target);
+                    outputs.Add(output);
+                    results.Add($"{output.prefix} image captured: {output.relative_path}");
+                }
+
+                return string.Join("\n", results);
+            }
+            catch
+            {
+                // a multi-window request is atomic so failures never leave unreported partial captures
+                foreach (var output in outputs)
+                    File.Delete(output.absolute_path);
+
+                throw;
+            }
+            finally
+            {
+                foreach (var source in sources)
+                    source.Dispose();
+            }
+        }
 
         static async Task<string> CaptureEditorWindowTargetAsync(string target)
         {
@@ -125,18 +152,25 @@ namespace Conduit
             return ConduitSearchUtility.Resolve(target) switch
             {
                 { Count: 0 }           => $"No matches for '{target}'.",
-                { Count: 1 } matches   => matches[0].Target is EditorWindow window
-                    ? await CaptureLiveEditorSourceAsync(
-                        await EditorCaptureSource.CreateWindowAsync(
-                            window,
-                            ConduitSearchUtility.GetEditorWindowDisplayName(window),
-                            initialState
-                        ),
-                        ConduitSearchUtility.GetEditorWindowDisplayName(window)
-                    )
-                    : throw new InvalidOperationException($"Target '{matches[0].Name}' is not an editor window."),
+                { Count: 1 } matches   => await CaptureMatchAsync(matches[0]),
                 { Count: > 1 } matches => ConduitSearchUtility.FormatMatches(matches, includeHint: true),
             };
+
+            async Task<string> CaptureMatchAsync(ResolvedObjectMatch match)
+            {
+                if (match.Target is not EditorWindow window)
+                    throw new InvalidOperationException($"Target '{match.Name}' is not an editor window.");
+
+                var displayName = ConduitSearchUtility.GetEditorWindowDisplayName(window);
+                return await CaptureLiveEditorSourceAsync(
+                    await EditorCaptureSource.CreateWindowAsync(
+                        window,
+                        displayName,
+                        initialState
+                    ),
+                    displayName
+                );
+            }
         }
 
         static async Task<string> CaptureGameViewAsync()
@@ -206,6 +240,7 @@ namespace Conduit
 
         static async Task<string> CaptureGameObjectPreviewAsync(GameObject previewSource, string prefix)
         {
+            EnsureCanRenderScreenshot(prefix);
             var previewScene = EditorSceneManager.NewPreviewScene();
             GameObject? previewInstance = null;
             try
@@ -326,7 +361,8 @@ namespace Conduit
 
         static void ConfigurePreviewCamera(Camera camera, Bounds bounds)
         {
-            var viewDirection = new Vector3(-1f, 0.75f, -1f).normalized;
+            // unity's built-in quads and sprites face -z; view them from that side and from above
+            var viewDirection = new Vector3(-1f, -0.75f, 1f).normalized;
             var radius = Mathf.Max(bounds.extents.magnitude, 0.5f);
             const float fieldOfView = 30f;
             var distance = radius / Mathf.Sin(fieldOfView * 0.5f * Mathf.Deg2Rad);
@@ -407,10 +443,11 @@ namespace Conduit
         }
 
         static async Task<string> CaptureLiveEditorSourceAsync(string target, string prefix)
-            => await CaptureLiveEditorSourceAsync(
-                await EditorCaptureSource.CreateAsync(target),
-                prefix
-            );
+        {
+            using var source = await EditorCaptureSource.CreateAsync(target);
+            var output = await SaveLiveEditorSourceAsync(source, prefix);
+            return $"{output.prefix} image captured: {output.relative_path}";
+        }
 
         static async Task<string> CaptureLiveEditorSourceAsync(
             EditorCaptureSource source,
@@ -418,31 +455,47 @@ namespace Conduit
         {
             using (source)
             {
-                var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
+                var output = await SaveLiveEditorSourceAsync(source, prefix);
+                return $"{output.prefix} image captured: {output.relative_path}";
+            }
+        }
+
+        static async Task<ScreenshotOutputPath> SaveLiveEditorSourceAsync(
+            EditorCaptureSource source,
+            string prefix)
+        {
+            var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
+            try
+            {
+                if (!source.TryCapture(staging, out var diagnostic))
+                    throw new InvalidOperationException(diagnostic);
+
+                var output = AllocateOutputPath(
+                    ConduitAssetPathUtility.GetProjectRootPath(),
+                    prefix
+                );
                 try
                 {
-                    if (!source.TryCapture(staging, out var diagnostic))
-                        throw new InvalidOperationException(diagnostic);
-
-                    var outputPath = AllocateOutputPath(
-                        ConduitAssetPathUtility.GetProjectRootPath(),
-                        prefix
-                    );
-                    await GpuCapture.SavePreparedJpegAsync(staging, outputPath.absolute_path);
-                    return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+                    await GpuCapture.SavePreparedJpegAsync(staging, output.absolute_path);
+                    return output;
                 }
-                finally
+                catch
                 {
-                    staging.Release();
-                    Object.DestroyImmediate(staging);
+                    File.Delete(output.absolute_path);
+                    throw;
                 }
+            }
+            finally
+            {
+                staging.Release();
+                Object.DestroyImmediate(staging);
             }
         }
 
         static bool TryCalculateSceneBounds(Scene scene, out Bounds bounds)
         {
             bounds = default;
-            var hasBounds = false;
+            bool hasBounds = false;
             using var pooledRoots = ConduitUtility.GetPooledList<GameObject>(out var roots);
             using var pooledRenderers = ConduitUtility.GetPooledList<Renderer>(out var renderers);
             scene.GetRootGameObjects(roots);
@@ -515,17 +568,19 @@ namespace Conduit
         {
             bounds = candidate;
             var size = candidate.size;
-
-            if (!float.IsNormal(size.x))
+            var center = candidate.center;
+            if (!float.IsFinite(size.x)
+                || !float.IsFinite(size.y)
+                || !float.IsFinite(size.z)
+                || !float.IsFinite(center.x)
+                || !float.IsFinite(center.y)
+                || !float.IsFinite(center.z))
                 return false;
 
-            if (!float.IsNormal(size.y))
-                return false;
-
-            if (!float.IsNormal(size.z))
-                return false;
-
-            return size.sqrMagnitude > BoundsSizeEpsilon * BoundsSizeEpsilon;
+            float squaredSize = size.sqrMagnitude;
+            // flat renderers such as quads and sprites remain valid when their total size is useful
+            return float.IsFinite(squaredSize)
+                   && squaredSize > BoundsSizeEpsilon * BoundsSizeEpsilon;
         }
 
         static Task<string> SaveRenderTextureAsync(
@@ -538,12 +593,20 @@ namespace Conduit
         {
 #if MODULE_IMAGECONVERSION
             var outputPath = AllocateOutputPath(ConduitAssetPathUtility.GetProjectRootPath(), prefix);
-            await GpuCapture.SaveJpegAsync(
-                texture,
-                outputPath.absolute_path,
-                flipVertically
-            );
-            return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+            try
+            {
+                await GpuCapture.SaveJpegAsync(
+                    texture,
+                    outputPath.absolute_path,
+                    flipVertically
+                );
+                return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+            }
+            catch
+            {
+                File.Delete(outputPath.absolute_path);
+                throw;
+            }
 #else
             await Task.Yield();
             throw new InvalidOperationException(ModuleUnavailableDiagnostic);
@@ -556,7 +619,7 @@ namespace Conduit
             var outputDirectoryPath = Path.Combine(projectPath, "Temp", OutputDirectoryName);
             Directory.CreateDirectory(outputDirectoryPath);
 
-            for (var index = 1; index < int.MaxValue; index++)
+            for (int index = 1; index < int.MaxValue; ++index)
             {
                 var fileName = $"{sanitizedPrefix}_{index}.jpg";
                 var absolutePath = Path.Combine(outputDirectoryPath, fileName);
@@ -581,7 +644,7 @@ namespace Conduit
                 return "capture";
 
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            var previousWasUnderscore = false;
+            bool previousWasUnderscore = false;
             foreach (var character in trimmed)
             {
                 if (builder.Length >= 32)
@@ -609,7 +672,7 @@ namespace Conduit
 
         static (int Width, int Height) GetDefaultCaptureSize(float aspect)
         {
-            if (aspect <= 0f)
+            if (!float.IsFinite(aspect) || aspect <= 0f)
                 return (DefaultRenderWidth, DefaultRenderHeight);
 
             var width = DefaultRenderWidth;

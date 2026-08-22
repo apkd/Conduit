@@ -15,12 +15,13 @@ namespace Conduit
     /// <summary>Stages, reads back, and encodes GPU images without managed pixel copies.</summary>
     static class GpuCapture
     {
-        public static RenderTexture CreateStagingTexture(int width, int height)
+        /// <summary>Allocates a valid sRGB render target for capture staging.</summary>
+        public static RenderTexture CreateStagingTexture(int width, int height, int depth = 0)
         {
             var texture = new RenderTexture(
                 width,
                 height,
-                0,
+                depth,
                 RenderTextureFormat.ARGB32,
                 RenderTextureReadWrite.sRGB
             )
@@ -30,10 +31,23 @@ namespace Conduit
                 useMipMap = false,
                 autoGenerateMips = false,
             };
-            texture.Create();
-            return texture;
+            try
+            {
+                if (texture.Create())
+                    return texture;
+
+                throw new InvalidOperationException(
+                    $"Unity could not allocate a {width}×{height} capture render texture."
+                );
+            }
+            catch
+            {
+                Object.DestroyImmediate(texture);
+                throw;
+            }
         }
 
+        /// <summary>Stages and encodes a texture while preserving the caller's active render target.</summary>
         public static async Task SaveJpegAsync(
             Texture source,
             string path,
@@ -63,6 +77,7 @@ namespace Conduit
             }
         }
 
+        /// <summary>Encodes a prepared capture target without changing its pixels.</summary>
         public static async Task SavePreparedJpegAsync(
             RenderTexture source,
             string path,
@@ -99,7 +114,11 @@ namespace Conduit
                     request.WaitForCompletion();
 
                 if (request.hasError)
-                    throw new InvalidOperationException("Unity reported an asynchronous GPU readback error.");
+                {
+                    // some editor graphics backends advertise async readback but reject individual requests
+                    SaveSynchronously(source, path, quality);
+                    return;
+                }
 
                 using var encoded = ImageConversion.EncodeNativeArrayToJPG(
                     pixels,
@@ -132,7 +151,9 @@ namespace Conduit
                 RenderTexture.active = source;
                 texture.ReadPixels(new(0f, 0f, source.width, source.height), 0, 0);
                 texture.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-                File.WriteAllBytes(path, texture.EncodeToJPG(quality));
+                var encoded = texture.EncodeToJPG(quality);
+                using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                stream.Write(encoded);
             }
             finally
             {

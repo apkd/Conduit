@@ -2708,11 +2708,11 @@ public sealed class ConduitMcpToolsTests
             try
             {
                 Assert.That(result, Does.Contain("Main_Camera image captured: Temp/screenshot/"));
-                AssertCapturedImageHasVisualVariation(result);
+                AssertCapturedImagesHaveVisualVariation(result);
             }
             finally
             {
-                DeleteCapturedImage(result);
+                DeleteCapturedImages(result);
             }
 
             return;
@@ -2737,11 +2737,11 @@ public sealed class ConduitMcpToolsTests
                 try
                 {
                     Assert.That(result, Does.Contain("ScreenshotScene_").And.Contain(" image captured: Temp/screenshot/"));
-                    AssertCapturedImageHasVisualVariation(result);
+                    AssertCapturedImagesHaveVisualVariation(result);
                 }
                 finally
                 {
-                    DeleteCapturedImage(result);
+                    DeleteCapturedImages(result);
                 }
             }
             else
@@ -2757,12 +2757,13 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
-    [Test]
-    public async Task Screenshot_GameObjectPreviewPreservesDesktopFocus()
+    [TestCase(PrimitiveType.Cube)]
+    [TestCase(PrimitiveType.Quad)]
+    public async Task Screenshot_GameObjectPreviewPreservesDesktopFocus(PrimitiveType primitiveType)
     {
         RequireInteractiveEditorWindows();
         var previewScene = EditorSceneManager.NewPreviewScene();
-        var gameObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        var gameObject = GameObject.CreatePrimitive(primitiveType);
         SceneManager.MoveGameObjectToScene(gameObject, previewScene);
 
         try
@@ -2772,11 +2773,11 @@ public sealed class ConduitMcpToolsTests
             );
             try
             {
-                AssertCapturedImageHasVisualVariation(result);
+                AssertCapturedImagesHaveVisualVariation(result);
             }
             finally
             {
-                DeleteCapturedImage(result);
+                DeleteCapturedImages(result);
             }
         }
         finally
@@ -2793,11 +2794,11 @@ public sealed class ConduitMcpToolsTests
         var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(MaterialAsset);
         try
         {
-            AssertCapturedImageHasVisualVariation(result);
+            AssertCapturedImagesHaveVisualVariation(result);
         }
         finally
         {
-            DeleteCapturedImage(result);
+            DeleteCapturedImages(result);
         }
     }
 
@@ -2825,6 +2826,7 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
+    [TestCase("editor")]
     [TestCase("game_view")]
     [TestCase("scene_view")]
     public async Task Screenshot_EditorViewTargetPreservesDesktopFocus(string target)
@@ -2835,11 +2837,11 @@ public sealed class ConduitMcpToolsTests
         try
         {
             Assert.That(result, Does.Contain(" image captured: Temp/screenshot/"));
-            AssertCapturedImageHasVisualVariation(result);
+            AssertCapturedImagesHaveVisualVariation(result);
         }
         finally
         {
-            DeleteCapturedImage(result);
+            DeleteCapturedImages(result);
         }
     }
 
@@ -3045,11 +3047,11 @@ public sealed class ConduitMcpToolsTests
             try
             {
                 Assert.That(result, Does.Contain("Conduit_Capture_Probe image captured: Temp/screenshot/"));
-                AssertCapturedImageHasVisualVariation(result);
+                AssertCapturedImagesHaveVisualVariation(result);
             }
             finally
             {
-                DeleteCapturedImage(result);
+                DeleteCapturedImages(result);
             }
 
             Assert.That(Resources.FindObjectsOfTypeAll<ConduitCaptureProbeWindow>(), Is.Empty);
@@ -3075,7 +3077,7 @@ public sealed class ConduitMcpToolsTests
         var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync("window:CaptureProbe");
         try
         {
-            AssertCapturedImageHasVisualVariation(result);
+            AssertCapturedImagesHaveVisualVariation(result);
             Assert.That(
                 EditorCaptureSource.EditorWindowState.Capture().GetTabToRestore(target),
                 Is.SameAs(selected)
@@ -3083,7 +3085,7 @@ public sealed class ConduitMcpToolsTests
         }
         finally
         {
-            DeleteCapturedImage(result);
+            DeleteCapturedImages(result);
         }
     }
 
@@ -3120,8 +3122,9 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
-    [Test]
-    public async Task Screenshot_MaximizedTargetRemainsMaximized()
+    [TestCase("editor")]
+    [TestCase("window:CaptureProbe")]
+    public async Task Screenshot_MaximizedTargetRemainsMaximized(string screenshotTarget)
     {
         RequireInteractiveEditorWindows();
         var target = OpenScreenshotTestWindow<ConduitCaptureProbeWindow>();
@@ -3131,16 +3134,16 @@ public sealed class ConduitMcpToolsTests
         try
         {
             var result = await InvokeScreenshotWithoutDesktopFocusChangeAsync(
-                "window:CaptureProbe"
+                screenshotTarget
             );
             try
             {
-                AssertCapturedImageHasVisualVariation(result);
+                AssertCapturedImagesHaveVisualVariation(result);
                 Assert.That(target.maximized, Is.True);
             }
             finally
             {
-                DeleteCapturedImage(result);
+                DeleteCapturedImages(result);
             }
         }
         finally
@@ -4358,19 +4361,33 @@ public sealed class ConduitMcpToolsTests
     static async Task<string> InvokeScreenshotWithoutDesktopFocusChangeAsync(string target)
     {
         var previouslyFocusedWindow = EditorWindow.focusedWindow;
-        var wasApplicationActive = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
-        var applicationFocusChanges = 0;
+        var previousActiveRenderTexture = RenderTexture.active;
+        bool wasApplicationActive = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+        int applicationFocusChanges = 0;
         EditorApplication.focusChanged += TrackApplicationFocus;
         try
         {
             var result = await InvokeScreenshotAsync(target);
-            Assert.That(applicationFocusChanges, Is.Zero, "Unity application focus changed during capture.");
-            Assert.That(EditorWindow.focusedWindow, Is.SameAs(previouslyFocusedWindow));
-            Assert.That(
-                UnityEditorInternal.InternalEditorUtility.isApplicationActive,
-                Is.EqualTo(wasApplicationActive)
-            );
-            return result;
+            try
+            {
+                Assert.That(applicationFocusChanges, Is.Zero, "Unity application focus changed during capture.");
+                Assert.That(EditorWindow.focusedWindow, Is.SameAs(previouslyFocusedWindow));
+                Assert.That(
+                    UnityEditorInternal.InternalEditorUtility.isApplicationActive,
+                    Is.EqualTo(wasApplicationActive)
+                );
+                Assert.That(
+                    RenderTexture.active,
+                    Is.SameAs(previousActiveRenderTexture),
+                    "The active render texture changed during capture."
+                );
+                return result;
+            }
+            catch
+            {
+                DeleteCapturedImages(result);
+                throw;
+            }
         }
         finally
         {
@@ -4404,29 +4421,35 @@ public sealed class ConduitMcpToolsTests
             window.Close();
     }
 
-    static void DeleteCapturedImage(string resultText)
-        => File.Delete(GetCapturedImagePath(resultText));
+    static void DeleteCapturedImages(string resultText)
+    {
+        foreach (var path in GetCapturedImagePaths(resultText))
+            File.Delete(path);
+    }
 
-    static void AssertCapturedImageHasVisualVariation(string resultText)
+    static void AssertCapturedImagesHaveVisualVariation(string resultText)
     {
         var texture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
         try
         {
-            Assert.That(
-                ImageConversion.LoadImage(texture, File.ReadAllBytes(GetCapturedImagePath(resultText))),
-                Is.True
-            );
-            var pixels = texture.GetPixels32();
-            var first = pixels[0];
-            var hasVariation = false;
-            foreach (var pixel in pixels)
-                if (!pixel.Equals(first))
-                {
-                    hasVariation = true;
-                    break;
-                }
+            foreach (var path in GetCapturedImagePaths(resultText))
+            {
+                Assert.That(
+                    ImageConversion.LoadImage(texture, File.ReadAllBytes(path)),
+                    Is.True
+                );
+                var pixels = texture.GetPixels32();
+                var first = pixels[0];
+                bool hasVariation = false;
+                foreach (var pixel in pixels)
+                    if (!pixel.Equals(first))
+                    {
+                        hasVariation = true;
+                        break;
+                    }
 
-            Assert.That(hasVariation, Is.True, "The captured image is a uniform color.");
+                Assert.That(hasVariation, Is.True, $"The captured image '{path}' is a uniform color.");
+            }
         }
         finally
         {
@@ -4434,16 +4457,26 @@ public sealed class ConduitMcpToolsTests
         }
     }
 
-    static string GetCapturedImagePath(string resultText)
+    static IReadOnlyList<string> GetCapturedImagePaths(string resultText)
     {
         const string marker = " image captured: ";
-        var markerIndex = resultText.IndexOf(marker, StringComparison.Ordinal);
-        Assert.That(markerIndex, Is.GreaterThanOrEqualTo(0), resultText);
+        var paths = new List<string>();
+        foreach (var line in resultText.Split('\n'))
+        {
+            int markerIndex = line.IndexOf(marker, StringComparison.Ordinal);
+            if (markerIndex < 0)
+                continue;
 
-        var relativePath = resultText[(markerIndex + marker.Length)..].Trim();
-        var absolutePath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", relativePath));
-        Assert.That(File.Exists(absolutePath), Is.True, absolutePath);
-        return absolutePath;
+            var relativePath = line[(markerIndex + marker.Length)..].Trim();
+            var absolutePath = Path.GetFullPath(
+                Path.Combine(Application.dataPath, "..", relativePath)
+            );
+            Assert.That(File.Exists(absolutePath), Is.True, absolutePath);
+            paths.Add(absolutePath);
+        }
+
+        Assert.That(paths, Is.Not.Empty, resultText);
+        return paths;
     }
 
     static bool SupportsRenderedScreenshots()
