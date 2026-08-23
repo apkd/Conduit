@@ -41,9 +41,14 @@ namespace Conduit
             );
 
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            builder.AppendLine($"Scanned assets: {assetPaths.Length}");
-            builder.AppendLine($"Missing script hits: {totalMissingScriptCount}");
-            builder.AppendLine();
+            builder
+                .Append("Scanned assets: ")
+                .Append(assetPaths.Length)
+                .AppendLine()
+                .Append("Missing script hits: ")
+                .Append(totalMissingScriptCount)
+                .AppendLine()
+                .AppendLine();
 
             string? currentAssetPath = null;
             foreach (var hit in hits)
@@ -54,13 +59,23 @@ namespace Conduit
                         builder.AppendLine();
 
                     currentAssetPath = hit.AssetPath;
-                    builder.AppendLine($"[{hit.AssetKind}] {currentAssetPath}");
+                    builder
+                        .Append('[')
+                        .Append(hit.AssetKind)
+                        .Append("] ")
+                        .AppendLine(currentAssetPath);
                 }
 
-                builder.Append($"- {hit.ObjectPath} (missing_scripts={hit.MissingScriptCount}");
+                builder
+                    .Append("- ")
+                    .Append(hit.ObjectPath)
+                    .Append(" (missing_scripts=")
+                    .Append(hit.MissingScriptCount);
                 if (!string.IsNullOrWhiteSpace(hit.NearestPrefabAssetPath)
                     && !string.Equals(hit.NearestPrefabAssetPath, hit.AssetPath, StringComparison.OrdinalIgnoreCase))
-                    builder.Append($", prefab_source={hit.NearestPrefabAssetPath}");
+                    builder
+                        .Append(", prefab_source=")
+                        .Append(hit.NearestPrefabAssetPath);
 
                 builder.AppendLine(")");
             }
@@ -101,24 +116,31 @@ namespace Conduit
 
         static void ScanHierarchy(GameObject root, string assetPath, string assetKind, List<MissingScriptHit> hits)
         {
-            foreach (var transform in root.GetComponentsInChildren<Transform>(true))
+            using var pooledPending = ConduitUtility.GetPooledList<Transform>(out var pending);
+            pending.Add(root.transform);
+            while (pending.Count > 0)
             {
-                var count = GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(transform.gameObject);
-                if (count <= 0)
-                    continue;
+                var lastIndex = pending.Count - 1;
+                var transform = pending[lastIndex];
+                pending.RemoveAt(lastIndex);
+                var gameObject = transform.gameObject;
+                var count = GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(gameObject);
+                if (count > 0)
+                    hits.Add(
+                        new()
+                        {
+                            AssetPath = assetPath,
+                            AssetKind = assetKind,
+                            ObjectPath = ConduitUtility.BuildHierarchyPath(transform),
+                            MissingScriptCount = count,
+                            NearestPrefabAssetPath = PrefabUtility.IsPartOfPrefabInstance(gameObject)
+                                ? PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(gameObject)
+                                : null,
+                        }
+                    );
 
-                hits.Add(
-                    new()
-                    {
-                        AssetPath = assetPath,
-                        AssetKind = assetKind,
-                        ObjectPath = ConduitUtility.BuildHierarchyPath(transform),
-                        MissingScriptCount = count,
-                        NearestPrefabAssetPath = PrefabUtility.IsPartOfPrefabInstance(transform.gameObject)
-                            ? PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(transform.gameObject)
-                            : null,
-                    }
-                );
+                for (var childIndex = transform.childCount - 1; childIndex >= 0; --childIndex)
+                    pending.Add(transform.GetChild(childIndex));
             }
         }
 

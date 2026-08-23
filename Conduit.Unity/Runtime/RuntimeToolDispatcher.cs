@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Pool;
 using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
@@ -21,18 +22,25 @@ namespace Conduit.Runtime
     {
         static readonly ConcurrentQueue<RuntimeRequest> requests = new();
         static bool executing;
+        static int requestCount;
 
         public static void Enqueue(
             RuntimeBridgeSession session,
             string requestId,
-            BridgeCommand command) =>
+            BridgeCommand command)
+        {
             requests.Enqueue(new(session, requestId, command));
+            Interlocked.Increment(ref requestCount);
+        }
 
         public static void Pump()
         {
-            if (Volatile.Read(ref executing) || !requests.TryDequeue(out var request))
+            if (Volatile.Read(ref executing)
+                || Volatile.Read(ref requestCount) == 0
+                || !requests.TryDequeue(out var request))
                 return;
 
+            Interlocked.Decrement(ref requestCount);
             Volatile.Write(ref executing, true);
             ExecuteAsync(request);
         }
@@ -94,6 +102,9 @@ namespace Conduit.Runtime
 
     static class RuntimeToolDispatcher
     {
+        const int MaximumDisplayedFieldCount = 100;
+        static readonly ConcurrentDictionary<Type, FieldInfo[]> fieldCache = new();
+
 #if !MODULE_IMAGECONVERSION && !MODULE_SCREENCAPTURE
         const string ScreenshotModuleUnavailableDiagnostic =
             "ERROR: Unity built-in modules `com.unity.modules.imageconversion` and " +
@@ -141,11 +152,14 @@ namespace Conduit.Runtime
         static string BuildStatus()
         {
             var scenes = new string[SceneManager.sceneCount];
+            var activeDetours = DetourRuntime.ActiveMethodNames;
+            var activeScene = SceneManager.GetActiveScene();
             for (var index = 0; index < scenes.Length; index++)
             {
                 var scene = SceneManager.GetSceneAt(index);
-                var name = string.IsNullOrWhiteSpace(scene.path) ? scene.name : scene.path;
-                scenes[index] = scene == SceneManager.GetActiveScene()
+                var scenePath = scene.path;
+                var name = string.IsNullOrWhiteSpace(scenePath) ? scene.name : scenePath;
+                scenes[index] = scene == activeScene
                     ? $"{name} [loaded, active]"
                     : $"{name} [loaded]";
             }
@@ -161,8 +175,8 @@ namespace Conduit.Runtime
                     ),
                     editor_mode = "player",
                     active_command_type = BridgeCommandTypes.Status,
-                    active_detour_count = DetourRuntime.ActiveCount,
-                    active_detours = DetourRuntime.ActiveMethodNames,
+                    active_detour_count = activeDetours.Length,
+                    active_detours = activeDetours,
                     scenes = scenes,
                 }
             );
@@ -175,7 +189,7 @@ namespace Conduit.Runtime
 
         static string Search(string? query)
         {
-            var matches = ConduitRuntimeSearch.ResolveMany(query);
+            var matches = ConduitRuntimeSearch.ResolveManyForDisplay(query);
             if (matches.Count == 0)
                 return $"No matches for '{query?.Trim() ?? string.Empty}'.";
 
@@ -185,7 +199,7 @@ namespace Conduit.Runtime
         static string Show(string? query)
         {
             var target = ConduitRuntimeSearch.ResolveOne(query ?? string.Empty);
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             builder.Append(target.name)
                 .Append(" [")
                 .Append(target.GetType().FullName)
@@ -196,13 +210,16 @@ namespace Conduit.Runtime
             {
                 builder.Append("Path: ")
                     .AppendLine(ConduitRuntimeSearch.GetHierarchyPath(gameObject));
-                AppendHierarchy(builder, gameObject.transform, string.Empty);
+                AppendHierarchy(builder, gameObject.transform);
             }
 
             if (target is GameObject targetGameObject)
             {
                 builder.AppendLine("Components:");
-                foreach (var component in targetGameObject.GetComponents<Component>())
+                using var pooledComponents = ListPool<Component>.Get(out var components);
+                components.Clear();
+                targetGameObject.GetComponents(components);
+                foreach (var component in components)
                 {
                     builder.Append("- ");
                     if (component == null)
@@ -219,7 +236,10 @@ namespace Conduit.Runtime
                 .AppendLine(RuntimeObjectJsonUtility.ToJson(target));
 
             AppendFields(builder, target);
-            return builder.ToString().TrimEnd();
+            while (builder.Length > 0 && char.IsWhiteSpace(builder[builder.Length - 1]))
+                builder.Length--;
+
+            return builder.ToString();
         }
 
         static string ToJson(string? query)
@@ -330,8 +350,7 @@ namespace Conduit.Runtime
                 camera.Render();
                 RenderTexture.active = renderTexture;
                 var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
-                texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-                texture.Apply();
+                texture.ReadPixels(new Rect(0, 0, width, height), 0, 0); // encoding reads CPU pixels; no GPU upload is needed
                 return texture;
             }
             finally
@@ -342,10 +361,10 @@ namespace Conduit.Runtime
             }
         }
 
-        static async Task<BridgeCommandResult> ExecuteCodeAsync(
+        static Task<BridgeCommandResult> ExecuteCodeAsync(
             BridgeCommand command,
             CancellationToken ct)
-            => await CompiledSnippetRunner.ExecuteAsync(
+            => CompiledSnippetRunner.ExecuteAsync(
                 command.artifacts,
                 command.target,
                 command.display_name,
@@ -376,14 +395,15 @@ namespace Conduit.Runtime
             };
             var handoffToken = Guid.NewGuid().ToString("N");
             startInfo.EnvironmentVariables["CONDUIT_HANDOFF_TOKEN"] = handoffToken;
-            var process = Process.Start(startInfo)
-                          ?? throw new InvalidOperationException("The replacement player process did not start.");
+            using var process = Process.Start(startInfo)
+                                ?? throw new InvalidOperationException("The replacement player process did not start.");
+            var processId = process.Id;
             RuntimeBridgeBootstrap.RequestQuit();
             return BridgeCommandResult.Success(
                 JsonUtility.ToJson(
                     new RuntimeRestartResult
                     {
-                        process_id = process.Id,
+                        process_id = processId,
                         handoff_token = handoffToken,
                     }
                 )
@@ -396,53 +416,74 @@ namespace Conduit.Runtime
             return BridgeCommandResult.Success();
         }
 
-        static void AppendHierarchy(StringBuilder builder, Transform transform, string indent)
+        static void AppendHierarchy(StringBuilder builder, Transform root)
         {
-            builder.Append(indent)
+            using var pooledPending = ListPool<(Transform Transform, int Depth)>.Get(out var pending);
+            pending.Clear();
+            pending.Add((root, 0));
+            while (pending.Count > 0)
+            {
+                var lastIndex = pending.Count - 1;
+                var (transform, depth) = pending[lastIndex];
+                pending.RemoveAt(lastIndex);
+                builder.Append(' ', depth * 2)
                 .Append("- ")
                 .Append(transform.name)
                 .Append(" [")
                 .Append(BridgeObjectId.Format(transform.gameObject))
                 .AppendLine("]");
-            var childIndent = indent + "  ";
-            for (var index = 0; index < transform.childCount; index++)
-                AppendHierarchy(builder, transform.GetChild(index), childIndent);
+
+                // reverse insertion preserves Unity's sibling order when the stack is consumed.
+                for (var index = transform.childCount - 1; index >= 0; --index)
+                    pending.Add((transform.GetChild(index), depth + 1));
+            }
         }
 
         static void AppendFields(StringBuilder builder, Object target)
         {
-            var count = 0;
-            for (var type = target.GetType(); type != null && type != typeof(Object); type = type.BaseType)
-                foreach (var field in type.GetFields(
-                             BindingFlags.Instance
-                             | BindingFlags.Public
-                             | BindingFlags.NonPublic
-                             | BindingFlags.DeclaredOnly
-                         ))
+            var fields = fieldCache.GetOrAdd(target.GetType(), static targetType =>
+            {
+                var fields = new List<FieldInfo>();
+                for (var type = targetType;
+                     type != null && type != typeof(Object);
+                     type = type.BaseType)
                 {
-                    if (field.IsStatic)
-                        continue;
-                    if (count++ >= 100)
-                        return;
-
-                    if (count == 1)
-                        builder.AppendLine("Fields:");
-
-                    object? value;
-                    try
+                    foreach (var field in type.GetFields(
+                                 BindingFlags.Instance
+                                 | BindingFlags.Public
+                                 | BindingFlags.NonPublic
+                                 | BindingFlags.DeclaredOnly
+                             ))
                     {
-                        value = field.GetValue(target);
+                        fields.Add(field);
+                        if (fields.Count == MaximumDisplayedFieldCount)
+                            return fields.ToArray();
                     }
-                    catch (Exception exception)
-                    {
-                        value = $"<{exception.GetType().Name}>";
-                    }
-
-                    builder.Append("- ")
-                        .Append(field.Name)
-                        .Append(": ")
-                        .AppendLine(BridgeValueFormatter.Format(value) ?? "null");
                 }
+
+                return fields.ToArray();
+            });
+            if (fields.Length == 0)
+                return;
+
+            builder.AppendLine("Fields:");
+            foreach (var field in fields)
+            {
+                object? value;
+                try
+                {
+                    value = field.GetValue(target);
+                }
+                catch (Exception exception)
+                {
+                    value = $"<{exception.GetType().Name}>";
+                }
+
+                builder.Append("- ")
+                    .Append(field.Name)
+                    .Append(": ")
+                    .AppendLine(BridgeValueFormatter.Format(value) ?? "null");
+            }
         }
 
         static GameObject? GetGameObject(Object target) =>

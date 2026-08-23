@@ -31,8 +31,7 @@ public sealed class ConduitToolUsageTests
             ConduitToolUsage.RestartStartedUtcTicksEnvironmentVariable
         );
 
-        PlayerPrefs.DeleteKey(ConduitToolUsage.ProjectDataPreferenceKey);
-        EditorPrefs.DeleteKey(ConduitToolUsage.AllProjectsDataPreferenceKey);
+        ConduitToolUsage.DeleteAllStoredData();
         EditorPrefs.SetBool(ConduitToolUsage.EnabledPreferenceKey, true);
         Environment.SetEnvironmentVariable(
             ConduitToolUsage.RestartStartedUtcTicksEnvironmentVariable,
@@ -43,6 +42,7 @@ public sealed class ConduitToolUsageTests
     [TearDown]
     public void TearDown()
     {
+        ConduitToolUsage.FlushPending();
         RestorePlayerPreference(
             ConduitToolUsage.ProjectDataPreferenceKey,
             hadProjectData,
@@ -97,6 +97,11 @@ public sealed class ConduitToolUsageTests
         ConduitToolUsage.RecordDuration(BridgeCommandTypes.Show, 10d);
         ConduitToolUsage.RecordDuration(BridgeCommandTypes.Show, 20d);
         ConduitToolUsage.RecordDuration(BridgeCommandTypes.Show, 30d);
+
+        AssertRecord(ConduitToolUsage.GetProjectData(), BridgeCommandTypes.Show, 3L, 20d);
+        AssertRecord(ConduitToolUsage.GetAllProjectsData(), BridgeCommandTypes.Show, 3L, 20d);
+
+        ConduitToolUsage.FlushPending();
 
         AssertRecord(ConduitToolUsage.GetProjectData(), BridgeCommandTypes.Show, 3L, 20d);
         AssertRecord(ConduitToolUsage.GetAllProjectsData(), BridgeCommandTypes.Show, 3L, 20d);

@@ -34,6 +34,7 @@ namespace Conduit
         static readonly Regex guidId = new(@"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex burstDiagnostic = new(@"(?m)^(?:.*\(\d+,\d+\):\s*)?Burst\s+(?:warning|error)\s+BC\d+\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         static readonly Regex ignoredBurstWarning = new(@"(?m)^(?:.*\(\d+,\d+\):\s*)?Burst\s+warning\s+BC1371\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        static readonly char[] invalidFileNameCharacters = Path.GetInvalidFileNameChars();
 
         public static BridgeCommandResult ViewBurstAsm(string targetName, string cpu = "x86")
         {
@@ -67,7 +68,27 @@ namespace Conduit
         }
 
 #if MODULE_BURST
+        // discovery scans every candidate assembly; a domain reload invalidates this assembly-bound target set.
+        static List<BurstTarget>? cachedTargets;
+        static readonly string[] fusedMultiplyAddPrefixes =
+        {
+            "vfmadd", "vfmsub", "vfnmadd", "vfnmsub",
+            "fmadd", "fmsub", "fnmadd", "fnmsub",
+            "fmla", "fmls", "fmad", "fmsb", "fnmad", "fnmsb",
+        };
+        static readonly string[] atomicMemoryPrefixes = { "ldar", "ldaxr", "ldxr", "stlr", "stlxr", "stxr" };
+        static readonly string[] vectorLaneParts =
+        {
+            "shuf", "perm", "blend", "unpck", "pack", "insert", "extract",
+            "replace", "splat", "swizzle", "pinsr", "pextr", "alignr",
+        };
+        static readonly string[] vectorLanePrefixes = { "zip", "uzp", "trn", "tbl", "tbx", "ext", "ins", "dup", "rev" };
+        static readonly string[] wasmVectorPrefixes = { "i8x16.", "i16x8.", "i32x4.", "i64x2.", "f32x4.", "f64x2." };
+
         static List<BurstTarget> LoadTargets()
+            => cachedTargets ??= DiscoverTargets();
+
+        static List<BurstTarget> DiscoverTargets()
         {
             var reflectionType = Type.GetType("Unity.Burst.Editor.BurstReflection, Unity.Burst", true)!;
             reflectionType.GetMethod("EnsureInitialized", BindingFlags.Public | BindingFlags.Static)?.Invoke(null, null);
@@ -304,11 +325,12 @@ namespace Conduit
 
         static string BuildInspectorOptions(string defaultOptions, string compilerTarget, string debugLevel, string dump)
         {
-            var builder = new StringBuilder(defaultOptions.Trim());
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.Append(defaultOptions.Trim());
             Append("--disable-warnings=BC1370;BC1322");
-            Append($"--target={compilerTarget}");
-            Append($"--debug={debugLevel}");
-            Append($"--dump={dump}");
+            AppendValue("--target=", compilerTarget);
+            AppendValue("--debug=", debugLevel);
+            AppendValue("--dump=", dump);
             return builder.ToString();
 
             void Append(string option)
@@ -317,6 +339,14 @@ namespace Conduit
                     builder.Append('\n');
 
                 builder.Append(option);
+            }
+
+            void AppendValue(string prefix, string value)
+            {
+                if (builder.Length > 0)
+                    builder.Append('\n');
+
+                builder.Append(prefix).Append(value);
             }
         }
 
@@ -368,7 +398,16 @@ namespace Conduit
 
         internal static string StripTrailingTemporaryLabelBlocks(string assembly)
         {
-            var lines = assembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            if (assembly.Length > 0
+                && assembly[^1] != '\n'
+                && assembly.IndexOf('\r') < 0)
+            {
+                var finalLine = assembly.AsSpan(assembly.LastIndexOf('\n') + 1).Trim();
+                if (!finalLine.IsEmpty && finalLine[0] is not ('#' or '/' or ';' or '.'))
+                    return assembly;
+            }
+
+            var lines = SplitLines(assembly);
             var end = lines.Length - 1;
             while (end >= 0 && string.IsNullOrWhiteSpace(lines[end]))
                 end--;
@@ -393,11 +432,22 @@ namespace Conduit
 
         internal static string CleanDisassembly(string assembly)
         {
-            var lines = assembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            var lines = SplitLines(assembly);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.EnsureCapacity(assembly.Length);
             for (var i = 0; i < lines.Length; i++)
-                lines[i] = CleanLine(lines[i]).TrimStart();
+            {
+                if (i > 0)
+                    builder.Append('\n');
 
-            return Join(lines, lines.Length);
+                var line = CleanLine(lines[i]);
+                var start = 0;
+                while (start < line.Length && char.IsWhiteSpace(line[start]))
+                    ++start;
+                builder.Append(line, start, line.Length - start);
+            }
+
+            return builder.ToString();
         }
 
         internal static bool ShouldSuppressBurstDiagnostic(string message) =>
@@ -413,11 +463,17 @@ namespace Conduit
 
         internal static string SimplifyBurstDiagnostic(string diagnostic)
         {
-            var lines = diagnostic.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            var lines = SplitLines(diagnostic);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.EnsureCapacity(diagnostic.Length);
             for (var i = 0; i < lines.Length; i++)
-                lines[i] = CleanDiagnosticLine(lines[i]);
+            {
+                if (i > 0)
+                    builder.Append('\n');
+                builder.Append(CleanDiagnosticLine(lines[i]));
+            }
 
-            return Join(lines, lines.Length);
+            return builder.ToString();
         }
 
         internal static string BuildOutput(BurstTarget target, string disassembly)
@@ -438,8 +494,11 @@ namespace Conduit
         internal static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly)
             => CompleteOutput(target, disassembly, AnalyzeAssembly(target, disassembly, string.Empty));
 
-        static string BuildOutput(BurstTarget target, string disassembly, BurstAsmStats stats) =>
-            $"{FormatReport(target, stats)}\n\n# Asm\n\n```asm\n{disassembly}\n```";
+        static string BuildOutput(BurstTarget target, string disassembly, BurstAsmStats stats)
+            => BuildOutput(FormatReport(target, stats), disassembly);
+
+        static string BuildOutput(string report, string disassembly)
+            => $"{report}\n\n# Asm\n\n```asm\n{disassembly}\n```";
 
         internal static string BuildRawOutput(
             BurstTarget target,
@@ -461,13 +520,14 @@ namespace Conduit
 
         static BridgeCommandResult CompleteOutput(BurstTarget target, string disassembly, BurstAsmStats stats)
         {
-            var output = BuildOutput(target, disassembly, stats);
+            var report = FormatReport(target, stats);
+            var output = BuildOutput(report, disassembly);
             if (CountLines(output) <= LargeOutputLineThreshold)
                 return Success(output);
 
             var path = SaveLargeOutput(target, output, ".txt");
             var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
-            return Success($"{FormatReport(target, stats)}\n\n*Assembly output very large ({kilobytes} KB); saved to `{path}`.*");
+            return Success($"{report}\n\n*Assembly output very large ({kilobytes} KB); saved to `{path}`.*");
         }
 
         static string BuildRawOutput(
@@ -477,6 +537,14 @@ namespace Conduit
             BurstAsmStats stats)
         {
             var report = FormatRawReport(target, outputTarget, stats);
+            return BuildRawOutput(report, output, outputTarget);
+        }
+
+        static string BuildRawOutput(
+            string report,
+            string output,
+            BurstOutputTarget outputTarget)
+        {
             return $"{report}\n\n## {outputTarget.DisplayName}\n\n```{outputTarget.CodeFence}\n{output}\n```";
         }
 
@@ -486,14 +554,15 @@ namespace Conduit
             BurstOutputTarget outputTarget,
             BurstAsmStats stats)
         {
-            var formatted = BuildRawOutput(target, output, outputTarget, stats);
+            var report = FormatRawReport(target, outputTarget, stats);
+            var formatted = BuildRawOutput(report, output, outputTarget);
             if (CountLines(formatted) <= LargeOutputLineThreshold)
                 return Success(formatted);
 
             var path = SaveLargeOutput(target, output, outputTarget.FileExtension);
             var kilobytes = Math.Max(1, (Encoding.UTF8.GetByteCount(output) + 1023) / 1024);
             return Success(
-                $"{FormatRawReport(target, outputTarget, stats)}\n\n" +
+                $"{report}\n\n" +
                 $"*{outputTarget.DisplayName} output very large ({kilobytes} KB); saved to `{path}`.*"
             );
         }
@@ -516,7 +585,7 @@ namespace Conduit
                 AppendOptimizationRemarks(builder, stats, function);
             }
 
-            return builder.ToString().TrimEnd();
+            return builder.TrimEnd().ToString();
         }
 
         static string ReportFunction(BurstTarget target, BurstAsmStats stats) =>
@@ -526,13 +595,14 @@ namespace Conduit
 
         static BurstAsmStats AnalyzeAssembly(BurstTarget target, string disassembly, string cpu)
         {
-            var lines = disassembly.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-            var blocks = GetFunctionBlocks(lines);
+            var lines = SplitLines(disassembly);
+            using var pooledBlocks = ConduitUtility.GetPooledList<BurstAsmFunctionBlock>(out var blocks);
+            GetFunctionBlocks(lines, blocks);
             if (blocks.Count == 0)
                 return AnalyzeLines(lines, 0, lines.Length, SupportsNativeLoopAnalysis(cpu, lines, 0, lines.Length));
 
             var selected = SelectMainBlock(target, blocks);
-            var forwarders = new List<string>();
+            using var pooledForwarders = ConduitUtility.GetPooledList<string>(out var forwarders);
             // burst sometimes exposes the managed entry as a tiny thunk; follow only direct, scaffolding-only
             // forwarders; names such as $Invoke are useful evidence but do not establish which block holds the body.
             while (TryGetForwardedBlock(lines, selected, blocks, out var forwarded))
@@ -568,12 +638,13 @@ namespace Conduit
                 return false;
 
             var target = string.Empty;
+            using var pooledOperands = ConduitUtility.GetPooledList<string>(out var parsedOperands);
             for (int index = block.Start; index < block.End; ++index)
             {
                 if (!TryParseInstruction(lines[index], out var mnemonic, out var operands))
                     continue;
 
-                var parsedOperands = SplitOperands(operands);
+                SplitOperands(operands, parsedOperands);
                 if (IsCall(mnemonic) && IsDirectCall(mnemonic, parsedOperands))
                 {
                     if (!SetTarget(parsedOperands[0]))
@@ -631,14 +702,15 @@ namespace Conduit
             }
         }
 
-        static List<BurstAsmFunctionBlock> GetFunctionBlocks(string[] lines)
+        static void GetFunctionBlocks(
+            string[] lines,
+            List<BurstAsmFunctionBlock> blocks)
         {
-            var blocks = new List<BurstAsmFunctionBlock>();
             var currentLabel = string.Empty;
             var start = -1;
             for (int index = 0, n = lines.Length; index < n; ++index)
             {
-                var line = lines[index].Trim();
+                var line = lines[index].AsSpan().Trim();
                 if (line.StartsWith(".section", StringComparison.Ordinal)
                     || line.StartsWith(".text", StringComparison.Ordinal))
                 {
@@ -655,7 +727,6 @@ namespace Conduit
             }
 
             Flush(lines.Length);
-            return blocks;
 
             void Flush(int end)
             {
@@ -664,7 +735,7 @@ namespace Conduit
 
                 int instructionCount = 0;
                 for (int index = start; index < end; ++index)
-                    if (TryParseInstruction(lines[index], out _, out _))
+                    if (IsInstructionLine(lines[index]))
                         instructionCount++;
 
                 if (instructionCount > 0)
@@ -675,18 +746,31 @@ namespace Conduit
             }
         }
 
-        static bool IsFunctionLabel(string line, out string label)
+        static bool IsFunctionLabel(ReadOnlySpan<char> line, out string label)
         {
             label = string.Empty;
-            if (!line.EndsWith(":", StringComparison.Ordinal))
+            if (line.Length == 0 || line[^1] != ':')
                 return false;
 
-            label = line[..^1].Trim();
-            if (label.Length == 0 || label.StartsWith(".L", StringComparison.Ordinal))
+            var labelSpan = line[..^1].Trim();
+            if (labelSpan.Length == 0 || labelSpan.StartsWith(".L", StringComparison.Ordinal))
                 return false;
 
-            return !label.StartsWith(".seh", StringComparison.Ordinal)
-                   && !label.StartsWith(".cv", StringComparison.Ordinal);
+            if (labelSpan.StartsWith(".seh", StringComparison.Ordinal)
+                || labelSpan.StartsWith(".cv", StringComparison.Ordinal))
+                return false;
+
+            label = labelSpan.ToString();
+            return true;
+        }
+
+        static bool IsInstructionLine(string line)
+        {
+            var text = line.AsSpan().Trim();
+            return text.Length > 0
+                   && text[0] is not ('#' or ';' or '.')
+                   && !text.StartsWith("//", StringComparison.Ordinal)
+                   && text[^1] != ':';
         }
 
         static BurstAsmFunctionBlock SelectMainBlock(BurstTarget target, IReadOnlyList<BurstAsmFunctionBlock> blocks)
@@ -770,20 +854,42 @@ namespace Conduit
 
         static string NormalizeAsmText(string value)
         {
-            var builder = new StringBuilder(value.Length);
+            var length = 0;
+            var unchanged = true;
             foreach (var character in value)
                 if (char.IsLetterOrDigit(character))
-                    builder.Append(char.ToLowerInvariant(character));
+                {
+                    length++;
+                    unchanged &= char.ToLowerInvariant(character) == character;
+                }
+                else
+                    unchanged = false;
 
-            return builder.ToString();
+            if (unchanged)
+                return value;
+
+            return string.Create(length, value, static (destination, source) =>
+            {
+                var index = 0;
+                foreach (var character in source)
+                    if (char.IsLetterOrDigit(character))
+                        destination[index++] = char.ToLowerInvariant(character);
+            });
         }
 
         static BurstAsmStats AnalyzeLines(string[] lines, int start, int end, bool analyzeLoops)
         {
             var stats = new BurstAsmStats();
-            var labels = new Dictionary<string, int>(StringComparer.Ordinal);
-            var labelsByInstruction = new Dictionary<int, List<string>>();
-            var instructions = new List<BurstAnalyzedInstruction>();
+            var labels = analyzeLoops
+                ? new Dictionary<string, int>(StringComparer.Ordinal)
+                : null;
+            var labelsByInstruction = analyzeLoops
+                ? new Dictionary<int, List<string>>()
+                : null;
+            var instructions = analyzeLoops
+                ? new List<BurstAnalyzedInstruction>(end - start)
+                : null;
+            using var pooledOperands = ConduitUtility.GetPooledList<string>(out var parsedOperands);
             var currentSource = string.Empty;
             for (int index = start; index < end; ++index)
             {
@@ -796,8 +902,11 @@ namespace Conduit
 
                 if (TryParseCodeLabel(line, out var label))
                 {
-                    labels[label] = stats.InstructionCount;
-                    if (!labelsByInstruction.TryGetValue(stats.InstructionCount, out var instructionLabels))
+                    if (!analyzeLoops)
+                        continue;
+
+                    labels![label] = stats.InstructionCount;
+                    if (!labelsByInstruction!.TryGetValue(stats.InstructionCount, out var instructionLabels))
                     {
                         instructionLabels = new();
                         labelsByInstruction.Add(stats.InstructionCount, instructionLabels);
@@ -809,7 +918,7 @@ namespace Conduit
                 if (!TryParseInstruction(line, out var mnemonic, out var operands))
                     continue;
 
-                var parsedOperands = SplitOperands(operands);
+                SplitOperands(operands, parsedOperands);
                 stats.InstructionCount++;
                 stats.InstructionCounts.TryGetValue(mnemonic, out var mnemonicCount);
                 stats.InstructionCounts[mnemonic] = mnemonicCount + 1;
@@ -822,14 +931,22 @@ namespace Conduit
                 else if (isUnconditionalBranch)
                     stats.UnconditionalBranchCount++;
 
-                instructions.Add(new(
-                    mnemonic,
-                    parsedOperands,
-                    currentSource,
-                    facts,
-                    isConditionalBranch,
-                    isUnconditionalBranch
-                ));
+                if (analyzeLoops)
+                {
+                    var branchTarget = string.Empty;
+                    if ((isConditionalBranch || isUnconditionalBranch)
+                        && TryGetDirectBranchTarget(parsedOperands, out var directBranchTarget))
+                        branchTarget = CleanTransferTarget(directBranchTarget);
+
+                    instructions!.Add(new(
+                        mnemonic,
+                        branchTarget,
+                        currentSource,
+                        facts,
+                        isConditionalBranch,
+                        isUnconditionalBranch
+                    ));
+                }
 
                 if (currentSource.Length > 0)
                 {
@@ -846,7 +963,7 @@ namespace Conduit
             }
 
             if (analyzeLoops)
-                AnalyzeNativeLoops(stats, instructions, labels, labelsByInstruction);
+                AnalyzeNativeLoops(stats, instructions!, labels!, labelsByInstruction!);
 
             return stats;
         }
@@ -854,7 +971,7 @@ namespace Conduit
         static bool TryReadRenderedSourceLocation(string line, out string source)
         {
             source = string.Empty;
-            var trimmed = line.TrimStart();
+            var trimmed = line.AsSpan().TrimStart();
             if (trimmed.Length < 2 || trimmed[0] is not ('#' or ';') || !char.IsWhiteSpace(trimmed[1]))
                 return false;
 
@@ -994,11 +1111,9 @@ namespace Conduit
                 return;
             }
 
-            if (StartsWithAny(
-                    baseMnemonic,
-                    "vfmadd", "vfmsub", "vfnmadd", "vfnmsub",
-                    "fmadd", "fmsub", "fnmadd", "fnmsub",
-                    "fmla", "fmls", "fmad", "fmsb", "fnmad", "fnmsb"))
+            if (baseMnemonic.Length > 0
+                && baseMnemonic[0] is 'v' or 'f'
+                && StartsWithAny(baseMnemonic, fusedMultiplyAddPrefixes))
             {
                 stats.FusedMultiplyAddInstructionCount++;
                 return;
@@ -1029,7 +1144,9 @@ namespace Conduit
                 || baseMnemonic.IndexOf(".atomic.", StringComparison.Ordinal) >= 0
                 || baseMnemonic.StartsWith("atomic.", StringComparison.Ordinal)
                 || IsArmReadModifyWrite(baseMnemonic)
-                || StartsWithAny(baseMnemonic, "ldar", "ldaxr", "ldxr", "stlr", "stlxr", "stxr"))
+                || baseMnemonic.Length > 0
+                   && baseMnemonic[0] is 'l' or 's'
+                   && StartsWithAny(baseMnemonic, atomicMemoryPrefixes))
                 stats.AtomicInstructionCount++;
         }
 
@@ -1111,41 +1228,53 @@ namespace Conduit
             mnemonic is "lea" or "adr" or "adrp";
 
         static bool IsArmReadModifyWrite(string mnemonic) =>
-            mnemonic.StartsWith("ldadd", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldclr", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldeor", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldset", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldsmax", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldsmin", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldumax", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldumin", StringComparison.Ordinal)
-            || mnemonic.StartsWith("swp", StringComparison.Ordinal)
-            || mnemonic.StartsWith("cas", StringComparison.Ordinal);
+            mnemonic.Length > 0
+            && mnemonic[0] switch
+            {
+                'l' => mnemonic.StartsWith("ldadd", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldclr", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldeor", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldset", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldsmax", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldsmin", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldumax", StringComparison.Ordinal)
+                       || mnemonic.StartsWith("ldumin", StringComparison.Ordinal),
+                's' => mnemonic.StartsWith("swp", StringComparison.Ordinal),
+                'c' => mnemonic.StartsWith("cas", StringComparison.Ordinal),
+                _ => false,
+            };
 
         static bool IsLoadMnemonic(string mnemonic) =>
             mnemonic.IndexOf(".load", StringComparison.Ordinal) > 0
-            || mnemonic.StartsWith("ldr", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldp", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ld1", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ld2", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ld3", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ld4", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldar", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldax", StringComparison.Ordinal)
-            || mnemonic.StartsWith("ldxr", StringComparison.Ordinal)
-            || mnemonic is "fld" or "fld1" or "fldl2e" or "fldl2t" or "fldlg2" or "fldln2" or "fldpi" or "fldz";
+            || mnemonic.Length > 0
+               && mnemonic[0] switch
+               {
+                   'l' => mnemonic.StartsWith("ldr", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ldp", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ld1", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ld2", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ld3", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ld4", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ldar", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ldax", StringComparison.Ordinal)
+                          || mnemonic.StartsWith("ldxr", StringComparison.Ordinal),
+                   'f' => mnemonic is "fld" or "fld1" or "fldl2e" or "fldl2t" or "fldlg2" or "fldln2" or "fldpi" or "fldz",
+                   _ => false,
+               };
 
         static bool IsStoreMnemonic(string mnemonic) =>
             mnemonic.IndexOf(".store", StringComparison.Ordinal) > 0
-            || mnemonic.StartsWith("str", StringComparison.Ordinal)
-            || mnemonic.StartsWith("stp", StringComparison.Ordinal)
-            || mnemonic.StartsWith("st1", StringComparison.Ordinal)
-            || mnemonic.StartsWith("st2", StringComparison.Ordinal)
-            || mnemonic.StartsWith("st3", StringComparison.Ordinal)
-            || mnemonic.StartsWith("st4", StringComparison.Ordinal)
-            || mnemonic.StartsWith("stlr", StringComparison.Ordinal)
-            || mnemonic.StartsWith("stlx", StringComparison.Ordinal)
-            || mnemonic.StartsWith("stxr", StringComparison.Ordinal);
+            || mnemonic.Length > 0
+               && mnemonic[0] == 's'
+               && (mnemonic.StartsWith("str", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("stp", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("st1", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("st2", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("st3", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("st4", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("stlr", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("stlx", StringComparison.Ordinal)
+                   || mnemonic.StartsWith("stxr", StringComparison.Ordinal));
 
         static bool IsReadOnlyMemoryDestination(string mnemonic) =>
             mnemonic is "cmp" or "test" or "bt" or "call" or "jmp" or "push"
@@ -1165,14 +1294,12 @@ namespace Conduit
 
         static BurstSimdRole ClassifySimd(string mnemonic, string operands, bool isZeroingXor)
         {
-            var hasXmm = ContainsRegisterPrefix(operands, "xmm");
-            var hasYmm = ContainsRegisterPrefix(operands, "ymm");
-            var hasZmm = ContainsRegisterPrefix(operands, "zmm");
-            var hasArmVector = ContainsRegisterPrefix(operands, "v")
-                               || ContainsRegisterPrefix(operands, "q")
-                               || ContainsRegisterPrefix(operands, "z");
-            var hasArmScalar = ContainsRegisterPrefix(operands, "s")
-                               || ContainsRegisterPrefix(operands, "d");
+            var registers = ClassifyRegisters(operands);
+            var hasXmm = (registers & BurstRegisterKinds.Xmm) != 0;
+            var hasYmm = (registers & BurstRegisterKinds.Ymm) != 0;
+            var hasZmm = (registers & BurstRegisterKinds.Zmm) != 0;
+            var hasArmVector = (registers & BurstRegisterKinds.ArmVector) != 0;
+            var hasArmScalar = (registers & BurstRegisterKinds.ArmScalar) != 0;
             var hasPackedMnemonic = IsPackedVectorMnemonic(mnemonic);
             var isVector = hasXmm || hasYmm || hasZmm || hasArmVector || hasArmScalar
                            || hasPackedMnemonic
@@ -1205,17 +1332,10 @@ namespace Conduit
             || mnemonic.IndexOf("broadcast", StringComparison.Ordinal) >= 0;
 
         static bool IsVectorLaneOperation(string mnemonic) =>
-            ContainsAny(
-                mnemonic,
-                "shuf", "perm", "blend", "unpck", "pack", "insert", "extract",
-                "replace", "splat", "swizzle", "pinsr", "pextr", "alignr"
-            )
-            || StartsWithAny(
-                mnemonic,
-                "zip", "uzp", "trn", "tbl", "tbx", "ext", "ins", "dup", "rev"
-            );
+            ContainsAny(mnemonic, vectorLaneParts)
+            || StartsWithAny(mnemonic, vectorLanePrefixes);
 
-        static bool ContainsAny(string value, params string[] parts)
+        static bool ContainsAny(string value, string[] parts)
         {
             foreach (var part in parts)
                 if (value.IndexOf(part, StringComparison.Ordinal) >= 0)
@@ -1224,7 +1344,7 @@ namespace Conduit
             return false;
         }
 
-        static bool StartsWithAny(string value, params string[] prefixes)
+        static bool StartsWithAny(string value, string[] prefixes)
         {
             foreach (var prefix in prefixes)
                 if (value.StartsWith(prefix, StringComparison.Ordinal))
@@ -1235,14 +1355,15 @@ namespace Conduit
 
         static void RecordPackedComputeWidth(BurstAsmStats stats, string operands)
         {
-            if (ContainsRegisterPrefix(operands, "z") && !ContainsRegisterPrefix(operands, "zmm"))
+            var registers = ClassifyRegisters(operands);
+            if ((registers & BurstRegisterKinds.ScalableArmVector) != 0)
             {
                 stats.PackedComputeUsesScalableVectors = true;
                 return;
             }
 
-            var width = ContainsRegisterPrefix(operands, "zmm") ? 512
-                : ContainsRegisterPrefix(operands, "ymm") ? 256
+            var width = (registers & BurstRegisterKinds.Zmm) != 0 ? 512
+                : (registers & BurstRegisterKinds.Ymm) != 0 ? 256
                 : 128;
             stats.PackedComputeWidth = Math.Max(stats.PackedComputeWidth, width);
         }
@@ -1341,9 +1462,9 @@ namespace Conduit
             return true;
         }
 
-        static List<string> SplitOperands(string operands)
+        static void SplitOperands(string operands, List<string> result)
         {
-            var result = new List<string>();
+            result.Clear();
             var start = 0;
             var depth = 0;
             var quoted = false;
@@ -1378,24 +1499,70 @@ namespace Conduit
                         continue;
                 }
 
-                var operand = operands[start..index].Trim();
+                var operand = operands.AsSpan(start, index - start).Trim();
                 if (operand.Length > 0)
-                    result.Add(operand);
+                    result.Add(operand.ToString());
+                start = index + 1;
+            }
+        }
+
+        static int CountOperands(string operands)
+        {
+            var count = 0;
+            var start = 0;
+            var depth = 0;
+            var quoted = false;
+            for (int index = 0, n = operands.Length; index <= n; ++index)
+            {
+                if (index < n)
+                {
+                    var character = operands[index];
+                    if (character == '"')
+                    {
+                        quoted = !quoted;
+                        continue;
+                    }
+
+                    if (quoted)
+                        continue;
+                    if (character is '[' or '(' or '{' or '<')
+                    {
+                        depth++;
+                        continue;
+                    }
+
+                    if (character is ']' or ')' or '}' or '>')
+                    {
+                        if (depth > 0)
+                            depth--;
+                        continue;
+                    }
+
+                    if (character != ',' || depth != 0)
+                        continue;
+                }
+
+                if (!operands.AsSpan(start, index - start).Trim().IsEmpty)
+                    count++;
                 start = index + 1;
             }
 
-            return result;
+            return count;
         }
 
         static bool TryParseCodeLabel(string line, out string label)
         {
             label = string.Empty;
-            var text = line.Trim();
-            if (!text.EndsWith(":", StringComparison.Ordinal))
+            var text = line.AsSpan().Trim();
+            if (text.Length == 0 || text[^1] != ':')
                 return false;
 
-            label = text[..^1].Trim().Trim('"');
-            return label.Length > 0;
+            var labelSpan = text[..^1].Trim().Trim('"');
+            if (labelSpan.Length == 0)
+                return false;
+
+            label = labelSpan.ToString();
+            return true;
         }
 
         static bool TryGetDirectBranchTarget(IReadOnlyList<string> operands, out string target)
@@ -1420,7 +1587,7 @@ namespace Conduit
         {
             mnemonic = string.Empty;
             operands = string.Empty;
-            var text = line.Trim();
+            var text = line.AsSpan().Trim();
             if (text.Length == 0
                 || text[0] is '#' or ';'
                 || text.StartsWith("//", StringComparison.Ordinal)
@@ -1432,7 +1599,7 @@ namespace Conduit
             if (firstEnd == 0)
                 return false;
 
-            var first = text[..firstEnd].ToLowerInvariant();
+            var first = text[..firstEnd].ToString().ToLowerInvariant();
             var operandStart = firstEnd;
             while (operandStart < text.Length && char.IsWhiteSpace(text[operandStart]))
                 ++operandStart;
@@ -1442,17 +1609,17 @@ namespace Conduit
                 if (secondEnd <= operandStart)
                     return false;
 
-                mnemonic = $"{first} {text[operandStart..secondEnd].ToLowerInvariant()}";
-                operands = secondEnd < text.Length ? text[secondEnd..].Trim() : string.Empty;
+                mnemonic = $"{first} {text[operandStart..secondEnd].ToString().ToLowerInvariant()}";
+                operands = secondEnd < text.Length ? text[secondEnd..].Trim().ToString() : string.Empty;
                 return true;
             }
 
             mnemonic = first;
-            operands = operandStart < text.Length ? text[operandStart..].Trim() : string.Empty;
+            operands = operandStart < text.Length ? text[operandStart..].Trim().ToString() : string.Empty;
             return true;
         }
 
-        static int ReadTokenEnd(string text, int start)
+        static int ReadTokenEnd(ReadOnlySpan<char> text, int start)
         {
             var index = start;
             while (index < text.Length)
@@ -1474,10 +1641,7 @@ namespace Conduit
         static bool IsPackedVectorMnemonic(string mnemonic) =>
             mnemonic.StartsWith("v", StringComparison.Ordinal) && !IsScalarSimdMnemonic(mnemonic)
             || mnemonic.StartsWith("v128.", StringComparison.Ordinal)
-            || StartsWithAny(
-                mnemonic,
-                "i8x16.", "i16x8.", "i32x4.", "i64x2.", "f32x4.", "f64x2."
-            )
+            || StartsWithAny(mnemonic, wasmVectorPrefixes)
             || mnemonic.StartsWith("padd", StringComparison.Ordinal)
             || mnemonic.StartsWith("psub", StringComparison.Ordinal)
             || mnemonic.StartsWith("pmul", StringComparison.Ordinal)
@@ -1511,53 +1675,77 @@ namespace Conduit
             mnemonic.StartsWith("ret", StringComparison.Ordinal)
             || mnemonic == "end_function";
 
-        static bool HasStackOrFrameOperand(string operands) =>
-            ContainsRegister(operands, "rsp")
-            || ContainsRegister(operands, "rbp")
-            || ContainsRegister(operands, "esp")
-            || ContainsRegister(operands, "ebp")
-            || ContainsRegister(operands, "sp")
-            || ContainsRegister(operands, "fp")
-            || ContainsRegister(operands, "x29");
-
-        static bool ContainsRegisterPrefix(string text, string prefix)
+        static bool HasStackOrFrameOperand(string operands)
         {
-            foreach (var token in RegisterTokens(text))
-                if (token.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    if (token.Length > prefix.Length && char.IsDigit(token[prefix.Length]))
-                        return true;
+            var text = operands.AsSpan();
+            for (var start = 0; start < text.Length;)
+            {
+                while (start < text.Length && !char.IsLetterOrDigit(text[start]))
+                    start++;
+                var end = start;
+                while (end < text.Length && char.IsLetterOrDigit(text[end]))
+                    end++;
 
-            return false;
-        }
-
-        static bool ContainsRegister(string text, string register)
-        {
-            foreach (var token in RegisterTokens(text))
-                if (string.Equals(token, register, StringComparison.OrdinalIgnoreCase))
+                var token = text[start..end];
+                if (token.Equals("rsp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("rbp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("esp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("ebp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("sp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("fp", StringComparison.OrdinalIgnoreCase)
+                    || token.Equals("x29", StringComparison.OrdinalIgnoreCase))
                     return true;
 
+                start = end;
+            }
+
             return false;
         }
 
-        static IEnumerable<string> RegisterTokens(string text)
+        static BurstRegisterKinds ClassifyRegisters(string operands)
         {
-            var start = -1;
-            for (int index = 0, n = text.Length; index <= n; ++index)
+            var result = BurstRegisterKinds.None;
+            var text = operands.AsSpan();
+            for (var start = 0; start < text.Length;)
             {
-                if (index < n && char.IsLetterOrDigit(text[index]))
-                {
-                    if (start < 0)
-                        start = index;
+                while (start < text.Length && !char.IsLetterOrDigit(text[start]))
+                    start++;
+                var end = start;
+                while (end < text.Length && char.IsLetterOrDigit(text[end]))
+                    end++;
 
-                    continue;
+                var token = text[start..end];
+                if (token.Length > 3 && char.IsDigit(token[3]))
+                {
+                    if (token[..3].Equals("xmm", StringComparison.OrdinalIgnoreCase))
+                        result |= BurstRegisterKinds.Xmm;
+                    else if (token[..3].Equals("ymm", StringComparison.OrdinalIgnoreCase))
+                        result |= BurstRegisterKinds.Ymm;
+                    else if (token[..3].Equals("zmm", StringComparison.OrdinalIgnoreCase))
+                        result |= BurstRegisterKinds.Zmm;
                 }
 
-                if (start < 0)
-                    continue;
+                if (token.Length > 1 && char.IsDigit(token[1]))
+                    switch (char.ToLowerInvariant(token[0]))
+                    {
+                        case 'v':
+                        case 'q':
+                            result |= BurstRegisterKinds.ArmVector;
+                            break;
+                        case 'z':
+                            result |= BurstRegisterKinds.ArmVector
+                                      | BurstRegisterKinds.ScalableArmVector;
+                            break;
+                        case 's':
+                        case 'd':
+                            result |= BurstRegisterKinds.ArmScalar;
+                            break;
+                    }
 
-                yield return text[start..index];
-                start = -1;
+                start = end;
             }
+
+            return result;
         }
 
         static string FormatStats(BurstAsmStats stats, string function)
@@ -1580,7 +1768,7 @@ namespace Conduit
             AppendSourceAttribution(builder, stats);
             AppendNotes(builder, stats);
             AppendOptimizationRemarks(builder, stats, function);
-            return builder.ToString().TrimEnd();
+            return builder.TrimEnd().ToString();
         }
 
         static void AppendCompilation(
@@ -1622,80 +1810,116 @@ namespace Conduit
 
         static void AppendControlFlow(StringBuilder builder, BurstAsmStats stats)
         {
-            var parts = new List<string>();
+            var appended = false;
             Add(stats.ConditionalBranchCount, "conditional branch", "conditional branches");
             Add(stats.UnconditionalBranchCount, "jump", "jumps");
             Add(stats.ReturnCount, "return", "returns");
-            if (parts.Count > 0)
-                builder.Append($"- Control flow: {string.Join(", ", parts)}\n");
+            if (appended)
+                builder.Append('\n');
 
             void Add(int count, string singular, string plural)
             {
-                if (count > 0)
-                    parts.Add($"{count} {(count == 1 ? singular : plural)}");
+                if (count <= 0)
+                    return;
+
+                builder.Append(appended ? ", " : "- Control flow: ")
+                    .Append(count)
+                    .Append(' ')
+                    .Append(count == 1 ? singular : plural);
+                appended = true;
             }
         }
 
         static void AppendSimd(StringBuilder builder, BurstAsmStats stats)
         {
-            var parts = new List<string>();
+            var appended = false;
             Add(stats.SimdPackedComputeInstructionCount, "packed compute");
             Add(stats.SimdScalarComputeInstructionCount, "scalar compute");
             Add(stats.SimdTransferInstructionCount, "transfer");
             Add(stats.SimdLaneInstructionCount, "lane/shuffle");
             Add(stats.SimdSetupInstructionCount, "setup/control");
             Add(stats.SimdOtherInstructionCount, "unclassified");
-            if (parts.Count == 0)
+            if (!appended)
                 return;
 
-            builder.Append($"- SIMD: {string.Join(", ", parts)}");
             if (stats.PackedComputeUsesScalableVectors)
                 builder.Append("; widest packed compute scalable (SVE)");
             else if (stats.PackedComputeWidth > 0)
-                builder.Append($"; widest packed compute {stats.PackedComputeWidth}-bit");
+                builder.Append("; widest packed compute ")
+                    .Append(stats.PackedComputeWidth)
+                    .Append("-bit");
             builder.Append('\n');
 
             void Add(int count, string name)
             {
-                if (count > 0)
-                    parts.Add($"{name} {count}");
+                if (count <= 0)
+                    return;
+
+                builder.Append(appended ? ", " : "- SIMD: ")
+                    .Append(name)
+                    .Append(' ')
+                    .Append(count);
+                appended = true;
             }
         }
 
         static void AppendMemory(StringBuilder builder, BurstAsmStats stats)
         {
-            var accesses = new List<string>();
+            var appendedAccess = false;
             Add(stats.LoadInstructionCount, "load", "loads");
             Add(stats.StoreInstructionCount, "store", "stores");
             Add(stats.ReadModifyWriteInstructionCount, "read-modify-write", "read-modify-write");
             Add(stats.OtherMemoryInstructionCount, "unclassified", "unclassified");
-            if (accesses.Count > 0)
+            if (appendedAccess)
             {
-                builder.Append($"- Memory access instructions: {string.Join(", ", accesses)}");
-                var annotations = new List<string>();
+                var appendedAnnotation = false;
                 if (stats.StackFrameMemoryInstructionCount > 0)
-                    annotations.Add($"stack/frame {stats.StackFrameMemoryInstructionCount}");
+                    AppendAnnotation("stack/frame", stats.StackFrameMemoryInstructionCount);
                 if (stats.ConstantPoolMemoryInstructionCount > 0)
-                    annotations.Add($"constant-pool {stats.ConstantPoolMemoryInstructionCount}");
-                if (annotations.Count > 0)
-                    builder.Append($"; {string.Join(", ", annotations)}");
+                    AppendAnnotation("constant-pool", stats.ConstantPoolMemoryInstructionCount);
                 builder.Append('\n');
+
+                void AppendAnnotation(string name, int count)
+                {
+                    builder.Append(appendedAnnotation ? ", " : "; ")
+                        .Append(name)
+                        .Append(' ')
+                        .Append(count);
+                    appendedAnnotation = true;
+                }
             }
 
-            var stack = new List<string>();
+            var appendedStack = false;
             if (stats.PushInstructionCount > 0)
-                stack.Add($"push {stats.PushInstructionCount}");
+                AppendStack("push", stats.PushInstructionCount);
             if (stats.PopInstructionCount > 0)
-                stack.Add($"pop {stats.PopInstructionCount}");
-            if (stack.Count > 0)
-                builder.Append($"- Explicit stack operations: {string.Join(", ", stack)}\n");
+                AppendStack("pop", stats.PopInstructionCount);
+            if (appendedStack)
+                builder.Append('\n');
             if (stats.AddressGenerationInstructionCount > 0)
-                builder.Append($"- Address generation instructions: {stats.AddressGenerationInstructionCount}\n");
+                builder.Append("- Address generation instructions: ")
+                    .Append(stats.AddressGenerationInstructionCount)
+                    .Append('\n');
 
             void Add(int count, string singular, string plural)
             {
-                if (count > 0)
-                    accesses.Add($"{count} {(count == 1 ? singular : plural)}");
+                if (count <= 0)
+                    return;
+
+                builder.Append(appendedAccess ? ", " : "- Memory access instructions: ")
+                    .Append(count)
+                    .Append(' ')
+                    .Append(count == 1 ? singular : plural);
+                appendedAccess = true;
+            }
+
+            void AppendStack(string name, int count)
+            {
+                builder.Append(appendedStack ? ", " : "- Explicit stack operations: ")
+                    .Append(name)
+                    .Append(' ')
+                    .Append(count);
+                appendedStack = true;
             }
         }
 
@@ -1715,17 +1939,26 @@ namespace Conduit
             if (stats.NumericMovabsCount == 0 && stats.SymbolMovabsCount == 0)
                 return;
 
-            var parts = new List<string>();
+            var appended = false;
             if (stats.NumericMovabsCount > 0)
-                parts.Add($"numeric constants {stats.NumericMovabsCount}");
+                Append("numeric constants", stats.NumericMovabsCount);
             if (stats.SymbolMovabsCount > 0)
-                parts.Add($"symbol addresses {stats.SymbolMovabsCount}");
-            builder.Append($"- `movabs` materialization: {string.Join(", ", parts)}\n");
+                Append("symbol addresses", stats.SymbolMovabsCount);
+            builder.Append('\n');
+
+            void Append(string name, int count)
+            {
+                builder.Append(appended ? ", " : "- `movabs` materialization: ")
+                    .Append(name)
+                    .Append(' ')
+                    .Append(count);
+                appended = true;
+            }
         }
 
         static void AppendNotableOpcodes(StringBuilder builder, BurstAsmStats stats)
         {
-            var parts = new List<string>();
+            var appended = false;
             Add(stats.DivideInstructionCount, "divide");
             Add(stats.SquareRootInstructionCount, "square root");
             Add(stats.FusedMultiplyAddInstructionCount, "FMA");
@@ -1734,15 +1967,21 @@ namespace Conduit
             Add(stats.AtomicInstructionCount, "atomic");
             Add(stats.FenceInstructionCount, "fence");
             Add(stats.SerializingInstructionCount, "serializing");
-            if (parts.Count == 0)
+            if (!appended)
                 return;
 
-            builder.Append($"- Notable opcode classes: {string.Join(", ", parts)}\n");
+            builder.Append('\n');
 
             void Add(int count, string name)
             {
-                if (count > 0)
-                    parts.Add($"{name} {count}");
+                if (count <= 0)
+                    return;
+
+                builder.Append(appended ? ", " : "- Notable opcode classes: ")
+                    .Append(name)
+                    .Append(' ')
+                    .Append(count);
+                appended = true;
             }
         }
 
@@ -1800,7 +2039,9 @@ namespace Conduit
             if (stats.MappedInstructionCount == 0)
                 return;
 
-            var rows = new List<BurstSourceStats>(stats.SourceAttribution.Values);
+            using var pooledRows = ConduitUtility.GetPooledList<BurstSourceStats>(out var rows);
+            foreach (var row in stats.SourceAttribution.Values)
+                rows.Add(row);
             rows.Sort(static (left, right) =>
             {
                 var count = right.InstructionCount.CompareTo(left.InstructionCount);
@@ -1818,20 +2059,26 @@ namespace Conduit
             {
                 var row = rows[index];
                 builder.Append($"- `{row.Source}`: {row.InstructionCount} instr");
-                var details = new List<string>();
+                var appendedDetail = false;
                 Add(row.LoadCount, "loads");
                 Add(row.StoreCount, "stores");
                 Add(row.PackedComputeCount, "packed compute");
                 Add(row.BranchCount, "branches");
                 Add(row.CallCount, "calls");
-                if (details.Count > 0)
-                    builder.Append($" ({string.Join(", ", details)})");
+                if (appendedDetail)
+                    builder.Append(')');
                 builder.Append('\n');
 
                 void Add(int value, string name)
                 {
-                    if (value > 0)
-                        details.Add($"{name} {value}");
+                    if (value <= 0)
+                        return;
+
+                    builder.Append(appendedDetail ? ", " : " (")
+                        .Append(name)
+                        .Append(' ')
+                        .Append(value);
+                    appendedDetail = true;
                 }
             }
 
@@ -1844,7 +2091,9 @@ namespace Conduit
             if (stats.InstructionCounts.Count == 0)
                 return;
 
-            var entries = new List<KeyValuePair<string, int>>(stats.InstructionCounts);
+            using var pooledEntries = ConduitUtility.GetPooledList<KeyValuePair<string, int>>(out var entries);
+            foreach (var entry in stats.InstructionCounts)
+                entries.Add(entry);
             entries.Sort(static (left, right) =>
             {
                 var count = right.Value.CompareTo(left.Value);
@@ -1859,7 +2108,9 @@ namespace Conduit
             {
                 if (index > 0)
                     builder.Append(", ");
-                builder.Append($"{entries[index].Key}={entries[index].Value}");
+                builder.Append(entries[index].Key)
+                    .Append('=')
+                    .Append(entries[index].Value);
             }
             builder.Append('\n');
         }
@@ -1867,11 +2118,39 @@ namespace Conduit
         internal static BurstCompilationContext ParseCompilationContext(string options, string cpu)
         {
             // inspector overrides are appended to Burst's resolved options, so the last occurrence is authoritative.
-            var lines = options.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-            var compilerTarget = ReadOption("target=");
-            var optimization = HasOption("disable-opt") ? "Disabled"
-                : HasOption("opt-for-size") ? "Size"
-                : ReadOption("opt-level=") switch
+            var lines = SplitLines(options);
+            var compilerTarget = string.Empty;
+            var optimizationLevel = string.Empty;
+            var floatMode = string.Empty;
+            var floatPrecision = string.Empty;
+            var safetyChecks = string.Empty;
+            var optimizationDisabled = false;
+            var optimizeForSize = false;
+            var safetyDisabled = false;
+            foreach (var line in lines)
+            {
+                var text = line.Trim();
+                if (text == "--disable-opt")
+                    optimizationDisabled = true;
+                else if (text == "--opt-for-size")
+                    optimizeForSize = true;
+                else if (text == "--disable-safety-checks")
+                    safetyDisabled = true;
+                else if (TryReadOption(text, "--target=", out var value))
+                    compilerTarget = value;
+                else if (TryReadOption(text, "--opt-level=", out value))
+                    optimizationLevel = value;
+                else if (TryReadOption(text, "--float-mode=", out value))
+                    floatMode = value;
+                else if (TryReadOption(text, "--float-precision=", out value))
+                    floatPrecision = value;
+                else if (TryReadOption(text, "--global-safety-checks-setting=", out value))
+                    safetyChecks = value;
+            }
+
+            var optimization = optimizationDisabled ? "Disabled"
+                : optimizeForSize ? "Size"
+                : optimizationLevel switch
                 {
                     "1" => "Fast compilation",
                     "2" => "Balanced",
@@ -1879,14 +2158,10 @@ namespace Conduit
                     { Length: > 0 } value => $"Optimization level {value}",
                     _ => "Default",
                 };
-            var floatMode = ReadOption("float-mode=");
             if (floatMode.Length == 0 || string.Equals(floatMode, "Default", StringComparison.OrdinalIgnoreCase))
                 floatMode = "Strict";
-            var floatPrecision = ReadOption("float-precision=");
             if (floatPrecision.Length == 0)
                 floatPrecision = "Standard";
-            var safetyChecks = ReadOption("global-safety-checks-setting=");
-            var safetyDisabled = HasOption("disable-safety-checks");
             if (safetyDisabled || safetyChecks.Length == 0)
                 safetyChecks = safetyDisabled ? "Off" : "Default";
 
@@ -1899,26 +2174,15 @@ namespace Conduit
                 safetyChecks
             );
 
-            string ReadOption(string name)
+            static bool TryReadOption(string text, string prefix, out string value)
             {
-                var value = string.Empty;
-                var prefix = "--" + name;
-                foreach (var line in lines)
+                if (text.StartsWith(prefix, StringComparison.Ordinal))
                 {
-                    var text = line.Trim();
-                    if (text.StartsWith(prefix, StringComparison.Ordinal))
-                        value = text[prefix.Length..];
+                    value = text[prefix.Length..];
+                    return true;
                 }
-                return value;
-            }
 
-            bool HasOption(string name)
-            {
-                var expected = "--" + name;
-                foreach (var line in lines)
-                    if (line.Trim() == expected)
-                        return true;
-
+                value = string.Empty;
                 return false;
             }
         }
@@ -1936,7 +2200,7 @@ namespace Conduit
             var currentField = string.Empty;
             // structured IRPassAnalysis output can repeat the same remark within one compilation.
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var line in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            foreach (var line in SplitLines(text))
             {
                 var trimmed = line.Trim();
                 if (trimmed.StartsWith("---", StringComparison.Ordinal))
@@ -2095,8 +2359,8 @@ namespace Conduit
 
         static string[] Tokens(string text)
         {
-            var tokens = new List<string>();
-            var builder = new StringBuilder();
+            using var pooledTokens = ConduitUtility.GetPooledList<string>(out var tokens);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             foreach (var character in text)
             {
                 if (char.IsLetterOrDigit(character) || character == '_')
@@ -2161,10 +2425,7 @@ namespace Conduit
 
         static string CleanLine(string line)
         {
-            line = sourceLocation.Replace(
-                line,
-                match => $"{match.Groups["prefix"].Value}{match.Groups["file"].Value}:{match.Groups["line"].Value}{match.Groups["rest"].Value}"
-            );
+            line = NormalizeSourceLocation(line);
 
             return LimitGuidIds(CleanQuotedSymbols(line));
         }
@@ -2174,10 +2435,7 @@ namespace Conduit
 
         static string CleanDiagnosticLine(string line)
         {
-            line = sourceLocation.Replace(
-                line,
-                match => $"{match.Groups["prefix"].Value}{match.Groups["file"].Value}:{match.Groups["line"].Value}{match.Groups["rest"].Value}"
-            );
+            line = NormalizeSourceLocation(line);
 
             line = fromAssemblyQualifier.Replace(line, string.Empty);
             line = assemblyQualifier.Replace(line, string.Empty);
@@ -2189,6 +2447,20 @@ namespace Conduit
             line = StripNamespaces(line);
             line = ReplaceBuiltInTypeNames(line);
             return LimitGuidIds(line);
+        }
+
+        static string NormalizeSourceLocation(string line)
+        {
+            var trimmed = line.AsSpan().TrimStart();
+            if (trimmed.Length == 0
+                || trimmed[0] is not ('#' or ';')
+                || trimmed.IndexOf('(') < 0)
+                return line;
+
+            return sourceLocation.Replace(
+                line,
+                match => $"{match.Groups["prefix"].Value}{match.Groups["file"].Value}:{match.Groups["line"].Value}{match.Groups["rest"].Value}"
+            );
         }
 
         static string FormatRawBurstSignatureParameters(string line)
@@ -2367,7 +2639,28 @@ namespace Conduit
             if (firstQuote < 0)
                 return line;
 
-            var builder = new StringBuilder(line.Length);
+            var scanOffset = firstQuote;
+            var requiresCleanup = false;
+            while (scanOffset < line.Length)
+            {
+                var start = line.IndexOf('"', scanOffset);
+                if (start < 0)
+                    break;
+                var end = FindClosingQuote(line, start + 1);
+                if (end < 0)
+                    break;
+                if (ShouldCleanSymbol(line.AsSpan(start + 1, end - start - 1)))
+                {
+                    requiresCleanup = true;
+                    break;
+                }
+                scanOffset = end + 1;
+            }
+            if (!requiresCleanup)
+                return line;
+
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.EnsureCapacity(line.Length);
             var offset = 0;
             while (offset < line.Length)
             {
@@ -2387,7 +2680,7 @@ namespace Conduit
 
                 builder.Append(line, offset, start - offset + 1);
                 var symbol = line.Substring(start + 1, end - start - 1);
-                builder.Append(ShouldCleanSymbol(symbol) ? CleanSymbol(symbol) : symbol);
+                builder.Append(ShouldCleanSymbol(symbol.AsSpan()) ? CleanSymbol(symbol) : symbol);
                 builder.Append('"');
                 offset = end + 1;
             }
@@ -2412,12 +2705,12 @@ namespace Conduit
             return -1;
         }
 
-        static bool ShouldCleanSymbol(string symbol) =>
-            symbol.IndexOf("Version=", StringComparison.Ordinal) >= 0
-            || symbol.IndexOf("PublicKeyToken=", StringComparison.Ordinal) >= 0
-            || symbol.IndexOf(" -> ", StringComparison.Ordinal) >= 0
+        static bool ShouldCleanSymbol(ReadOnlySpan<char> symbol) =>
+            symbol.IndexOf("Version=".AsSpan(), StringComparison.Ordinal) >= 0
+            || symbol.IndexOf("PublicKeyToken=".AsSpan(), StringComparison.Ordinal) >= 0
+            || symbol.IndexOf(" -> ".AsSpan(), StringComparison.Ordinal) >= 0
             || symbol.IndexOf('`') >= 0
-            || symbol.IndexOf("System.", StringComparison.Ordinal) >= 0;
+            || symbol.IndexOf("System.".AsSpan(), StringComparison.Ordinal) >= 0;
 
         static string CleanSymbol(string symbol)
         {
@@ -2463,12 +2756,41 @@ namespace Conduit
             || character is >= 'a' and <= 'f'
             || character is >= 'A' and <= 'F';
 
-        static string LimitGuidIds(string line) =>
-            guidId.Replace(line, match => match.Value[..8]);
+        static string LimitGuidIds(string line)
+        {
+            if (line.Length < 32 || !ContainsGuidId(line))
+                return line;
+
+            return guidId.Replace(line, match => match.Value[..8]);
+        }
+
+        static bool ContainsGuidId(string line)
+        {
+            for (var index = 0; index < line.Length;)
+            {
+                if (!IsHex(line[index]))
+                {
+                    index++;
+                    continue;
+                }
+
+                var start = index++;
+                while (index < line.Length && IsHex(line[index]))
+                    index++;
+                if (index - start == 32)
+                    return true;
+            }
+
+            return false;
+        }
 
         static string SimplifyMetadataGenerics(string symbol)
         {
-            var builder = new StringBuilder(symbol.Length);
+            if (symbol.IndexOf('`') < 0)
+                return symbol;
+
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.EnsureCapacity(symbol.Length);
             for (var i = 0; i < symbol.Length; i++)
             {
                 if (symbol[i] != '`' || !TryReadGenericArity(symbol, i + 1, out var afterArity))
@@ -2750,11 +3072,12 @@ namespace Conduit
 
         static string SafeFileName(string fileName)
         {
-            var invalid = Path.GetInvalidFileNameChars();
-            var builder = new StringBuilder(fileName.Length);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            if (builder.Capacity < fileName.Length)
+                builder.Capacity = fileName.Length;
             foreach (var character in fileName)
             {
-                if (Array.IndexOf(invalid, character) >= 0)
+                if (Array.IndexOf(invalidFileNameCharacters, character) >= 0)
                     builder.Append('_');
                 else if (!char.IsWhiteSpace(character))
                     builder.Append(character);
@@ -2765,7 +3088,7 @@ namespace Conduit
 
         static string Join(string[] lines, int endExclusive)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             for (var i = 0; i < endExclusive; i++)
             {
                 if (i > 0)
@@ -2774,12 +3097,56 @@ namespace Conduit
                 builder.Append(lines[i]);
             }
 
-            return builder.ToString().TrimEnd('\n');
+            return builder.ToString();
+        }
+
+        static string[] SplitLines(string text)
+        {
+            if (text.IndexOf('\r') < 0)
+                return text.Split('\n');
+
+            var lineCount = 1;
+            for (var index = 0; index < text.Length; ++index)
+            {
+                if (text[index] == '\r')
+                {
+                    ++lineCount;
+                    if (index + 1 < text.Length && text[index + 1] == '\n')
+                        ++index;
+                }
+                else if (text[index] == '\n')
+                    ++lineCount;
+            }
+
+            var lines = new string[lineCount];
+            var lineIndex = 0;
+            var lineStart = 0;
+            for (var index = 0; index < text.Length; ++index)
+            {
+                if (text[index] is not ('\r' or '\n'))
+                    continue;
+
+                lines[lineIndex++] = text.Substring(lineStart, index - lineStart);
+                if (text[index] == '\r'
+                    && index + 1 < text.Length
+                    && text[index + 1] == '\n')
+                    ++index;
+                lineStart = index + 1;
+            }
+
+            lines[lineIndex] = text.Substring(lineStart);
+            return lines;
         }
 
         static string FirstLine(string text)
         {
-            var end = text.IndexOfAny(new[] { '\r', '\n' });
+            var carriageReturn = text.IndexOf('\r');
+            var lineFeed = text.IndexOf('\n');
+            var end = carriageReturn < 0
+                ? lineFeed
+                : lineFeed < 0
+                    ? carriageReturn
+                    : Math.Min(carriageReturn, lineFeed);
             return (end < 0 ? text : text[..end]).Trim();
         }
 
@@ -2859,12 +3226,12 @@ namespace Conduit
             int[] indexes,
             int candidateCount)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             if (!string.IsNullOrWhiteSpace(header))
                 builder.AppendLine(header);
 
             if (indexes.Length == 0)
-                return builder.ToString().TrimEnd();
+                return builder.TrimEnd().ToString();
 
             builder.AppendLine("Candidates:");
             foreach (var index in indexes)
@@ -2877,7 +3244,7 @@ namespace Conduit
                 builder.AppendLine("More specific target names return a narrower candidate set.");
             }
 
-            return builder.ToString().TrimEnd();
+            return builder.TrimEnd().ToString();
         }
 
         static Exception Unwrap(Exception exception) =>
@@ -3099,6 +3466,18 @@ namespace Conduit
         PackedCompute,
         Setup,
         Other,
+    }
+
+    [Flags]
+    enum BurstRegisterKinds : byte
+    {
+        None = 0,
+        Xmm = 1 << 0,
+        Ymm = 1 << 1,
+        Zmm = 1 << 2,
+        ArmVector = 1 << 3,
+        ArmScalar = 1 << 4,
+        ScalableArmVector = 1 << 5,
     }
 
     enum BurstCallKind : byte

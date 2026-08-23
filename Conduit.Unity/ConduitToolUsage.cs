@@ -10,6 +10,7 @@ namespace Conduit
 {
     static class ConduitToolUsage
     {
+        const double FlushDelaySeconds = 1d;
         internal const string RestartStartedUtcTicksEnvironmentVariable =
             "CONDUIT_RESTART_STARTED_UTC_TICKS";
         internal const string EnabledPreferenceKey = "Conduit.LocalToolUsage.Enabled";
@@ -53,12 +54,35 @@ namespace Conduit
             BridgeCommandTypes.ViewBurstAsm,
         };
 
+        static readonly PendingSamples pendingProjectSamples = new(ToolNames.Length);
+        static readonly PendingSamples pendingAllProjectsSamples = new(ToolNames.Length);
         internal static event Action? DataChanged;
+        // raw-value keys avoid repeat JSON parsing while still observing writes from other editor processes.
+        static string? cachedProjectDataJson;
+        static string? cachedAllProjectsDataJson;
+        static StoredToolUsageData? cachedProjectData;
+        static StoredToolUsageData? cachedAllProjectsData;
+        static ToolUsageRecord[]? cachedProjectRecords;
+        static ToolUsageRecord[]? cachedAllProjectsRecords;
+        static double flushAt;
+        static bool flushScheduled;
+
+        static ConduitToolUsage()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload += FlushPending;
+            EditorApplication.quitting += FlushPending;
+        }
 
         internal static bool Enabled
         {
             get => EditorPrefs.GetBool(EnabledPreferenceKey, true);
-            set => EditorPrefs.SetBool(EnabledPreferenceKey, value);
+            set
+            {
+                if (!value)
+                    FlushPending();
+
+                EditorPrefs.SetBool(EnabledPreferenceKey, value);
+            }
         }
 
         internal static long BeginCall(string toolName)
@@ -81,7 +105,7 @@ namespace Conduit
         {
             try
             {
-                if (!Enabled || startedUtcTicks <= 0L)
+                if (startedUtcTicks <= 0L || !Enabled)
                     return;
 
                 long completedUtcTicks = DateTime.UtcNow.Ticks;
@@ -98,16 +122,31 @@ namespace Conduit
         }
 
         internal static ToolUsageRecord[] GetProjectData()
-            => BuildRecords(Read(PlayerPrefs.GetString(ProjectDataPreferenceKey, string.Empty)));
+        {
+            EnsureProjectData();
+            return cachedProjectRecords ??= BuildRecords(cachedProjectData!);
+        }
 
         internal static ToolUsageRecord[] GetAllProjectsData()
-            => BuildRecords(Read(EditorPrefs.GetString(AllProjectsDataPreferenceKey, string.Empty)));
+        {
+            EnsureAllProjectsData();
+            return cachedAllProjectsRecords ??= BuildRecords(cachedAllProjectsData!);
+        }
 
         internal static void DeleteAllStoredData()
         {
+            CancelScheduledFlush();
+            pendingProjectSamples.Clear();
+            pendingAllProjectsSamples.Clear();
             PlayerPrefs.DeleteKey(ProjectDataPreferenceKey);
             PlayerPrefs.Save();
             EditorPrefs.DeleteKey(AllProjectsDataPreferenceKey);
+            cachedProjectDataJson = null;
+            cachedAllProjectsDataJson = null;
+            cachedProjectData = null;
+            cachedAllProjectsData = null;
+            cachedProjectRecords = null;
+            cachedAllProjectsRecords = null;
             DataChanged?.Invoke();
         }
 
@@ -144,25 +183,137 @@ namespace Conduit
 
         internal static void RecordDuration(string toolName, double durationMilliseconds)
         {
-            if (!IsTrackedTool(toolName)
+            int toolIndex = Array.BinarySearch(ToolNames, toolName, StringComparer.Ordinal);
+            if (toolIndex < 0
                 || durationMilliseconds < 0d
                 || double.IsNaN(durationMilliseconds)
                 || double.IsInfinity(durationMilliseconds))
                 return;
 
-            // editor preferences cannot enumerate other projects' PlayerPrefs, so both aggregates update here.
-            var projectData = Read(PlayerPrefs.GetString(ProjectDataPreferenceKey, string.Empty));
-            AddSample(projectData, toolName, durationMilliseconds);
-            PlayerPrefs.SetString(ProjectDataPreferenceKey, JsonUtility.ToJson(projectData));
-            PlayerPrefs.Save();
-
-            var allProjectsData = Read(EditorPrefs.GetString(AllProjectsDataPreferenceKey, string.Empty));
-            AddSample(allProjectsData, toolName, durationMilliseconds);
-            EditorPrefs.SetString(AllProjectsDataPreferenceKey, JsonUtility.ToJson(allProjectsData));
+            if (cachedProjectData != null)
+                AddSamples(cachedProjectData, toolName, 1L, durationMilliseconds);
+            if (cachedAllProjectsData != null)
+                AddSamples(cachedAllProjectsData, toolName, 1L, durationMilliseconds);
+            pendingProjectSamples.Add(toolIndex, durationMilliseconds);
+            pendingAllProjectsSamples.Add(toolIndex, durationMilliseconds);
+            cachedProjectRecords = null;
+            cachedAllProjectsRecords = null;
+            ScheduleFlush();
             DataChanged?.Invoke();
         }
 
-        static void AddSample(StoredToolUsageData data, string toolName, double durationMilliseconds)
+        internal static void FlushPending()
+        {
+            CancelScheduledFlush();
+            var flushed = false;
+            if (pendingProjectSamples.HasSamples)
+                flushed |= TryFlushProjectData();
+            if (pendingAllProjectsSamples.HasSamples)
+                flushed |= TryFlushAllProjectsData();
+
+            if (pendingProjectSamples.HasSamples || pendingAllProjectsSamples.HasSamples)
+                ScheduleFlush();
+            if (flushed)
+                DataChanged?.Invoke();
+        }
+
+        static void EnsureProjectData()
+        {
+            var json = PlayerPrefs.GetString(ProjectDataPreferenceKey, string.Empty);
+            if (json == cachedProjectDataJson && cachedProjectData != null)
+                return;
+
+            cachedProjectDataJson = json;
+            cachedProjectData = Read(json);
+            pendingProjectSamples.Apply(cachedProjectData);
+            cachedProjectRecords = null;
+        }
+
+        static void EnsureAllProjectsData()
+        {
+            var json = EditorPrefs.GetString(AllProjectsDataPreferenceKey, string.Empty);
+            if (json == cachedAllProjectsDataJson && cachedAllProjectsData != null)
+                return;
+
+            cachedAllProjectsDataJson = json;
+            cachedAllProjectsData = Read(json);
+            pendingAllProjectsSamples.Apply(cachedAllProjectsData);
+            cachedAllProjectsRecords = null;
+        }
+
+        static bool TryFlushProjectData()
+        {
+            try
+            {
+                var data = Read(PlayerPrefs.GetString(ProjectDataPreferenceKey, string.Empty));
+                pendingProjectSamples.Apply(data);
+                var json = JsonUtility.ToJson(data);
+                PlayerPrefs.SetString(ProjectDataPreferenceKey, json);
+                // Unity persists PlayerPrefs at shutdown; a forced flush here would add disk I/O.
+                cachedProjectDataJson = json;
+                cachedProjectData = data;
+                cachedProjectRecords = null;
+                pendingProjectSamples.Clear();
+                return true;
+            }
+            catch (Exception exception)
+            {
+                ConduitDiagnostics.Error("Failed to persist local project tool usage.", exception);
+                return false;
+            }
+        }
+
+        static bool TryFlushAllProjectsData()
+        {
+            try
+            {
+                var data = Read(EditorPrefs.GetString(AllProjectsDataPreferenceKey, string.Empty));
+                pendingAllProjectsSamples.Apply(data);
+                var json = JsonUtility.ToJson(data);
+                EditorPrefs.SetString(AllProjectsDataPreferenceKey, json);
+                cachedAllProjectsDataJson = json;
+                cachedAllProjectsData = data;
+                cachedAllProjectsRecords = null;
+                pendingAllProjectsSamples.Clear();
+                return true;
+            }
+            catch (Exception exception)
+            {
+                ConduitDiagnostics.Error("Failed to persist all-project tool usage.", exception);
+                return false;
+            }
+        }
+
+        static void ScheduleFlush()
+        {
+            if (flushScheduled)
+                return;
+
+            flushScheduled = true;
+            flushAt = EditorApplication.timeSinceStartup + FlushDelaySeconds;
+            EditorApplication.update += FlushWhenDue;
+        }
+
+        static void FlushWhenDue()
+        {
+            if (EditorApplication.timeSinceStartup >= flushAt)
+                FlushPending();
+        }
+
+        static void CancelScheduledFlush()
+        {
+            if (!flushScheduled)
+                return;
+
+            flushScheduled = false;
+            EditorApplication.update -= FlushWhenDue;
+        }
+
+        static void AddSamples(
+            StoredToolUsageData data,
+            string toolName,
+            long sampleCount,
+            double totalDurationMilliseconds)
         {
             StoredToolUsageEntry? entry = null;
             foreach (var candidate in data.tools)
@@ -180,10 +331,11 @@ namespace Conduit
                 data.tools.Add(entry);
             }
 
-            // the online mean is exact and keeps storage constant regardless of sample count.
+            var combinedCount = entry.call_count + sampleCount;
+            var batchAverage = totalDurationMilliseconds / sampleCount;
             entry.average_duration_ms +=
-                (durationMilliseconds - entry.average_duration_ms) / (entry.call_count + 1L);
-            entry.call_count++;
+                (batchAverage - entry.average_duration_ms) * sampleCount / combinedCount;
+            entry.call_count = combinedCount;
         }
 
         static StoredToolUsageData Read(string json)
@@ -238,6 +390,52 @@ namespace Conduit
             public string tool_name = string.Empty;
             public long call_count;
             public double average_duration_ms;
+        }
+
+        sealed class PendingSamples
+        {
+            readonly long[] counts;
+            readonly double[] totalDurations;
+
+            public PendingSamples(int toolCount)
+            {
+                counts = new long[toolCount];
+                totalDurations = new double[toolCount];
+            }
+
+            public bool HasSamples { get; private set; }
+
+            public void Add(int toolIndex, double durationMilliseconds)
+            {
+                counts[toolIndex]++;
+                totalDurations[toolIndex] += durationMilliseconds;
+                HasSamples = true;
+            }
+
+            public void Apply(StoredToolUsageData data)
+            {
+                if (!HasSamples)
+                    return;
+
+                for (int index = 0, count = counts.Length; index < count; ++index)
+                    if (counts[index] > 0L)
+                        AddSamples(
+                            data,
+                            ToolNames[index],
+                            counts[index],
+                            totalDurations[index]
+                        );
+            }
+
+            public void Clear()
+            {
+                if (!HasSamples)
+                    return;
+
+                Array.Clear(counts, 0, counts.Length);
+                Array.Clear(totalDurations, 0, totalDurations.Length);
+                HasSamples = false;
+            }
         }
     }
 

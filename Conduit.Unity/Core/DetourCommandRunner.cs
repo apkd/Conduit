@@ -1,7 +1,6 @@
 #nullable enable
 
 using System;
-using System.Linq;
 
 namespace Conduit
 {
@@ -20,12 +19,16 @@ namespace Conduit
                 if (args.Length < 6)
                     throw new InvalidOperationException("The MCP server provided an incomplete detour request.");
 
-                var assembly = artifacts.FirstOrDefault(
-                    static artifact => artifact.name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                );
-                var pdb = artifacts.FirstOrDefault(
-                    static artifact => artifact.name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)
-                );
+                BridgeArtifact? assembly = null;
+                BridgeArtifact? pdb = null;
+                foreach (var artifact in artifacts)
+                {
+                    if (artifact.name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                        assembly ??= artifact;
+                    else if (artifact.name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase))
+                        pdb ??= artifact;
+                }
+
                 return new()
                 {
                     display_name = displayName,

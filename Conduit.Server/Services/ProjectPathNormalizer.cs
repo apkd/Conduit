@@ -181,6 +181,9 @@ public static class ProjectPathNormalizer
 
         static string TrimEndingDirectorySeparators(string value)
         {
+            if (value.Length == 0 || !IsDirectorySeparator(value[^1]))
+                return value;
+
             var rootLength = Path.GetPathRoot(value)?.Length ?? 0;
             var end = value.Length;
 

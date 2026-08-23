@@ -1,10 +1,14 @@
 #nullable enable
 
 using System;
+using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Conduit
 {
@@ -13,21 +17,83 @@ namespace Conduit
         const int MaxTypeRows = 100;
         const int MaxWideMemberRows = 200;
         const int MaxCandidates = 25;
+        const int ParallelScanEntriesPerWorker = 2048;
+        const int MaxParallelScanWorkers = 16;
+        const BindingFlags DeclaredMembers = BindingFlags.Public
+            | BindingFlags.NonPublic
+            | BindingFlags.Instance
+            | BindingFlags.Static
+            | BindingFlags.DeclaredOnly;
         const string ValidModes = "types, classes, structs, enums, interfaces, delegates, members, fields, properties, methods, constructors";
         static readonly object IndexLock = new();
-        static IReadOnlyList<Type>? cachedIndex;
+        static readonly ConcurrentDictionary<Type, FieldInfo[]> fieldCache = new();
+        static readonly ConcurrentDictionary<Type, PropertyInfo[]> propertyCache = new();
+        static readonly ConcurrentDictionary<Type, MethodInfo[]> methodCache = new();
+        static readonly ConcurrentDictionary<Type, MethodInfo[]> methodWithoutAccessorsCache = new();
+        static readonly ConcurrentDictionary<Type, ConstructorInfo[]> constructorCache = new();
+        static readonly ConcurrentDictionary<Assembly, string> assemblyNameCache = new();
+        static readonly ConcurrentDictionary<Type, TypeSearchInfo> typeSearchInfoCache = new();
+
+        // formatted declarations are immutable for the domain and recur across reflect calls.
+        static readonly ConcurrentDictionary<MemberInfo, string> memberSignatureCache = new();
+        static TypeIndex? cachedIndex;
+        static List<Type>? pendingLoadedTypes;
+        static Dictionary<string, TypeResolution>? exactTypeLookup;
+        static WideMemberIndex? wideFieldIndex;
+        static WideMemberIndex? widePropertyIndex;
+        static WideMemberIndex? wideMethodIndex;
+        static WideMemberIndex? wideAccessorIndex;
+        static WideMemberIndex? wideConstructorIndex;
         static string cachedLoadWarning = string.Empty;
 
         static reflect()
-            => AppDomain.CurrentDomain.AssemblyLoad += static (_, _) => InvalidateIndex();
+            => AppDomain.CurrentDomain.AssemblyLoad += static (_, args) => AddLoadedAssembly(args.LoadedAssembly);
 
-        static void InvalidateIndex()
+        static void AddLoadedAssembly(Assembly assembly)
         {
             lock (IndexLock)
+                if (cachedIndex == null)
+                    return;
+
+            var addedTypes = new List<Type>();
+            using var pooledWarnings = BridgeStringBuilderPool.Rent(out var addedWarnings);
+            AppendAssemblyTypes(addedTypes, assembly, addedWarnings);
+
+            lock (IndexLock)
             {
-                cachedIndex = null;
-                cachedLoadWarning = string.Empty;
+                if (cachedIndex == null)
+                    return;
+
+                if (addedTypes.Count > 0)
+                    (pendingLoadedTypes ??= new()).AddRange(addedTypes);
+
+                if (Trimmed(addedWarnings) is { Length: > 0 } warning)
+                    AppendLoadWarning(warning);
             }
+        }
+
+        static void ApplyPendingLoadedTypes()
+        {
+            while (pendingLoadedTypes is { Count: > 0 } addedTypes)
+            {
+                pendingLoadedTypes = null;
+                SortTypes(addedTypes);
+                cachedIndex = MergeTypes(cachedIndex!, addedTypes);
+                if (exactTypeLookup != null)
+                    AddExactTypes(exactTypeLookup, addedTypes);
+                ExtendWideMemberIndexes(addedTypes, cachedIndex);
+            }
+        }
+
+        static void AppendLoadWarning(string warning)
+        {
+            var detailOffset = warning.IndexOf('\n');
+            var detail = cachedLoadWarning.Length > 0 && detailOffset >= 0
+                ? warning[(detailOffset + 1)..]
+                : warning;
+            cachedLoadWarning = cachedLoadWarning.Length == 0
+                ? detail
+                : cachedLoadWarning + "\n" + detail;
         }
 
         public static BridgeCommandResult Reflect(string[] args)
@@ -58,37 +124,81 @@ namespace Conduit
             if (normalizedType.Length == 0 && normalizedMember.Length == 0)
                 return Error("reflect type modes require `type` or `member`. Examples: reflect(\"types\", type: \"Camera\") or reflect(\"types\", member: \"Awake\").");
 
-            var matches = new List<Type>();
-            foreach (var type in index)
+            var typeNameQuery = new TypeNameQuery(normalizedType);
+            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Length > 0
+                ? FindTypesDeclaringMatchingMember(index, normalizedMember)
+                : null;
+            var matches = new List<Type>(MaxTypeRows);
+            var totalCount = 0;
+            var workerCount = GetParallelScanWorkerCount(index.Count);
+            if (workerCount == 1)
+                Scan(0, index.Count, matches, ref totalCount);
+            else
             {
-                if (!MatchesTypeKind(type, mode.TypeKind))
-                    continue;
+                // each worker owns a contiguous range so merging preserves the sorted index order.
+                var workerMatches = new List<Type>[workerCount];
+                var workerCounts = new int[workerCount];
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new List<Type>(MaxTypeRows);
+                    var localCount = 0;
+                    var start = (int)((long)index.Count * workerIndex / workerCount);
+                    var end = (int)((long)index.Count * (workerIndex + 1) / workerCount);
+                    Scan(start, end, localMatches, ref localCount);
+                    workerMatches[workerIndex] = localMatches;
+                    workerCounts[workerIndex] = localCount;
+                });
 
-                if (normalizedType.Length > 0 && !MatchesType(type, normalizedType))
-                    continue;
-
-                if (normalizedMember.Length > 0 && !TypeDeclaresMatchingMember(type, mode.MemberKind, normalizedMember))
-                    continue;
-
-                matches.Add(type);
+                for (var workerIndex = 0; workerIndex < workerCount; workerIndex++)
+                {
+                    totalCount += workerCounts[workerIndex];
+                    var remaining = MaxTypeRows - matches.Count;
+                    var localMatches = workerMatches[workerIndex];
+                    var toCopy = Math.Min(remaining, localMatches.Count);
+                    for (var matchIndex = 0; matchIndex < toCopy; matchIndex++)
+                        matches.Add(localMatches[matchIndex]);
+                }
             }
 
-            SortTypes(matches);
-            var builder = new StringBuilder();
+            void Scan(int start, int end, List<Type> destination, ref int count)
+            {
+                for (var indexPosition = start; indexPosition < end; indexPosition++)
+                {
+                    var type = index[indexPosition];
+                    if (!MatchesTypeKind(index, indexPosition, mode.TypeKind))
+                        continue;
+
+                    if (normalizedType.Length > 0
+                        && !MatchesTypeName(index, indexPosition, typeNameQuery))
+                        continue;
+
+                    if (normalizedMember.Length > 0
+                        && !(declaringTypes?.Contains(type)
+                             ?? TypeDeclaresMatchingMember(type, mode.MemberKind, normalizedMember)))
+                        continue;
+
+                    count++;
+                    if (destination.Count < MaxTypeRows)
+                        destination.Add(type);
+                }
+            }
+
+            // filtering the sorted type index preserves its deterministic output order.
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendLoadWarning(builder, loadWarning);
-            if (matches.Count == 0)
+            if (totalCount == 0)
             {
                 builder.Append("No types matched.");
                 return Success(Trimmed(builder));
             }
 
-            if (matches.Count > MaxTypeRows)
-                AppendHeader(builder, "Types", matches.Count, MaxTypeRows);
+            if (totalCount > MaxTypeRows)
+                AppendHeader(builder, "Types", totalCount, MaxTypeRows);
 
-            for (var matchIndex = 0; matchIndex < matches.Count && matchIndex < MaxTypeRows; matchIndex++)
+            for (var matchIndex = 0; matchIndex < matches.Count; matchIndex++)
                 AppendType(builder, matches[matchIndex]);
 
-            AppendTruncation(builder, matches.Count, MaxTypeRows, "types");
+            AppendTruncation(builder, totalCount, MaxTypeRows, "types");
             return Success(Trimmed(builder));
         }
 
@@ -124,14 +234,18 @@ namespace Conduit
                 return Error($"No type matched '{typeQuery}'.");
 
             if (match.Kind == TypeMatchKind.Ambiguous)
-                return Ambiguous(TypeCandidates($"Multiple types match '{typeQuery}'. Rerun with a full type name or 'Full.Type.Name, AssemblyName'.", match.Candidates));
+                return Ambiguous(TypeCandidates(
+                    $"Multiple types match '{typeQuery}'. Rerun with a full type name or 'Full.Type.Name, AssemblyName'.",
+                    match.Candidates,
+                    match.CandidateCount
+                ));
 
             var target = match.Type!;
             var normalizedMember = NormalizeQuery(memberQuery);
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendLoadWarning(builder, loadWarning);
             builder.AppendLine($"Members for {FormatType(target, includeNamespace: true)}");
-            builder.AppendLine($"Assembly: {target.Assembly.GetName().Name}");
+            builder.AppendLine($"Assembly: {GetAssemblyName(target.Assembly)}");
             AppendTypeHierarchy(builder, target);
             builder.AppendLine();
 
@@ -150,31 +264,28 @@ namespace Conduit
             string loadWarning
         )
         {
-            var matches = new List<MemberDisplay>();
-            foreach (var type in index)
-                matches.AddRange(GetDisplayMembers(type, mode.MemberKind, memberQuery));
+            var collector = new WideMemberCollector();
+            AppendWideMemberMatches(collector, index, mode.MemberKind, memberQuery);
 
-            matches.Sort(CompareMembers);
+            var matches = collector.GetSortedMatches();
 
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendLoadWarning(builder, loadWarning);
-            if (matches.Count == 0)
+            if (collector.TotalCount == 0)
             {
                 builder.Append("No members matched.");
                 return Success(Trimmed(builder));
             }
 
-            if (matches.Count > MaxWideMemberRows)
-                AppendHeader(builder, "Members", matches.Count, MaxWideMemberRows);
+            if (collector.TotalCount > MaxWideMemberRows)
+                AppendHeader(builder, "Members", collector.TotalCount, MaxWideMemberRows);
 
             Type? currentType = null;
             ReflectMemberKind currentKind = ReflectMemberKind.None;
             var shown = 0;
-            foreach (var member in matches)
+            foreach (var match in matches)
             {
-                if (shown == MaxWideMemberRows)
-                    break;
-
+                var member = FormatMemberMatch(match);
                 if (currentType != member.DeclaringType)
                 {
                     if (shown > 0)
@@ -182,20 +293,27 @@ namespace Conduit
 
                     currentType = member.DeclaringType;
                     currentKind = ReflectMemberKind.None;
-                    builder.AppendLine($"Containing Type: {FormatType(currentType, includeNamespace: true)} ({currentType.Assembly.GetName().Name})");
+                    builder.Append("Containing Type: ");
+                    builder.Append(FormatType(currentType, includeNamespace: true));
+                    builder.Append(" (");
+                    builder.Append(GetAssemblyName(currentType.Assembly));
+                    builder.AppendLine(")");
                 }
 
                 if (currentKind != member.Kind)
                 {
                     currentKind = member.Kind;
-                    builder.AppendLine($"  {MemberKindHeader(currentKind)}:");
+                    builder.Append("  ");
+                    builder.Append(MemberKindHeader(currentKind));
+                    builder.AppendLine(":");
                 }
 
-                builder.AppendLine($"  - {member.Signature}");
+                builder.Append("  - ");
+                builder.AppendLine(member.Signature);
                 shown++;
             }
 
-            AppendTruncation(builder, matches.Count, MaxWideMemberRows, "members");
+            AppendTruncation(builder, collector.TotalCount, MaxWideMemberRows, "members");
             return Success(Trimmed(builder));
         }
 
@@ -223,7 +341,7 @@ namespace Conduit
                 if (appendedAny)
                     builder.AppendLine();
 
-                builder.AppendLine($"{label} ({containingType.Assembly.GetName().Name})");
+                builder.AppendLine($"{label} ({GetAssemblyName(containingType.Assembly)})");
                 AppendMembersByKind(builder, members, null);
                 appendedAny = true;
             }
@@ -255,7 +373,7 @@ namespace Conduit
             builder.Append(' ');
             builder.Append(FormatType(type, includeNamespace: true));
             builder.Append(" | Assembly: ");
-            builder.Append(type.Assembly.GetName().Name);
+            builder.Append(GetAssemblyName(type.Assembly));
             builder.Append(" | Base: ");
             builder.Append(baseType);
             builder.Append(" | Interfaces: ");
@@ -279,13 +397,20 @@ namespace Conduit
         static void AppendMemberCounts(StringBuilder builder, Type type)
         {
             builder.Append("fields=");
-            builder.Append(GetFields(type).Length.ToString(CultureInfo.InvariantCulture));
+            AppendInvariant(builder, GetFields(type).Length);
             builder.Append(", properties=");
-            builder.Append(GetProperties(type).Length.ToString(CultureInfo.InvariantCulture));
+            AppendInvariant(builder, GetProperties(type).Length);
             builder.Append(", methods=");
-            builder.Append(GetMethods(type).Length.ToString(CultureInfo.InvariantCulture));
+            AppendInvariant(builder, GetMethods(type).Length);
             builder.Append(", constructors=");
-            builder.Append(GetConstructors(type).Length.ToString(CultureInfo.InvariantCulture));
+            AppendInvariant(builder, GetConstructors(type).Length);
+        }
+
+        static void AppendInvariant(StringBuilder builder, int value)
+        {
+            Span<char> buffer = stackalloc char[11];
+            value.TryFormat(buffer, out var written, provider: CultureInfo.InvariantCulture);
+            builder.Append(buffer[..written]);
         }
 
         static void AppendMembersByKind(StringBuilder builder, List<MemberDisplay> members, int? maxRows)
@@ -301,10 +426,13 @@ namespace Conduit
                 if (currentKind != member.Kind)
                 {
                     currentKind = member.Kind;
-                    builder.AppendLine($"  {MemberKindHeader(currentKind)}:");
+                    builder.Append("  ");
+                    builder.Append(MemberKindHeader(currentKind));
+                    builder.AppendLine(":");
                 }
 
-                builder.AppendLine($"  - {member.Signature}");
+                builder.Append("  - ");
+                builder.AppendLine(member.Signature);
                 appended++;
             }
         }
@@ -316,7 +444,7 @@ namespace Conduit
 
             builder.AppendLine();
             builder.Append("Truncated: ");
-            builder.Append((count - maxRows).ToString(CultureInfo.InvariantCulture));
+            AppendInvariant(builder, count - maxRows);
             builder.Append(' ');
             builder.Append(label);
             builder.AppendLine(" omitted. Narrow the query.");
@@ -328,55 +456,417 @@ namespace Conduit
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
                 foreach (var field in GetFields(type))
                     if (TryGetMemberMatchRank(field, memberQuery, out var rank))
-                        members.Add(new(type, ReflectMemberKind.Field, field.Name, FormatField(field), rank));
+                        members.Add(new(type, ReflectMemberKind.Field, field.Name, FormatMemberSignature(field), rank));
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
                 foreach (var property in GetProperties(type))
                     if (TryGetMemberMatchRank(property, memberQuery, out var rank))
-                        members.Add(new(type, ReflectMemberKind.Property, property.Name, FormatProperty(property), rank));
+                        members.Add(new(type, ReflectMemberKind.Property, property.Name, FormatMemberSignature(property), rank));
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
                 foreach (var method in GetMethods(type, memberQuery))
                     if (TryGetMemberMatchRank(method, memberQuery, out var rank))
-                        members.Add(new(type, ReflectMemberKind.Method, method.Name, FormatMethod(method), rank));
+                        members.Add(new(type, ReflectMemberKind.Method, method.Name, FormatMemberSignature(method), rank));
 
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
                 foreach (var constructor in GetConstructors(type))
                     if (TryGetMemberMatchRank(constructor, memberQuery, out var rank))
-                        members.Add(new(type, ReflectMemberKind.Constructor, constructor.Name, FormatConstructor(constructor), rank));
+                        members.Add(new(type, ReflectMemberKind.Constructor, constructor.Name, FormatMemberSignature(constructor), rank));
 
             return members;
         }
 
-        static FieldInfo[] GetFields(Type type)
-            => type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-
-        static PropertyInfo[] GetProperties(Type type)
-            => type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-
-        static MethodInfo[] GetMethods(Type type, string memberQuery = "")
+        static void AppendWideMemberMatches(
+            WideMemberCollector matches,
+            IReadOnlyList<Type> types,
+            ReflectMemberKind kind,
+            string memberQuery)
         {
-            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
             var includeAccessors = IsAccessorQuery(memberQuery);
-            var filtered = new List<MethodInfo>(methods.Length);
-            foreach (var method in methods)
-                if (includeAccessors || !IsPropertyOrEventAccessor(method))
-                    filtered.Add(method);
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
+                Append(GetWideMemberIndex(types, ReflectMemberKind.Field), ReflectMemberKind.Field);
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
+                Append(GetWideMemberIndex(types, ReflectMemberKind.Property), ReflectMemberKind.Property);
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
+            {
+                Append(GetWideMemberIndex(types, ReflectMemberKind.Method), ReflectMemberKind.Method);
+                if (includeAccessors)
+                    Append(
+                        GetWideMemberIndex(types, ReflectMemberKind.Method, accessorsOnly: true),
+                        ReflectMemberKind.Method
+                    );
+            }
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
+                Append(GetWideMemberIndex(types, ReflectMemberKind.Constructor), ReflectMemberKind.Constructor);
 
-            return filtered.ToArray();
+            void Append(WideMemberIndex members, ReflectMemberKind memberKind)
+            {
+                var segments = members.Segments;
+                var entryCount = 0;
+                foreach (var segment in segments)
+                    entryCount += segment.Entries.Length;
+
+                // metadata and search strings are immutable; partition large scans to reduce the editor stall.
+                var workerCount = GetParallelScanWorkerCount(entryCount);
+                if (workerCount == 1)
+                {
+                    foreach (var segment in segments)
+                        AppendSegment(matches, segment);
+                    return;
+                }
+
+                var workerResults = new WideMemberCollector[workerCount];
+                var nextSegment = -1;
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new WideMemberCollector();
+                    int segmentIndex;
+                    while ((segmentIndex = Interlocked.Increment(ref nextSegment)) < segments.Length)
+                        AppendSegment(localMatches, segments[segmentIndex]);
+
+                    workerResults[workerIndex] = localMatches;
+                });
+
+                foreach (var workerResult in workerResults)
+                    workerResult.MergeInto(matches);
+
+                void AppendSegment(WideMemberCollector destination, WideMemberIndexSegment segment)
+                {
+                    foreach (var entry in segment.Entries)
+                    {
+                        if (TryGetMemberMatchRank(
+                                entry.Name,
+                                entry.DeclaringType,
+                                memberKind == ReflectMemberKind.Constructor,
+                                memberQuery,
+                                out var rank
+                            ))
+                            destination.Add(new(
+                                entry.DeclaringType,
+                                memberKind,
+                                entry.Name,
+                                entry.Member,
+                                rank
+                            ));
+                    }
+                }
+            }
         }
 
-        static bool IsAccessorQuery(string memberQuery)
+        internal static WideMemberIndex GetWideMemberIndex(
+            IReadOnlyList<Type> types,
+            ReflectMemberKind kind,
+            bool accessorsOnly = false)
+        {
+            lock (IndexLock)
+            {
+                while (true)
+                {
+                    if (TryGetCachedWideMemberIndex(kind, accessorsOnly, out var cached))
+                        return cached;
+
+                    var currentTypes = cachedIndex ?? types;
+                    var built = new WideMemberIndex(
+                        BuildWideMemberIndex(currentTypes, kind, accessorsOnly)
+                    );
+                    // reflecting metadata can load another assembly and replace the type index reentrantly.
+                    if (!ReferenceEquals(currentTypes, cachedIndex))
+                        continue;
+
+                    SetCachedWideMemberIndex(kind, accessorsOnly, built);
+                    return built;
+                }
+            }
+        }
+
+        static WideMemberIndexSegment[] BuildWideMemberIndex(
+            IReadOnlyList<Type> types,
+            ReflectMemberKind kind,
+            bool accessorsOnly = false)
+        {
+            var segments = new List<WideMemberIndexSegment>();
+            var members = new List<WideMemberIndexEntry>();
+            string? currentAssemblyName = null;
+            for (var position = 0; position < types.Count; position++)
+            {
+                var type = types[position];
+                var assemblyName = GetTypeSearchInfo(types, position).AssemblyName;
+                if (currentAssemblyName != assemblyName)
+                {
+                    FlushSegment();
+                    currentAssemblyName = assemblyName;
+                }
+
+                var groupStart = members.Count;
+                // the global index retains each member; avoid also retaining one cached array per loaded type.
+                switch (kind)
+                {
+                    case ReflectMemberKind.Field:
+                        AddWideMembers(
+                            members,
+                            type,
+                            fieldCache.TryGetValue(type, out var fields)
+                                ? fields
+                                : type.GetFields(DeclaredMembers)
+                        );
+                        break;
+                    case ReflectMemberKind.Property:
+                        AddWideMembers(
+                            members,
+                            type,
+                            propertyCache.TryGetValue(type, out var properties)
+                                ? properties
+                                : type.GetProperties(DeclaredMembers)
+                        );
+                        break;
+                    case ReflectMemberKind.Method:
+                        AddWideMethods(
+                            members,
+                            type,
+                            methodCache.TryGetValue(type, out var methods)
+                                ? methods
+                                : type.GetMethods(DeclaredMembers),
+                            accessorsOnly
+                        );
+                        break;
+                    case ReflectMemberKind.Constructor:
+                        AddWideMembers(
+                            members,
+                            type,
+                            constructorCache.TryGetValue(type, out var constructors)
+                                ? constructors
+                                : type.GetConstructors(DeclaredMembers)
+                        );
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(kind));
+                }
+
+                members.Sort(
+                    groupStart,
+                    members.Count - groupStart,
+                    WideMemberWithinTypeComparer.Instance
+                );
+            }
+
+            FlushSegment();
+            return segments.ToArray();
+
+            void FlushSegment()
+            {
+                if (members.Count == 0 || currentAssemblyName == null)
+                    return;
+
+                segments.Add(new(currentAssemblyName, members.ToArray()));
+                members.Clear();
+            }
+        }
+
+        static void AddWideMembers(
+            List<WideMemberIndexEntry> members,
+            Type declaringType,
+            MemberInfo[] values)
+        {
+            foreach (var value in values)
+                members.Add(new(declaringType, value));
+        }
+
+        static void AddWideMethods(
+            List<WideMemberIndexEntry> members,
+            Type declaringType,
+            MethodInfo[] values,
+            bool accessorsOnly)
+        {
+            foreach (var value in values)
+                if (IsPropertyOrEventAccessor(value) == accessorsOnly)
+                    members.Add(new(declaringType, value));
+        }
+
+        static bool TryGetCachedWideMemberIndex(
+            ReflectMemberKind kind,
+            bool accessorsOnly,
+            out WideMemberIndex members)
+        {
+            WideMemberIndex? cached = (kind, accessorsOnly) switch
+            {
+                (ReflectMemberKind.Field, false) => wideFieldIndex,
+                (ReflectMemberKind.Property, false) => widePropertyIndex,
+                (ReflectMemberKind.Method, false) => wideMethodIndex,
+                (ReflectMemberKind.Method, true) => wideAccessorIndex,
+                (ReflectMemberKind.Constructor, false) => wideConstructorIndex,
+                _ => null,
+            };
+            members = cached!;
+            return cached != null;
+        }
+
+        static void SetCachedWideMemberIndex(
+            ReflectMemberKind kind,
+            bool accessorsOnly,
+            WideMemberIndex members)
+        {
+            if (accessorsOnly)
+            {
+                wideAccessorIndex = members;
+                return;
+            }
+
+            switch (kind)
+            {
+                case ReflectMemberKind.Field:
+                    wideFieldIndex = members;
+                    break;
+                case ReflectMemberKind.Property:
+                    widePropertyIndex = members;
+                    break;
+                case ReflectMemberKind.Method:
+                    wideMethodIndex = members;
+                    break;
+                case ReflectMemberKind.Constructor:
+                    wideConstructorIndex = members;
+                    break;
+            }
+        }
+
+        static void InvalidateWideMemberIndexes()
+        {
+            wideFieldIndex = null;
+            widePropertyIndex = null;
+            wideMethodIndex = null;
+            wideAccessorIndex = null;
+            wideConstructorIndex = null;
+        }
+
+        static void ExtendWideMemberIndexes(
+            IReadOnlyList<Type> addedTypes,
+            IReadOnlyList<Type> expectedTypeIndex)
+        {
+            if (wideFieldIndex == null
+                && widePropertyIndex == null
+                && wideMethodIndex == null
+                && wideAccessorIndex == null
+                && wideConstructorIndex == null)
+                return;
+
+            var fields = wideFieldIndex == null
+                ? null
+                : BuildWideMemberIndex(addedTypes, ReflectMemberKind.Field);
+            var properties = widePropertyIndex == null
+                ? null
+                : BuildWideMemberIndex(addedTypes, ReflectMemberKind.Property);
+            var methods = wideMethodIndex == null
+                ? null
+                : BuildWideMemberIndex(addedTypes, ReflectMemberKind.Method);
+            var accessors = wideAccessorIndex == null
+                ? null
+                : BuildWideMemberIndex(
+                    addedTypes,
+                    ReflectMemberKind.Method,
+                    accessorsOnly: true
+                );
+            var constructors = wideConstructorIndex == null
+                ? null
+                : BuildWideMemberIndex(addedTypes, ReflectMemberKind.Constructor);
+
+            // metadata inspection can load another assembly reentrantly; its handler owns the newer indexes.
+            if (!ReferenceEquals(expectedTypeIndex, cachedIndex))
+            {
+                InvalidateWideMemberIndexes();
+                return;
+            }
+
+            if (fields is { Length: > 0 })
+                wideFieldIndex!.AddSegments(fields);
+            if (properties is { Length: > 0 })
+                widePropertyIndex!.AddSegments(properties);
+            if (methods is { Length: > 0 })
+                wideMethodIndex!.AddSegments(methods);
+            if (accessors is { Length: > 0 })
+                wideAccessorIndex!.AddSegments(accessors);
+            if (constructors is { Length: > 0 })
+                wideConstructorIndex!.AddSegments(constructors);
+        }
+
+        internal static int CompareWideMemberEntries(
+            WideMemberIndexEntry left,
+            WideMemberIndexEntry right)
+        {
+            var type = CompareTypes(left.DeclaringType, right.DeclaringType);
+            if (type != 0)
+                return type;
+
+            var name = string.Compare(left.Name, right.Name, StringComparison.Ordinal);
+            return name != 0
+                ? name
+                : WideMemberIndexEntry.GetMetadataToken(left.Member)
+                    .CompareTo(WideMemberIndexEntry.GetMetadataToken(right.Member));
+        }
+
+        static MemberDisplay FormatMemberMatch(MemberMatch match) =>
+            new(
+                match.DeclaringType,
+                match.Kind,
+                match.Name,
+                FormatMemberSignature(match),
+                match.MatchRank
+            );
+
+        static string FormatMemberSignature(MemberMatch match)
+            => FormatMemberSignature(match.Member);
+
+        static string FormatMemberSignature(MemberInfo member)
+            => memberSignatureCache.GetOrAdd(member, static value => value switch
+            {
+                FieldInfo field             => FormatField(field),
+                PropertyInfo property       => FormatProperty(property),
+                MethodInfo method           => FormatMethod(method),
+                ConstructorInfo constructor => FormatConstructor(constructor),
+                _                           => value.ToString() ?? value.Name,
+            });
+
+        internal static FieldInfo[] GetFields(Type type)
+            => fieldCache.GetOrAdd(type, static value =>
+                value.GetFields(DeclaredMembers)
+            );
+
+        internal static PropertyInfo[] GetProperties(Type type)
+            => propertyCache.GetOrAdd(type, static value =>
+                value.GetProperties(DeclaredMembers)
+            );
+
+        internal static MethodInfo[] GetMethods(Type type, string memberQuery = "")
+        {
+            var methods = methodCache.GetOrAdd(type, static value =>
+                value.GetMethods(DeclaredMembers)
+            );
+            if (IsAccessorQuery(memberQuery))
+                return methods;
+
+            if (methodWithoutAccessorsCache.TryGetValue(type, out var filtered))
+                return filtered;
+
+            filtered = Array.FindAll(methods, static method => !IsPropertyOrEventAccessor(method));
+            return methodWithoutAccessorsCache.GetOrAdd(type, filtered);
+        }
+
+        internal static MethodInfo[] GetMethods(Type type, bool includeAccessors)
+            => includeAccessors ? methodCache.GetOrAdd(type, static value =>
+                value.GetMethods(DeclaredMembers)
+            ) : GetMethods(type);
+
+        internal static bool IsAccessorQuery(string memberQuery)
             => memberQuery.StartsWith("get_", StringComparison.OrdinalIgnoreCase)
                || memberQuery.StartsWith("set_", StringComparison.OrdinalIgnoreCase)
                || memberQuery.StartsWith("add_", StringComparison.OrdinalIgnoreCase)
                || memberQuery.StartsWith("remove_", StringComparison.OrdinalIgnoreCase)
                || memberQuery.StartsWith("raise_", StringComparison.OrdinalIgnoreCase);
 
-        static ConstructorInfo[] GetConstructors(Type type)
-            => type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+        internal static ConstructorInfo[] GetConstructors(Type type)
+            => constructorCache.GetOrAdd(type, static value =>
+                value.GetConstructors(DeclaredMembers)
+            );
 
-        static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, string memberQuery)
+        internal static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, string memberQuery)
         {
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
                 foreach (var field in GetFields(type))
@@ -401,6 +891,65 @@ namespace Conduit
             return false;
         }
 
+        internal static HashSet<Type> FindTypesDeclaringMatchingMember(
+            IReadOnlyList<Type> types,
+            string memberQuery)
+        {
+            var matches = new HashSet<Type>();
+            Append(ReflectMemberKind.Field);
+            Append(ReflectMemberKind.Property);
+            Append(ReflectMemberKind.Method);
+            if (IsAccessorQuery(memberQuery))
+                Append(ReflectMemberKind.Method, accessorsOnly: true);
+            Append(ReflectMemberKind.Constructor);
+            return matches;
+
+            void Append(ReflectMemberKind kind, bool accessorsOnly = false)
+            {
+                var segments = GetWideMemberIndex(types, kind, accessorsOnly).Segments;
+                var entryCount = 0;
+                foreach (var segment in segments)
+                    entryCount += segment.Entries.Length;
+
+                // metadata and search strings are immutable; partition large scans to reduce the editor stall.
+                var workerCount = GetParallelScanWorkerCount(entryCount);
+                if (workerCount == 1)
+                {
+                    foreach (var segment in segments)
+                        AppendSegment(matches, segment);
+                    return;
+                }
+
+                var workerResults = new HashSet<Type>[workerCount];
+                var nextSegment = -1;
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new HashSet<Type>();
+                    int segmentIndex;
+                    while ((segmentIndex = Interlocked.Increment(ref nextSegment)) < segments.Length)
+                        AppendSegment(localMatches, segments[segmentIndex]);
+
+                    workerResults[workerIndex] = localMatches;
+                });
+
+                foreach (var workerResult in workerResults)
+                    matches.UnionWith(workerResult);
+
+                void AppendSegment(HashSet<Type> destination, WideMemberIndexSegment segment)
+                {
+                    foreach (var entry in segment.Entries)
+                        if (TryGetMemberMatchRank(
+                                entry.Name,
+                                entry.DeclaringType,
+                                kind == ReflectMemberKind.Constructor,
+                                memberQuery,
+                                out _
+                            ))
+                            destination.Add(entry.DeclaringType);
+                }
+            }
+        }
+
         static bool MatchesMember(MemberInfo member, string query)
             => MemberMatchRank(member, query) < int.MaxValue;
 
@@ -410,90 +959,196 @@ namespace Conduit
             return rank < int.MaxValue;
         }
 
+        static bool TryGetMemberMatchRank(
+            string memberName,
+            Type declaringType,
+            bool isConstructor,
+            string query,
+            out int rank)
+        {
+            rank = MemberMatchRank(memberName, declaringType, isConstructor, query);
+            return rank < int.MaxValue;
+        }
+
         static int MemberMatchRank(MemberInfo member, string query)
+            => MemberMatchRank(
+                member.Name,
+                member.DeclaringType ?? typeof(object),
+                member is ConstructorInfo,
+                query
+            );
+
+        static int MemberMatchRank(
+            string memberName,
+            Type declaringType,
+            bool isConstructor,
+            string query)
         {
             if (query.Length == 0)
                 return 0;
 
-            if (string.Equals(member.Name, query, StringComparison.OrdinalIgnoreCase))
-                return 0;
+            var nameRank = TextMatchRank(memberName, query);
+            if (nameRank < int.MaxValue)
+                return nameRank;
 
-            if (member.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
-                return 1;
-
-            if (Contains(member.Name, query))
-                return 2;
-
-            if (member is ConstructorInfo constructor)
+            if (isConstructor)
             {
-                var declaringType = constructor.DeclaringType;
                 if (string.Equals(query, "ctor", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(query, ".ctor", StringComparison.OrdinalIgnoreCase))
                     return 0;
 
-                if (declaringType != null)
-                {
-                    var shortName = ShortTypeName(declaringType);
-                    if (string.Equals(shortName, query, StringComparison.OrdinalIgnoreCase))
-                        return 0;
-
-                    if (shortName.StartsWith(query, StringComparison.OrdinalIgnoreCase))
-                        return 1;
-
-                    if (Contains(shortName, query))
-                        return 2;
-                }
+                var shortName = ShortTypeName(declaringType);
+                return TextMatchRank(shortName, query);
             }
 
             return int.MaxValue;
         }
 
-        static bool MatchesType(Type type, string query)
-            => Contains(type.FullName ?? type.Name, query)
-               || Contains(type.Name, query)
-               || Contains(DisplayTypeName(type, includeNamespace: false), query)
-               || Contains(DisplayTypeName(type, includeNamespace: true), query)
-               || Contains($"{type.FullName}, {type.Assembly.GetName().Name}", query);
-
-        static TypeMatch MatchSingleType(IReadOnlyList<Type> index, string query)
+        static int TextMatchRank(string value, string query)
         {
-            var exactQualified = FindTypes(index, type => string.Equals($"{type.FullName}, {type.Assembly.GetName().Name}", query, StringComparison.OrdinalIgnoreCase));
-            if (exactQualified.Count > 0)
-                return SelectTypeMatch(exactQualified);
+            var offset = value.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (offset < 0)
+                return int.MaxValue;
+            if (offset > 0)
+                return 2;
+            return value.Length == query.Length ? 0 : 1;
+        }
 
-            var exactFullName = FindTypes(index, type => string.Equals(type.FullName, query, StringComparison.OrdinalIgnoreCase));
-            if (exactFullName.Count > 0)
-                return SelectTypeMatch(exactFullName);
+        internal static TypeMatch MatchSingleType(
+            IReadOnlyList<Type> index,
+            string query,
+            ReflectTypeKind kind = ReflectTypeKind.Any)
+        {
+            lock (IndexLock)
+                if (ReferenceEquals(index, cachedIndex)
+                    && GetExactTypeLookup().TryGetValue(query, out var indexed)
+                    && indexed.Type != null
+                    && MatchesTypeKind(indexed.Type, kind))
+                    return TypeMatch.Matched(indexed.Type);
 
-            var exactDisplayName = FindTypes(index, type => string.Equals(DisplayTypeName(type, includeNamespace: true), query, StringComparison.OrdinalIgnoreCase)
-                                                            || string.Equals(DisplayTypeName(type, includeNamespace: false), query, StringComparison.OrdinalIgnoreCase));
-            if (exactDisplayName.Count > 0)
-                return SelectTypeMatch(exactDisplayName);
+            var hasAssemblyQuery = query.IndexOf(',') >= 0;
+            var hasGenericDisplayQuery = query.IndexOf('<') >= 0;
+            var hasNestedDisplayQuery = query.IndexOf('.') >= 0;
+            var bestRank = int.MaxValue;
+            var matchCount = 0;
+            var matches = new List<Type>(MaxCandidates);
+            var workerCount = GetParallelScanWorkerCount(index.Count);
+            if (workerCount == 1)
+                Scan(0, index.Count, matches, ref bestRank, ref matchCount);
+            else
+            {
+                var workerMatches = new List<Type>[workerCount];
+                var workerRanks = new int[workerCount];
+                var workerCounts = new int[workerCount];
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new List<Type>(MaxCandidates);
+                    var localRank = int.MaxValue;
+                    var localCount = 0;
+                    var start = (int)((long)index.Count * workerIndex / workerCount);
+                    var end = (int)((long)index.Count * (workerIndex + 1) / workerCount);
+                    Scan(start, end, localMatches, ref localRank, ref localCount);
+                    workerMatches[workerIndex] = localMatches;
+                    workerRanks[workerIndex] = localRank;
+                    workerCounts[workerIndex] = localCount;
+                });
 
-            var contains = FindTypes(index, type => MatchesType(type, query));
-            if (contains.Count == 0)
+                for (var workerIndex = 0; workerIndex < workerCount; workerIndex++)
+                {
+                    var localRank = workerRanks[workerIndex];
+                    if (localRank > bestRank)
+                        continue;
+
+                    if (localRank < bestRank)
+                    {
+                        bestRank = localRank;
+                        matchCount = 0;
+                        matches.Clear();
+                    }
+
+                    matchCount += workerCounts[workerIndex];
+                    var localMatches = workerMatches[workerIndex];
+                    var toCopy = Math.Min(MaxCandidates - matches.Count, localMatches.Count);
+                    for (var matchIndex = 0; matchIndex < toCopy; matchIndex++)
+                        matches.Add(localMatches[matchIndex]);
+                }
+            }
+
+            if (matchCount == 0)
                 return TypeMatch.None();
 
-            return SelectTypeMatch(contains);
+            return SelectTypeMatch(matches, matchCount);
+
+            void Scan(
+                int start,
+                int end,
+                List<Type> destination,
+                ref int destinationRank,
+                ref int destinationCount)
+            {
+                for (var position = start; position < end; position++)
+                {
+                    var type = index[position];
+                    var info = GetTypeSearchInfo(index, position);
+                    if (kind != ReflectTypeKind.Any && info.Kind != kind)
+                        continue;
+
+                    var rank = MatchRank(type, info);
+                    if (rank == int.MaxValue || rank > destinationRank)
+                        continue;
+
+                    if (rank < destinationRank)
+                    {
+                        destination.Clear();
+                        destinationRank = rank;
+                        destinationCount = 0;
+                    }
+
+                    destinationCount++;
+                    if (destination.Count < MaxCandidates)
+                        destination.Add(type);
+                }
+            }
+
+            int MatchRank(Type type, TypeSearchInfo info)
+            {
+                var needsDisplayName = hasGenericDisplayQuery && info.IsGenericType
+                                       || hasNestedDisplayQuery && info.IsNested;
+                var shortDisplayName = needsDisplayName
+                    ? info.ShortDisplayName ??= DisplayTypeName(type, includeNamespace: false)
+                    : null;
+                var fullDisplayName = needsDisplayName
+                    ? DisplayTypeName(type, includeNamespace: true)
+                    : null;
+                var qualifiedName = hasAssemblyQuery
+                    ? $"{info.FullName}, {info.AssemblyName}"
+                    : null;
+
+                if (qualifiedName != null
+                    && string.Equals(qualifiedName, query, StringComparison.OrdinalIgnoreCase))
+                    return 0;
+                if (string.Equals(info.FullName, query, StringComparison.OrdinalIgnoreCase))
+                    return 1;
+                if (string.Equals(info.Name, query, StringComparison.OrdinalIgnoreCase))
+                    return 2;
+                if (shortDisplayName != null
+                    && (string.Equals(fullDisplayName, query, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(shortDisplayName, query, StringComparison.OrdinalIgnoreCase)))
+                    return 3;
+                if (Contains(info.FullName, query)
+                    || shortDisplayName != null
+                    && (Contains(shortDisplayName, query) || Contains(fullDisplayName!, query))
+                    || Contains(info.AssemblyName, query)
+                    || qualifiedName != null && Contains(qualifiedName, query))
+                    return 4;
+                return int.MaxValue;
+            }
         }
 
-        static TypeMatch SelectTypeMatch(List<Type> matches)
-        {
-            SortTypes(matches);
-            return matches.Count == 1
+        static TypeMatch SelectTypeMatch(List<Type> matches, int matchCount)
+            => matchCount == 1
                 ? TypeMatch.Matched(matches[0])
-                : TypeMatch.Ambiguous(matches);
-        }
-
-        static List<Type> FindTypes(IReadOnlyList<Type> index, Func<Type, bool> predicate)
-        {
-            var matches = new List<Type>();
-            foreach (var type in index)
-                if (predicate(type))
-                    matches.Add(type);
-
-            return matches;
-        }
+                : TypeMatch.Ambiguous(matches, matchCount);
 
         static IReadOnlyList<Type> LoadIndex(out string warning)
         {
@@ -501,6 +1156,8 @@ namespace Conduit
             {
                 if (cachedIndex != null)
                 {
+                    // generated snippets are folded into the sorted index only when reflection needs them.
+                    ApplyPendingLoadedTypes();
                     warning = cachedLoadWarning;
                     return cachedIndex;
                 }
@@ -514,38 +1171,63 @@ namespace Conduit
         internal static IReadOnlyList<Type> LoadIndexForHelpers()
             => LoadIndex(out _);
 
-        static IReadOnlyList<Type> BuildIndex(out string warning)
+        internal static int GetParallelScanWorkerCount(int entryCount)
+            => Math.Min(
+                Math.Min(Environment.ProcessorCount, MaxParallelScanWorkers),
+                Math.Max(1, entryCount / ParallelScanEntriesPerWorker)
+            );
+
+        static TypeIndex BuildIndex(out string warning)
         {
             var types = new List<Type>();
-            var warnings = new StringBuilder();
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            using var pooledWarnings = BridgeStringBuilderPool.Rent(out var warnings);
+            var assemblies = new HashSet<Assembly>();
+            while (true)
             {
-                try
+                var addedAssembly = false;
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    types.AddRange(assembly.GetTypes());
-                }
-                catch (ReflectionTypeLoadException exception)
-                {
-                    foreach (var type in exception.Types)
-                        if (type != null)
-                            types.Add(type);
+                    if (!assemblies.Add(assembly))
+                        continue;
 
-                    AppendLoadFailure(assembly, exception);
+                    addedAssembly = true;
+                    AppendAssemblyTypes(types, assembly, warnings);
                 }
-                catch (Exception exception)
-                {
-                    AppendLoadFailure(assembly, exception);
-                }
+
+                // GetTypes can load dependencies reentrantly; include them before publishing the index.
+                if (!addedAssembly)
+                    break;
             }
 
-            SortTypes(types);
             warning = Trimmed(warnings);
-            return types;
+            return SortIndex(types);
+        }
 
-            void AppendLoadFailure(Assembly assembly, Exception exception)
+        static void AppendAssemblyTypes(List<Type> types, Assembly assembly, StringBuilder warnings)
+        {
+            try
+            {
+                types.AddRange(assembly.GetTypes());
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                foreach (var type in exception.Types)
+                    if (type != null)
+                        types.Add(type);
+
+                AppendLoadFailure(exception);
+            }
+            catch (Exception exception)
+            {
+                AppendLoadFailure(exception);
+            }
+
+            void AppendLoadFailure(Exception exception)
             {
                 if (warnings.Length == 0)
                     warnings.AppendLine("Warning: some loaded assemblies could not be fully reflected.");
+                else if (warnings[^1] != '\n')
+                    warnings.AppendLine();
 
                 warnings.Append("- ")
                     .Append(assembly.GetName().Name)
@@ -597,21 +1279,18 @@ namespace Conduit
             }
         }
 
-        static bool MatchesTypeKind(Type type, ReflectTypeKind kind)
-            => kind switch
-            {
-                ReflectTypeKind.Any    => true,
-                ReflectTypeKind.Class  => type.IsClass && !typeof(Delegate).IsAssignableFrom(type),
-                ReflectTypeKind.Struct => type.IsValueType && !type.IsEnum,
-                ReflectTypeKind.Enum   => type.IsEnum,
-                ReflectTypeKind.Interface => type.IsInterface,
-                ReflectTypeKind.Delegate  => type.IsSubclassOf(typeof(MulticastDelegate)),
-                _                      => true,
-            };
+        internal static bool MatchesTypeKind(Type type, ReflectTypeKind kind)
+            => kind == ReflectTypeKind.Any || GetTypeSearchInfo(type).Kind == kind;
+
+        internal static bool MatchesTypeKind(
+            IReadOnlyList<Type> index,
+            int position,
+            ReflectTypeKind kind
+        ) => kind == ReflectTypeKind.Any || GetTypeSearchInfo(index, position).Kind == kind;
 
         static string FormatField(FieldInfo field)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendFieldAccess(builder, field);
             AppendFieldModifiers(builder, field);
             builder.Append(FormatType(field.FieldType));
@@ -623,7 +1302,7 @@ namespace Conduit
         static string FormatProperty(PropertyInfo property)
         {
             var accessor = PrimaryAccessor(property);
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             if (accessor != null)
             {
                 AppendAccess(builder, accessor);
@@ -696,7 +1375,7 @@ namespace Conduit
 
         static string FormatMethod(MethodInfo method)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendAccess(builder, method);
             AppendMethodModifiers(builder, method);
             AppendReturnType(builder, method);
@@ -712,7 +1391,7 @@ namespace Conduit
 
         static string FormatConstructor(ConstructorInfo constructor)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             if (constructor.IsStatic)
                 builder.Append("static ");
             else
@@ -746,7 +1425,7 @@ namespace Conduit
 
         static string FormatParameters(ParameterInfo[] parameters)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             for (var index = 0; index < parameters.Length; index++)
             {
                 if (index > 0)
@@ -855,13 +1534,16 @@ namespace Conduit
 
         static string DisplayTypeName(Type type, bool includeNamespace)
         {
+            if (!includeNamespace && !type.IsNested && !type.IsGenericType)
+                return CSharpIdentifier.Escape(type.Name);
+
             var hierarchy = new Stack<Type>();
             for (var current = type; current != null; current = current.DeclaringType)
                 hierarchy.Push(current);
 
             var arguments = type.IsGenericType ? type.GetGenericArguments() : Type.EmptyTypes;
             var argumentIndex = 0;
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             while (hierarchy.Count > 0)
             {
                 var part = hierarchy.Pop();
@@ -973,7 +1655,7 @@ namespace Conduit
             {
                 return method.GetBaseDefinition() != method;
             }
-            catch (InvalidOperationException)
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
             {
                 return false;
             }
@@ -1114,7 +1796,7 @@ namespace Conduit
             return false;
         }
 
-        static bool IsPropertyOrEventAccessor(MethodInfo method)
+        internal static bool IsPropertyOrEventAccessor(MethodInfo method)
             => method.IsSpecialName
                && (method.Name.StartsWith("get_", StringComparison.Ordinal)
                    || method.Name.StartsWith("set_", StringComparison.Ordinal)
@@ -1124,7 +1806,7 @@ namespace Conduit
 
         static string JoinTypes(Type[] types, int max)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             var shown = Math.Min(types.Length, max);
             for (var index = 0; index < shown; index++)
             {
@@ -1137,7 +1819,7 @@ namespace Conduit
             if (types.Length > shown)
             {
                 builder.Append(", +");
-                builder.Append((types.Length - shown).ToString(CultureInfo.InvariantCulture));
+                AppendInvariant(builder, types.Length - shown);
                 builder.Append(" more");
             }
 
@@ -1204,29 +1886,375 @@ namespace Conduit
                 : string.Compare(left.Signature, right.Signature, StringComparison.Ordinal);
         }
 
+        static int CompareMemberMatches(MemberMatch left, MemberMatch right)
+        {
+            var rank = left.MatchRank.CompareTo(right.MatchRank);
+            if (rank != 0)
+                return rank;
+
+            var type = CompareTypes(left.DeclaringType, right.DeclaringType);
+            if (type != 0)
+                return type;
+
+            var kind = left.Kind.CompareTo(right.Kind);
+            return kind != 0
+                ? kind
+                : string.Compare(left.Name, right.Name, StringComparison.Ordinal);
+        }
+
+        static int CompareMemberMatchesWithSignatures(MemberMatch left, MemberMatch right)
+        {
+            var comparison = CompareMemberMatches(left, right);
+            return comparison != 0
+                ? comparison
+                : string.Compare(
+                    FormatMemberSignature(left),
+                    FormatMemberSignature(right),
+                    StringComparison.Ordinal
+                );
+        }
+
+        sealed class WideMemberCollector
+        {
+            readonly List<MemberMatch> matches = new(MaxWideMemberRows);
+
+            public int TotalCount { get; private set; }
+
+            public void Add(MemberMatch match)
+            {
+                TotalCount++;
+                AddCandidate(match);
+            }
+
+            public void MergeInto(WideMemberCollector destination)
+            {
+                destination.TotalCount += TotalCount;
+                foreach (var match in matches)
+                    destination.AddCandidate(match);
+            }
+
+            void AddCandidate(MemberMatch match)
+            {
+                if (matches.Count < MaxWideMemberRows)
+                {
+                    matches.Add(match);
+                    if (matches.Count == MaxWideMemberRows)
+                        BuildHeap();
+                    return;
+                }
+
+                if (CompareMemberMatchesWithSignatures(match, matches[0]) >= 0)
+                    return;
+
+                matches[0] = match;
+                SiftDown(0);
+            }
+
+            public List<MemberMatch> GetSortedMatches()
+            {
+                matches.Sort(CompareMemberMatchesWithSignatures);
+                return matches;
+            }
+
+            void BuildHeap()
+            {
+                for (var index = matches.Count / 2 - 1; index >= 0; index--)
+                    SiftDown(index);
+            }
+
+            void SiftDown(int index)
+            {
+                while (true)
+                {
+                    var left = index * 2 + 1;
+                    if (left >= matches.Count)
+                        return;
+
+                    var right = left + 1;
+                    var worse = right < matches.Count
+                                && CompareMemberMatchesWithSignatures(matches[right], matches[left]) > 0
+                        ? right
+                        : left;
+                    if (CompareMemberMatchesWithSignatures(matches[worse], matches[index]) <= 0)
+                        return;
+
+                    (matches[index], matches[worse]) = (matches[worse], matches[index]);
+                    index = worse;
+                }
+            }
+        }
+
         static void SortTypes(List<Type> types) => types.Sort(CompareTypes);
 
-        static int CompareTypes(Type? left, Type? right)
+        static TypeIndex SortIndex(List<Type> types)
         {
-            var assembly = string.Compare(left?.Assembly.GetName().Name, right?.Assembly.GetName().Name, StringComparison.Ordinal);
+            var entries = new TypeSortEntry[types.Count];
+            for (var index = 0; index < types.Count; index++)
+            {
+                var type = types[index];
+                var info = CreateTypeSearchInfo(type);
+                entries[index] = new(
+                    type,
+                    info
+                );
+            }
+
+            // precomputed keys avoid repeated Mono reflection and cache lookups in the O(n log n) sort.
+            Array.Sort(entries, static (left, right) =>
+            {
+                var assembly = string.Compare(
+                    left.SearchInfo.AssemblyName,
+                    right.SearchInfo.AssemblyName,
+                    StringComparison.Ordinal
+                );
+                return assembly != 0
+                    ? assembly
+                    : string.Compare(
+                        left.SearchInfo.FullName,
+                        right.SearchInfo.FullName,
+                        StringComparison.Ordinal
+                    );
+            });
+
+            var sortedTypes = new Type[entries.Length];
+            var searchInfos = new TypeSearchInfo[entries.Length];
+            for (var index = 0; index < entries.Length; index++)
+            {
+                sortedTypes[index] = entries[index].Type;
+                searchInfos[index] = entries[index].SearchInfo;
+            }
+
+            return new(sortedTypes, searchInfos);
+        }
+
+        static TypeIndex MergeTypes(TypeIndex existing, IReadOnlyList<Type> added)
+        {
+            var mergedTypes = new Type[existing.Count + added.Count];
+            var mergedSearchInfos = new TypeSearchInfo[mergedTypes.Length];
+            var addedSearchInfos = new TypeSearchInfo[added.Count];
+            for (var index = 0; index < added.Count; index++)
+                addedSearchInfos[index] = CreateTypeSearchInfo(added[index]);
+
+            var existingIndex = 0;
+            var addedIndex = 0;
+            var mergedIndex = 0;
+            while (existingIndex < existing.Count && addedIndex < added.Count)
+            {
+                if (CompareTypeSearchInfo(
+                        existing.SearchInfos[existingIndex],
+                        addedSearchInfos[addedIndex]
+                    ) <= 0)
+                    Add(existing[existingIndex], existing.SearchInfos[existingIndex++]);
+                else
+                    Add(added[addedIndex], addedSearchInfos[addedIndex++]);
+            }
+
+            while (existingIndex < existing.Count)
+                Add(existing[existingIndex], existing.SearchInfos[existingIndex++]);
+            while (addedIndex < added.Count)
+                Add(added[addedIndex], addedSearchInfos[addedIndex++]);
+            return new(mergedTypes, mergedSearchInfos);
+
+            void Add(Type type, TypeSearchInfo searchInfo)
+            {
+                mergedTypes[mergedIndex] = type;
+                mergedSearchInfos[mergedIndex++] = searchInfo;
+            }
+        }
+
+        internal static int CompareTypes(Type? left, Type? right)
+        {
+            var leftInfo = left == null ? null : GetTypeSearchInfo(left);
+            var rightInfo = right == null ? null : GetTypeSearchInfo(right);
+            return CompareTypeSearchInfo(leftInfo, rightInfo);
+        }
+
+        static int CompareTypeSearchInfo(TypeSearchInfo? left, TypeSearchInfo? right)
+        {
+            var assembly = string.Compare(
+                left?.AssemblyName,
+                right?.AssemblyName,
+                StringComparison.Ordinal
+            );
             if (assembly != 0)
                 return assembly;
 
-            return string.Compare(left?.FullName ?? left?.Name, right?.FullName ?? right?.Name, StringComparison.Ordinal);
+            return string.Compare(
+                left?.FullName,
+                right?.FullName,
+                StringComparison.Ordinal
+            );
         }
 
-        static string TypeCandidates(string header, IReadOnlyList<Type> candidates)
+        static string GetAssemblyName(Assembly? assembly)
+            => assembly == null
+                ? string.Empty
+                : assemblyNameCache.GetOrAdd(assembly, static value => value.GetName().Name ?? string.Empty);
+
+        internal static Type? ResolveTypeName(string query)
         {
-            var builder = new StringBuilder();
+            var index = LoadIndex(out _);
+            lock (IndexLock)
+                if (GetExactTypeLookup().TryGetValue(query, out var exact))
+                    return exact.Type;
+
+            return ResolveUniqueType(index, query).Type;
+        }
+
+        internal static bool MatchesTypeName(Type type, string query)
+            => MatchesTypeName(type, GetTypeSearchInfo(type), new(query));
+
+        internal static bool MatchesTypeName(
+            IReadOnlyList<Type> index,
+            int position,
+            TypeNameQuery query)
+        {
+            var type = index[position];
+            return MatchesTypeName(type, GetTypeSearchInfo(index, position), query);
+        }
+
+        static bool MatchesTypeName(Type type, TypeSearchInfo info, TypeNameQuery query)
+        {
+            // FullName falls back to Name and always contains the unqualified runtime name.
+            if (Contains(info.FullName, query.Text))
+                return true;
+
+            if ((query.HasGenericDisplay && info.IsGenericType || query.HasNestedDisplay && info.IsNested)
+                && (Contains(DisplayTypeName(type, includeNamespace: false), query.Text)
+                    || Contains(DisplayTypeName(type, includeNamespace: true), query.Text)))
+                return true;
+
+            return Contains(info.AssemblyName, query.Text)
+                   || query.HasAssembly
+                   && Contains($"{info.FullName}, {info.AssemblyName}", query.Text);
+        }
+
+        static TypeResolution ResolveUniqueType(IReadOnlyList<Type> index, string query)
+        {
+            var typeNameQuery = new TypeNameQuery(query);
+            Type? match = null;
+            for (var position = 0; position < index.Count; position++)
+            {
+                var type = index[position];
+                if (!MatchesTypeName(index, position, typeNameQuery))
+                    continue;
+
+                if (match != null)
+                    return default;
+
+                match = type;
+            }
+
+            return new(match);
+        }
+
+        static TypeSearchInfo GetTypeSearchInfo(IReadOnlyList<Type> index, int position)
+            => index is TypeIndex typeIndex
+                ? typeIndex.SearchInfos[position]
+                : GetTypeSearchInfo(index[position]);
+
+        static Dictionary<string, TypeResolution> BuildExactTypeLookup(IReadOnlyList<Type> types)
+        {
+            var lookup = new Dictionary<string, TypeResolution>(
+                types.Count * 2,
+                StringComparer.OrdinalIgnoreCase
+            );
+            AddExactTypes(lookup, types);
+            return lookup;
+        }
+
+        static Dictionary<string, TypeResolution> GetExactTypeLookup()
+        {
+            while (exactTypeLookup == null)
+            {
+                var currentTypes = cachedIndex!;
+                var lookup = BuildExactTypeLookup(currentTypes);
+                // metadata inspection can load another assembly reentrantly.
+                if (!ReferenceEquals(currentTypes, cachedIndex))
+                    continue;
+
+                exactTypeLookup = lookup;
+            }
+
+            return exactTypeLookup;
+        }
+
+        static void AddExactTypes(Dictionary<string, TypeResolution> lookup, IReadOnlyList<Type> types)
+        {
+            for (var position = 0; position < types.Count; position++)
+            {
+                var type = types[position];
+                var info = GetTypeSearchInfo(types, position);
+                Add(info.Name);
+                if (!string.Equals(info.FullName, info.Name, StringComparison.Ordinal))
+                    Add(info.FullName);
+
+                void Add(string name)
+                {
+                    if (lookup.TryAdd(name, new(type)))
+                        return;
+
+                    if (lookup[name].Type is { } existing && existing != type)
+                        lookup[name] = default;
+                }
+            }
+        }
+
+        internal static string GetTypeName(Type type)
+            => GetTypeSearchInfo(type).Name;
+
+        internal static string GetFullTypeName(Type type)
+            => GetTypeSearchInfo(type).FullName;
+
+        static TypeSearchInfo GetTypeSearchInfo(Type type)
+            => typeSearchInfoCache.GetOrAdd(type, static value => CreateTypeSearchInfo(value));
+
+        static TypeSearchInfo CreateTypeSearchInfo(Type type)
+        {
+            var name = type.Name;
+            return new(
+                name,
+                type.FullName ?? name,
+                GetAssemblyName(type.Assembly),
+                type.IsGenericType,
+                type.IsNested,
+                ClassifyType(type)
+            );
+        }
+
+        static ReflectTypeKind ClassifyType(Type type)
+        {
+            if (type.IsInterface)
+                return ReflectTypeKind.Interface;
+
+            var baseType = type.BaseType;
+            if (baseType == typeof(Enum))
+                return ReflectTypeKind.Enum;
+            if (baseType == typeof(MulticastDelegate))
+                return ReflectTypeKind.Delegate;
+            if (baseType == typeof(ValueType)
+                && type != typeof(Enum))
+                return ReflectTypeKind.Struct;
+            return type == typeof(Delegate) || type == typeof(MulticastDelegate)
+                ? ReflectTypeKind.Any
+                : ReflectTypeKind.Class;
+        }
+
+        static string TypeCandidates(
+            string header,
+            IReadOnlyList<Type> candidates,
+            int candidateCount)
+        {
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             builder.AppendLine(header);
             builder.AppendLine("Candidates:");
             for (var index = 0; index < candidates.Count && index < MaxCandidates; index++)
             {
                 var type = candidates[index];
-                builder.AppendLine($"- {FormatType(type, includeNamespace: true)}, {type.Assembly.GetName().Name}");
+                builder.AppendLine($"- {FormatType(type, includeNamespace: true)}, {GetAssemblyName(type.Assembly)}");
             }
 
-            AppendTruncation(builder, candidates.Count, MaxCandidates, "candidates");
+            AppendTruncation(builder, candidateCount, MaxCandidates, "candidates");
             return Trimmed(builder);
         }
 
@@ -1247,8 +2275,16 @@ namespace Conduit
         static bool Contains(string value, string query)
             => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
-        static string ShortTypeName(Type type)
-            => DisplayTypeName(type, includeNamespace: false);
+        internal static string GetShortTypeName(Type type)
+        {
+            var info = GetTypeSearchInfo(type);
+            if (!info.IsGenericType && !info.IsNested)
+                return info.Name;
+
+            return info.ShortDisplayName ??= DisplayTypeName(type, includeNamespace: false);
+        }
+
+        static string ShortTypeName(Type type) => GetShortTypeName(type);
 
         static string Plural(int count)
             => count == 1 ? string.Empty : "s";
@@ -1321,27 +2357,112 @@ namespace Conduit
         Ambiguous,
     }
 
+    readonly struct TypeNameQuery
+    {
+        public readonly string Text;
+        public readonly bool HasGenericDisplay;
+        public readonly bool HasNestedDisplay;
+        public readonly bool HasAssembly;
+
+        public TypeNameQuery(string text)
+        {
+            Text = text;
+            HasGenericDisplay = text.IndexOf('<') >= 0;
+            HasNestedDisplay = text.IndexOf('.') >= 0;
+            HasAssembly = text.IndexOf(',') >= 0;
+        }
+    }
+
+    readonly struct TypeResolution
+    {
+        public readonly Type? Type;
+
+        public TypeResolution(Type? type) => Type = type;
+    }
+
+    readonly struct TypeSortEntry
+    {
+        public readonly Type Type;
+        public readonly TypeSearchInfo SearchInfo;
+
+        public TypeSortEntry(Type type, TypeSearchInfo searchInfo)
+        {
+            Type = type;
+            SearchInfo = searchInfo;
+        }
+    }
+
+    sealed class TypeIndex : IReadOnlyList<Type>
+    {
+        readonly Type[] types;
+        internal readonly TypeSearchInfo[] SearchInfos;
+
+        internal TypeIndex(Type[] types, TypeSearchInfo[] searchInfos)
+        {
+            this.types = types;
+            SearchInfos = searchInfos;
+        }
+
+        public int Count => types.Length;
+        public Type this[int index] => types[index];
+        public IEnumerator<Type> GetEnumerator() => ((IEnumerable<Type>)types).GetEnumerator();
+        IEnumerator IEnumerable.GetEnumerator() => types.GetEnumerator();
+    }
+
+    sealed class TypeSearchInfo
+    {
+        public readonly string Name;
+        public readonly string FullName;
+        public readonly string AssemblyName;
+        public readonly bool IsGenericType;
+        public readonly bool IsNested;
+        public readonly ReflectTypeKind Kind;
+        public string? ShortDisplayName;
+
+        public TypeSearchInfo(
+            string name,
+            string fullName,
+            string assemblyName,
+            bool isGenericType,
+            bool isNested,
+            ReflectTypeKind kind)
+        {
+            Name = name;
+            FullName = fullName;
+            AssemblyName = assemblyName;
+            IsGenericType = isGenericType;
+            IsNested = isNested;
+            Kind = kind;
+        }
+    }
+
     readonly struct TypeMatch
     {
         public readonly TypeMatchKind Kind;
         public readonly Type? Type;
         public readonly IReadOnlyList<Type> Candidates;
+        public readonly int CandidateCount;
 
-        TypeMatch(TypeMatchKind kind, Type? type, IReadOnlyList<Type> candidates)
+        TypeMatch(
+            TypeMatchKind kind,
+            Type? type,
+            IReadOnlyList<Type> candidates,
+            int candidateCount)
         {
             Kind = kind;
             Type = type;
             Candidates = candidates;
+            CandidateCount = candidateCount;
         }
 
         public static TypeMatch None()
-            => new(TypeMatchKind.None, null, Array.Empty<Type>());
+            => new(TypeMatchKind.None, null, Array.Empty<Type>(), 0);
 
         public static TypeMatch Matched(Type type)
-            => new(TypeMatchKind.Matched, type, Array.Empty<Type>());
+            => new(TypeMatchKind.Matched, type, Array.Empty<Type>(), 1);
 
-        public static TypeMatch Ambiguous(IReadOnlyList<Type> candidates)
-            => new(TypeMatchKind.Ambiguous, null, candidates);
+        public static TypeMatch Ambiguous(IReadOnlyList<Type> candidates, int candidateCount)
+            => new(TypeMatchKind.Ambiguous, null, candidates, candidateCount);
     }
 
     readonly struct MemberDisplay
@@ -1359,6 +2480,143 @@ namespace Conduit
             Name = name;
             Signature = signature;
             MatchRank = matchRank;
+        }
+    }
+
+    readonly struct MemberMatch
+    {
+        public readonly Type DeclaringType;
+        public readonly ReflectMemberKind Kind;
+        public readonly string Name;
+        public readonly MemberInfo Member;
+        public readonly int MatchRank;
+
+        public MemberMatch(
+            Type declaringType,
+            ReflectMemberKind kind,
+            string name,
+            MemberInfo member,
+            int matchRank)
+        {
+            DeclaringType = declaringType;
+            Kind = kind;
+            Name = name;
+            Member = member;
+            MatchRank = matchRank;
+        }
+    }
+
+    readonly struct WideMemberIndexEntry
+    {
+        public readonly Type DeclaringType;
+        public readonly string Name;
+        public readonly MemberInfo Member;
+
+        public WideMemberIndexEntry(
+            Type declaringType,
+            MemberInfo member)
+        {
+            DeclaringType = declaringType;
+            Name = member.Name;
+            Member = member;
+        }
+
+        internal static int GetMetadataToken(MemberInfo member)
+        {
+            try
+            {
+                return member.MetadataToken;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+            {
+                return 0;
+            }
+        }
+    }
+
+    readonly struct WideMemberIndexSegment
+    {
+        public readonly string AssemblyName;
+        public readonly WideMemberIndexEntry[] Entries;
+
+        public WideMemberIndexSegment(string assemblyName, WideMemberIndexEntry[] entries)
+        {
+            AssemblyName = assemblyName;
+            Entries = entries;
+        }
+    }
+
+    sealed class WideMemberWithinTypeComparer : IComparer<WideMemberIndexEntry>
+    {
+        public static readonly WideMemberWithinTypeComparer Instance = new();
+
+        WideMemberWithinTypeComparer() { }
+
+        public int Compare(WideMemberIndexEntry left, WideMemberIndexEntry right)
+        {
+            var name = string.Compare(left.Name, right.Name, StringComparison.Ordinal);
+            return name != 0
+                ? name
+                : WideMemberIndexEntry.GetMetadataToken(left.Member)
+                    .CompareTo(WideMemberIndexEntry.GetMetadataToken(right.Member));
+        }
+    }
+
+    sealed class WideMemberIndex
+    {
+        internal volatile WideMemberIndexSegment[] Segments;
+
+        public WideMemberIndex(WideMemberIndexSegment[] initial) => Segments = initial;
+
+        internal void AddSegments(WideMemberIndexSegment[] added)
+        {
+            var current = Segments;
+            var merged = new List<WideMemberIndexSegment>(current.Length + added.Length);
+            var currentIndex = 0;
+            var addedIndex = 0;
+            while (currentIndex < current.Length && addedIndex < added.Length)
+            {
+                var comparison = string.Compare(
+                    current[currentIndex].AssemblyName,
+                    added[addedIndex].AssemblyName,
+                    StringComparison.Ordinal
+                );
+                if (comparison < 0)
+                    merged.Add(current[currentIndex++]);
+                else if (comparison > 0)
+                    merged.Add(added[addedIndex++]);
+                else
+                    merged.Add(Merge(current[currentIndex++], added[addedIndex++]));
+            }
+
+            while (currentIndex < current.Length)
+                merged.Add(current[currentIndex++]);
+            while (addedIndex < added.Length)
+                merged.Add(added[addedIndex++]);
+            Segments = merged.ToArray();
+
+            static WideMemberIndexSegment Merge(
+                WideMemberIndexSegment left,
+                WideMemberIndexSegment right)
+            {
+                var entries = new WideMemberIndexEntry[left.Entries.Length + right.Entries.Length];
+                var leftIndex = 0;
+                var rightIndex = 0;
+                var destinationIndex = 0;
+                while (leftIndex < left.Entries.Length && rightIndex < right.Entries.Length)
+                    entries[destinationIndex++] = reflect.CompareWideMemberEntries(
+                        left.Entries[leftIndex],
+                        right.Entries[rightIndex]
+                    ) <= 0
+                        ? left.Entries[leftIndex++]
+                        : right.Entries[rightIndex++];
+
+                while (leftIndex < left.Entries.Length)
+                    entries[destinationIndex++] = left.Entries[leftIndex++];
+                while (rightIndex < right.Entries.Length)
+                    entries[destinationIndex++] = right.Entries[rightIndex++];
+                return new(left.AssemblyName, entries);
+            }
         }
     }
 }

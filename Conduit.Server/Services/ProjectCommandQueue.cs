@@ -58,14 +58,11 @@ sealed class ProjectCommandQueue
         if (!ct.CanBeCanceled)
             return await command.Completion.Task;
 
-        var callerCancellation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var registration = ct.Register(
-            static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true),
-            callerCancellation
-        );
-
-        var completedTask = await Task.WhenAny(command.Completion.Task, callerCancellation.Task);
-        if (completedTask != command.Completion.Task)
+        try
+        {
+            return await command.Completion.Task.WaitAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             var commandKind = BridgeCommandKinds.Parse(command.Command.CommandType);
             if (BridgeCommandKinds.SupportsCancellation(commandKind))
@@ -85,8 +82,6 @@ sealed class ProjectCommandQueue
 
             return ToolExecutionResult.Cancelled("The request was cancelled while Unity work kept running.");
         }
-
-        return await command.Completion.Task;
     }
 
     async Task ProcessAsync()
@@ -108,8 +103,7 @@ sealed class ProjectCommandQueue
 
                 try
                 {
-                    using var executionCts = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
-                    var result = await executor(command, executionCts.Token);
+                    var result = await executor(command, shutdownToken);
                     command.TrySetResult(result);
                 }
                 catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)

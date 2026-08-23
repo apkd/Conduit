@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Pipes;
@@ -10,13 +11,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
-using Process = System.Diagnostics.Process;
 
 namespace Conduit.Runtime
 {
     sealed class RuntimeBridgeEndpoint : IDisposable
     {
         const int MaxConcurrentClients = 254;
+        const string LeaseTimestampPlaceholder = "__CONDUIT_LEASE_TIMESTAMP__";
         static readonly UTF8Encoding utf8NoBom = new(false);
         static readonly TimeSpan leaseInterval = TimeSpan.FromSeconds(2);
         readonly CancellationTokenSource cancellation = new();
@@ -24,35 +25,50 @@ namespace Conduit.Runtime
         readonly BridgeEndpointDescriptor descriptor;
         readonly BridgeProjectHandshake handshake;
         readonly string endpointDirectory;
+        readonly string descriptorPath;
+        readonly string descriptorJsonPrefix;
+        readonly string descriptorJsonSuffix;
+        readonly string temporaryDescriptorPath;
         readonly bool useFifo;
         int nextSessionId;
 
         public RuntimeBridgeEndpoint()
         {
-            var processId = Process.GetCurrentProcess().Id;
+            var processId = BridgeStatusUtility.ProcessId;
             var sessionId = Guid.NewGuid().ToString("N");
             var wine = RuntimePlatformUtility.IsWine();
-            useFifo = Application.platform != RuntimePlatform.WindowsPlayer || wine;
+            var platform = Application.platform;
+            var platformName = platform.ToString();
+            var productName = Application.productName;
+            var unityVersion = Application.unityVersion;
+            var buildGuid = Application.buildGUID;
+            var cloudProjectId = Application.cloudProjectId;
+            var companyName = Application.companyName;
+            var handoffToken = Environment.GetEnvironmentVariable("CONDUIT_HANDOFF_TOKEN") ?? string.Empty;
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            useFifo = platform != RuntimePlatform.WindowsPlayer || wine;
             var root = RuntimeIpcPaths.GetRoot(wine);
             endpointDirectory = Path.Combine(root, "endpoints", $"player-{processId}-{sessionId}");
+            descriptorPath = Path.Combine(endpointDirectory, "endpoint.json");
+            temporaryDescriptorPath = descriptorPath + ".tmp";
             Directory.CreateDirectory(Path.Combine(endpointDirectory, "clients"));
             RuntimeIpcPaths.TryRestrictDirectory(endpointDirectory);
 
             handshake = new()
             {
-                display_name = Application.productName,
-                unity_version = Application.unityVersion,
+                display_name = productName,
+                unity_version = unityVersion,
                 process_id = processId,
                 endpoint_kind = "player",
-                platform = Application.platform.ToString(),
-                build_guid = Application.buildGUID,
-                cloud_project_id = Application.cloudProjectId,
-                company_name = Application.companyName,
-                product_name = Application.productName,
+                platform = platformName,
+                build_guid = buildGuid,
+                cloud_project_id = cloudProjectId,
+                company_name = companyName,
+                product_name = productName,
                 can_monitor_process = !wine,
                 session_instance_id = sessionId,
-                handoff_token = Environment.GetEnvironmentVariable("CONDUIT_HANDOFF_TOKEN") ?? string.Empty,
-                last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
+                handoff_token = handoffToken,
+                last_seen_utc = now,
             };
             descriptor = new()
             {
@@ -62,18 +78,31 @@ namespace Conduit.Runtime
                 pipe_name = useFifo ? string.Empty : $"unity-conduit-player-{processId}-{sessionId[..12]}",
                 process_id = processId,
                 session_instance_id = sessionId,
-                handoff_token = Environment.GetEnvironmentVariable("CONDUIT_HANDOFF_TOKEN") ?? string.Empty,
-                unity_version = Application.unityVersion,
-                platform = Application.platform.ToString(),
-                build_guid = Application.buildGUID,
-                cloud_project_id = Application.cloudProjectId,
-                company_name = Application.companyName,
-                product_name = Application.productName,
-                started_utc = DateTimeOffset.UtcNow.ToString("O"),
-                last_seen_utc = DateTimeOffset.UtcNow.ToString("O"),
+                handoff_token = handoffToken,
+                unity_version = unityVersion,
+                platform = platformName,
+                build_guid = buildGuid,
+                cloud_project_id = cloudProjectId,
+                company_name = companyName,
+                product_name = productName,
+                started_utc = now,
+                last_seen_utc = LeaseTimestampPlaceholder,
                 can_monitor_process = !wine,
                 is_test_player = Environment.GetEnvironmentVariable("CONDUIT_TEST_PLAYER") == "1",
             };
+            // lease refreshes change only this field, so avoid serializing the immutable descriptor every two seconds
+            var descriptorJson = JsonUtility.ToJson(descriptor);
+            var timestampIndex = descriptorJson.IndexOf(
+                LeaseTimestampPlaceholder,
+                StringComparison.Ordinal
+            );
+            if (timestampIndex < 0)
+                throw new InvalidOperationException("The runtime endpoint descriptor omitted its lease timestamp.");
+            descriptorJsonPrefix = descriptorJson.Substring(0, timestampIndex);
+            descriptorJsonSuffix = descriptorJson.Substring(
+                timestampIndex + LeaseTimestampPlaceholder.Length
+            );
+            descriptor.last_seen_utc = now;
         }
 
         public void Start()
@@ -161,11 +190,15 @@ namespace Conduit.Runtime
         async Task RunFifoAcceptLoopAsync(CancellationToken ct)
         {
             var clientsDirectory = Path.Combine(endpointDirectory, "clients");
+            using var publicationWatcher = new BridgeFilePublicationWatcher(
+                clientsDirectory,
+                "request.json"
+            );
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    foreach (var clientDirectory in Directory.GetDirectories(clientsDirectory))
+                    foreach (var clientDirectory in Directory.EnumerateDirectories(clientsDirectory))
                     {
                         var publicationPath = Path.Combine(clientDirectory, "request.json");
                         var acceptedPath = Path.Combine(clientDirectory, "accepted.json");
@@ -181,33 +214,45 @@ namespace Conduit.Runtime
                             continue;
                         }
 
-                        var input = new FileStream(
-                            Path.Combine(clientDirectory, "to-unity.fifo"),
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.ReadWrite,
-                            4096,
-                            FileOptions.Asynchronous
-                        );
-                        var output = new FileStream(
-                            Path.Combine(clientDirectory, "from-unity.fifo"),
-                            FileMode.Open,
-                            FileAccess.Write,
-                            FileShare.ReadWrite,
-                            4096,
-                            FileOptions.Asynchronous
-                        );
-                        File.WriteAllText(
-                            Path.Combine(clientDirectory, "connected"),
-                            string.Empty
-                        );
-                        _ = RunClientAsync(
-                            new RuntimeDuplexConnection(input, output, static () => true),
-                            ct
-                        );
+                        FileStream? input = null;
+                        FileStream? output = null;
+                        try
+                        {
+                            input = new(
+                                Path.Combine(clientDirectory, "to-unity.fifo"),
+                                FileMode.Open,
+                                FileAccess.Read,
+                                FileShare.ReadWrite,
+                                4096,
+                                FileOptions.Asynchronous
+                            );
+                            output = new(
+                                Path.Combine(clientDirectory, "from-unity.fifo"),
+                                FileMode.Open,
+                                FileAccess.Write,
+                                FileShare.ReadWrite,
+                                4096,
+                                FileOptions.Asynchronous
+                            );
+                            File.WriteAllText(
+                                Path.Combine(clientDirectory, "connected"),
+                                string.Empty
+                            );
+                            _ = RunClientAsync(
+                                new RuntimeDuplexConnection(input, output, static () => true),
+                                ct
+                            );
+                            input = null;
+                            output = null;
+                        }
+                        finally
+                        {
+                            input?.Dispose();
+                            output?.Dispose();
+                        }
                     }
 
-                    await Task.Delay(50, ct);
+                    await publicationWatcher.WaitAsync(ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -226,10 +271,19 @@ namespace Conduit.Runtime
             RuntimeBridgeSession? session = null;
             try
             {
-                using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(endpointToken);
-                handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
-                var payload = await connection.Reader.ReadLineAsync();
-                handshakeCts.Token.ThrowIfCancellationRequested();
+                string? payload;
+                using (var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(endpointToken))
+                {
+                    handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    var readTask = connection.Reader.ReadLineAsync();
+                    var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, handshakeCts.Token);
+                    if (await Task.WhenAny(readTask, timeoutTask) != readTask)
+                        handshakeCts.Token.ThrowIfCancellationRequested();
+
+                    handshakeCts.Cancel();
+                    payload = await readTask;
+                }
+
                 var request = BridgeProtocol.Deserialize(payload ?? string.Empty);
                 if (request?.message_type != BridgeMessageTypes.Hello
                     || request.project == null
@@ -291,6 +345,7 @@ namespace Conduit.Runtime
                     RuntimeBridgeDispatcher.Enqueue(session, message.request_id, message.command);
                 }
             }
+            catch (OperationCanceledException) when (!endpointToken.IsCancellationRequested) { }
             catch (OperationCanceledException) when (endpointToken.IsCancellationRequested) { }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
             {
@@ -313,14 +368,15 @@ namespace Conduit.Runtime
             lock (descriptor)
             {
                 var lastSeenUtc = DateTimeOffset.UtcNow.ToString("O");
-                descriptor.last_seen_utc = lastSeenUtc;
-                var path = Path.Combine(endpointDirectory, "endpoint.json");
-                var temporaryPath = path + ".tmp";
-                File.WriteAllText(temporaryPath, JsonUtility.ToJson(descriptor), utf8NoBom);
-                if (File.Exists(path))
-                    File.Replace(temporaryPath, path, null);
+                File.WriteAllText(
+                    temporaryDescriptorPath,
+                    string.Concat(descriptorJsonPrefix, lastSeenUtc, descriptorJsonSuffix),
+                    utf8NoBom
+                );
+                if (File.Exists(descriptorPath))
+                    File.Replace(temporaryDescriptorPath, descriptorPath, null);
                 else
-                    File.Move(temporaryPath, path);
+                    File.Move(temporaryDescriptorPath, descriptorPath);
                 return lastSeenUtc;
             }
         }
@@ -337,6 +393,7 @@ namespace Conduit.Runtime
 
     sealed class RuntimeDuplexConnection : IDisposable
     {
+        const int MaximumPooledPayloadBufferLength = 1024 * 1024;
         static readonly UTF8Encoding utf8NoBom = new(false);
         readonly Stream input;
         readonly Stream output;
@@ -364,9 +421,23 @@ namespace Conduit.Runtime
             await writeGate.WaitAsync(ct);
             try
             {
-                var bytes = utf8NoBom.GetBytes(payload + "\n");
-                await output.WriteAsync(bytes, 0, bytes.Length, ct);
-                await output.FlushAsync(ct);
+                var byteCount = utf8NoBom.GetByteCount(payload);
+                var bufferLength = checked(byteCount + 1);
+                var buffer = bufferLength <= MaximumPooledPayloadBufferLength
+                    ? ArrayPool<byte>.Shared.Rent(bufferLength)
+                    : new byte[bufferLength];
+                try
+                {
+                    var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+                    buffer[written++] = (byte)'\n';
+                    await output.WriteAsync(buffer, 0, written, ct);
+                    await output.FlushAsync(ct);
+                }
+                finally
+                {
+                    if (buffer.Length <= MaximumPooledPayloadBufferLength)
+                        ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
             finally
             {

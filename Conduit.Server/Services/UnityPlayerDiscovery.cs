@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace Conduit;
@@ -5,14 +6,18 @@ namespace Conduit;
 /// <summary>Finds live player endpoints advertised through the local bridge registry.</summary>
 public sealed class UnityPlayerDiscovery
 {
+    const int DescriptorCachePruneThreshold = 64;
     static readonly TimeSpan leaseLifetime = TimeSpan.FromSeconds(10);
+    static readonly Lazy<string[]> defaultDiscoveryRoots = new(ConduitIpcPaths.GetDiscoveryRoots);
     internal static readonly TimeSpan ResolutionRetryDelay = TimeSpan.FromMilliseconds(25);
     readonly TimeProvider timeProvider;
     readonly Func<string[]> getDiscoveryRoots;
+    readonly ConcurrentDictionary<string, CachedEndpointDescriptor> descriptorCache =
+        new(StringComparer.Ordinal);
 
     public UnityPlayerDiscovery() : this(
         TimeProvider.System,
-        ConduitIpcPaths.GetDiscoveryRoots
+        static () => defaultDiscoveryRoots.Value
     ) { }
 
     internal UnityPlayerDiscovery(
@@ -26,7 +31,7 @@ public sealed class UnityPlayerDiscovery
     internal BridgeEndpointDescriptor[] Discover()
     {
         var now = timeProvider.GetUtcNow();
-        var endpoints = new List<BridgeEndpointDescriptor>();
+        List<BridgeEndpointDescriptor>? endpoints = null;
         foreach (var root in getDiscoveryRoots())
         {
             var endpointRoot = Path.Combine(root, "endpoints");
@@ -37,18 +42,20 @@ public sealed class UnityPlayerDiscovery
             {
                 foreach (var endpointDirectory in Directory.EnumerateDirectories(endpointRoot))
                 {
-                    var descriptor = ReadDescriptor(endpointDirectory);
+                    if (Path.GetFileName(endpointDirectory).StartsWith("editor-", StringComparison.Ordinal))
+                        continue;
+
+                    var descriptor = ReadDescriptor(endpointDirectory, out var lastSeen);
                     if (descriptor is null
                         || descriptor.ProtocolVersion != BridgeProtocol.Version
                         || descriptor.EndpointKind != BridgeEndpointKinds.Player
                         || descriptor.Platform.EndsWith("Editor", StringComparison.OrdinalIgnoreCase)
                         || descriptor.ProcessId <= 0
-                        || !TryReadTimestamp(descriptor.LastSeenUtc, out var lastSeen)
                         || now - lastSeen > leaseLifetime)
                         continue;
 
                     descriptor.EndpointDirectoryPath = endpointDirectory;
-                    endpoints.Add(descriptor);
+                    (endpoints ??= []).Add(descriptor);
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -57,26 +64,47 @@ public sealed class UnityPlayerDiscovery
             }
         }
 
-        return [.. endpoints];
+        if (descriptorCache.Count > DescriptorCachePruneThreshold)
+            foreach (var path in descriptorCache.Keys)
+                if (!File.Exists(path))
+                    descriptorCache.TryRemove(path, out _);
+
+        return endpoints is null ? [] : [.. endpoints];
     }
 
     internal BridgeEndpointDescriptor[] FindForProject(string projectPath)
     {
+        var endpoints = Discover();
+        if (endpoints.Length == 0)
+            return endpoints;
+
         var identity = UnityProjectIdentity.Read(projectPath);
-        return [.. Discover().Where(identity.Matches)];
+        List<BridgeEndpointDescriptor>? matches = null;
+        foreach (var endpoint in endpoints)
+            if (identity.Matches(endpoint))
+                (matches ??= []).Add(endpoint);
+
+        return matches is null ? [] : [.. matches];
     }
 
     internal PlayerEndpointResolution Resolve(PlayerSelector selector)
     {
-        var matches = Discover()
-            .Where(endpoint => endpoint.ProcessId == selector.ProcessId)
-            .ToArray();
+        BridgeEndpointDescriptor? match = null;
+        var matchCount = 0;
+        foreach (var endpoint in Discover())
+        {
+            if (endpoint.ProcessId != selector.ProcessId)
+                continue;
 
-        return matches.Length switch
+            match ??= endpoint;
+            matchCount++;
+        }
+
+        return matchCount switch
         {
             0 => PlayerEndpointResolution.NotFound(selector),
-            1 => PlayerEndpointResolution.Found(matches[0]),
-            _ => PlayerEndpointResolution.Ambiguous(selector, matches),
+            1 => PlayerEndpointResolution.Found(match!),
+            _ => PlayerEndpointResolution.Ambiguous(selector, matchCount),
         };
     }
 
@@ -101,16 +129,14 @@ public sealed class UnityPlayerDiscovery
         var deadline = timeProvider.GetUtcNow() + timeout;
         while (timeProvider.GetUtcNow() < deadline)
         {
-            var endpoint = Discover().FirstOrDefault(value =>
-                value.ProcessId == expectedProcessId
-                && string.Equals(
-                    value.HandoffToken,
-                    handoffToken,
-                    StringComparison.Ordinal
-                )
-            );
-            if (endpoint is not null)
-                return endpoint;
+            foreach (var endpoint in Discover())
+                if (endpoint.ProcessId == expectedProcessId
+                    && string.Equals(
+                        endpoint.HandoffToken,
+                        handoffToken,
+                        StringComparison.Ordinal
+                    ))
+                    return endpoint;
 
             await Task.Delay(TimeSpan.FromMilliseconds(100), timeProvider, ct);
         }
@@ -118,13 +144,46 @@ public sealed class UnityPlayerDiscovery
         return null;
     }
 
-    static BridgeEndpointDescriptor? ReadDescriptor(string endpointDirectory)
+    BridgeEndpointDescriptor? ReadDescriptor(
+        string endpointDirectory,
+        out DateTimeOffset lastSeen)
     {
+        lastSeen = default;
         try
         {
             var path = Path.Combine(endpointDirectory, "endpoint.json");
+            var file = new FileInfo(path);
+            var length = file.Length;
+            var creationTimeUtc = file.CreationTimeUtc;
+            var lastWriteUtc = file.LastWriteTimeUtc;
+            if (descriptorCache.TryGetValue(path, out var cached)
+                && cached.Length == length
+                && cached.CreationTimeUtc == creationTimeUtc
+                && cached.LastWriteUtc == lastWriteUtc)
+            {
+                lastSeen = cached.LastSeenUtc;
+                return cached.Descriptor;
+            }
+
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            return JsonSerializer.Deserialize(stream, ConduitJsonContext.Default.BridgeEndpointDescriptor);
+            var descriptor = JsonSerializer.Deserialize(stream, ConduitJsonContext.Default.BridgeEndpointDescriptor);
+            if (descriptor is null || !TryReadTimestamp(descriptor.LastSeenUtc, out lastSeen))
+                return null;
+
+            file.Refresh();
+            if (file.Exists
+                && file.Length == length
+                && file.CreationTimeUtc == creationTimeUtc
+                && file.LastWriteTimeUtc == lastWriteUtc)
+                descriptorCache[path] = new(
+                    length,
+                    creationTimeUtc,
+                    lastWriteUtc,
+                    lastSeen,
+                    descriptor
+                );
+
+            return descriptor;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -139,6 +198,14 @@ public sealed class UnityPlayerDiscovery
             System.Globalization.DateTimeStyles.RoundtripKind,
             out timestamp
         );
+
+    readonly record struct CachedEndpointDescriptor(
+        long Length,
+        DateTime CreationTimeUtc,
+        DateTime LastWriteUtc,
+        DateTimeOffset LastSeenUtc,
+        BridgeEndpointDescriptor Descriptor
+    );
 }
 
 readonly record struct PlayerEndpointResolution(
@@ -154,9 +221,9 @@ readonly record struct PlayerEndpointResolution(
 
     public static PlayerEndpointResolution Ambiguous(
         PlayerSelector selector,
-        IReadOnlyCollection<BridgeEndpointDescriptor> endpoints) =>
+        int endpointCount) =>
         new(
             null,
-            $"Player selector '{selector}' is ambiguous: {endpoints.Count} live player sessions use that process ID."
+            $"Player selector '{selector}' is ambiguous: {endpointCount} live player sessions use that process ID."
         );
 }

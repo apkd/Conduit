@@ -7,7 +7,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEngine;
@@ -19,18 +18,28 @@ namespace Conduit
     static class BuiltInProjectSettingsProviders
     {
         const string ConduitDevelopmentDefine = "CONDUIT_INCLUDE_IN_DEBUG_BUILDS";
-        static readonly Regex qualityElementPattern = new(
-            @"^m_QualitySettings\.Array\.data\[(?<index>\d+)\](?:\.(?<field>.+))?$",
-            RegexOptions.CultureInvariant
+        static readonly object resolvedTypeCacheGate = new();
+        static readonly Dictionary<string, Type?> resolvedTypeCache = new(StringComparer.Ordinal);
+        static readonly Lazy<BuildTarget[]> supportedBuildTargets = new(() =>
+            Enum.GetValues(typeof(BuildTarget))
+                .Cast<BuildTarget>()
+                .Select(target => (Target: target, Group: BuildPipeline.GetBuildTargetGroup(target)))
+                .Where(target => target.Group != BuildTargetGroup.Unknown
+                                 && BuildPipeline.IsBuildTargetSupported(target.Group, target.Target))
+                .Select(target => target.Target)
+                .ToArray()
         );
-        static readonly Regex qualityPlatformPattern = new(
-            @"^m_PerPlatformDefaultQuality\.Array\.data\[(?<index>\d+)\](?:\.(?<field>.+))?$",
-            RegexOptions.CultureInvariant
+        static readonly Lazy<NamedBuildTarget[]> supportedNamedBuildTargets = new(() =>
+            supportedBuildTargets.Value
+                .Select(BuildPipeline.GetBuildTargetGroup)
+                .Select(NamedBuildTarget.FromBuildTargetGroup)
+                .Where(target => !string.IsNullOrWhiteSpace(target.TargetName))
+                .GroupBy(target => target.TargetName, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToArray()
         );
-        static readonly Regex serializedMapElementPattern = new(
-            @"^(?<map>[^.]+)\.Array\.data\[(?<index>\d+)\](?:\.(?<field>.+))?$",
-            RegexOptions.CultureInvariant
-        );
+        const string ArrayElementMarker = ".Array.data[";
+        static readonly string[] assetsSearchFolders = { "Assets" };
         static readonly (string Prefix, string Platform)[] playerPlatformPrefixes =
         {
             ("android_", "android"),
@@ -66,6 +75,29 @@ namespace Conduit
             ("vfx_settings", "ProjectSettings/VFXManager.asset"),
         };
 
+        static BuiltInProjectSettingsProviders()
+            => AppDomain.CurrentDomain.AssemblyLoad += static (_, args) =>
+            {
+                try
+                {
+                    // generated snippets cannot supply Unity package settings types.
+                    if (args.LoadedAssembly.IsDynamic
+                        || string.IsNullOrWhiteSpace(args.LoadedAssembly.Location))
+                        return;
+                }
+                catch (Exception) { }
+
+                lock (resolvedTypeCacheGate)
+                {
+                    var missing = resolvedTypeCache
+                        .Where(static pair => pair.Value == null)
+                        .Select(static pair => pair.Key)
+                        .ToArray();
+                    foreach (var fullName in missing)
+                        resolvedTypeCache.Remove(fullName);
+                }
+            };
+
         [ConduitProjectSettingsProvider]
         static void RegisterProjectSettingsAssets(ProjectSettingsRegistry registry)
         {
@@ -92,16 +124,19 @@ namespace Conduit
             if (maps.ContainsKey(propertyPath))
                 return null;
 
-            var match = serializedMapElementPattern.Match(propertyPath);
-            if (!match.Success || !maps.TryGetValue(match.Groups["map"].Value, out var keys))
+            if (!TryParseSerializedMapElement(
+                    propertyPath,
+                    out var map,
+                    out var index,
+                    out var field
+                )
+                || !maps.TryGetValue(map, out var keys))
                 return RelocatePlayerSetting(SerializedProjectSettingsProvider.ToKey(propertyPath));
 
-            int index = int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture);
-            string field = match.Groups["field"].Value;
             if (index >= keys.Count || !field.StartsWith("second", StringComparison.Ordinal))
                 return null;
 
-            string setting = SerializedProjectSettingsProvider.ToKey(match.Groups["map"].Value);
+            string setting = SerializedProjectSettingsProvider.ToKey(map);
             if (setting.StartsWith("build_target_", StringComparison.Ordinal))
                 setting = setting["build_target_".Length..];
             if (setting.EndsWith("_per_platform", StringComparison.Ordinal))
@@ -111,7 +146,7 @@ namespace Conduit
             if (field.Length > "second".Length)
             {
                 string nested = SerializedProjectSettingsProvider.ToKey(
-                    "value." + field[("second".Length + 1)..]
+                    "value." + field[("second".Length + 1)..].ToString()
                 );
                 suffix = nested["value".Length..];
             }
@@ -209,28 +244,33 @@ namespace Conduit
                 return "current_level_index";
             if (propertyPath == "m_PerPlatformDefaultQuality")
                 return "platforms";
-            var platformMatch = qualityPlatformPattern.Match(propertyPath);
-            if (platformMatch.Success)
+            if (TryParseArrayElement(
+                    propertyPath,
+                    "m_PerPlatformDefaultQuality",
+                    out var platformIndex,
+                    out var platformField
+                ))
             {
-                int platformIndex = int.Parse(platformMatch.Groups["index"].Value, CultureInfo.InvariantCulture);
                 if (platformIndex >= catalog.Platforms.Count
-                    || platformMatch.Groups["field"].Value != "second")
+                    || !platformField.Equals("second", StringComparison.Ordinal))
                     return null;
                 return $"platforms.{catalog.Platforms[platformIndex]}.default_level_index";
             }
 
-            var match = qualityElementPattern.Match(propertyPath);
-            if (!match.Success)
+            if (!TryParseArrayElement(
+                    propertyPath,
+                    "m_QualitySettings",
+                    out var index,
+                    out var field
+                ))
                 return SerializedProjectSettingsProvider.ToKey(propertyPath);
 
-            int index = int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture);
             if (index >= catalog.Levels.Count)
                 return null;
 
-            string field = match.Groups["field"].Value;
             if (field.Length == 0)
                 return $"quality_levels.{catalog.Levels[index]}";
-            string mappedField = SerializedProjectSettingsProvider.ToKey(field) switch
+            string mappedField = SerializedProjectSettingsProvider.ToKey(field.ToString()) switch
             {
                 "async_upload_time_slice"        => "async_asset_upload.time_slice",
                 "async_upload_buffer_size"       => "async_asset_upload.buffer_size",
@@ -466,17 +506,7 @@ namespace Conduit
         [ConduitProjectSettingsProvider]
         static void RegisterConduitSettings(ProjectSettingsRegistry registry)
         {
-            var targets = Enum.GetValues(typeof(BuildTarget))
-                .Cast<BuildTarget>()
-                .Select(target => (Target: target, Group: BuildPipeline.GetBuildTargetGroup(target)))
-                .Where(target => target.Group != BuildTargetGroup.Unknown)
-                .Where(target => BuildPipeline.IsBuildTargetSupported(target.Group, target.Target))
-                .Select(target => NamedBuildTarget.FromBuildTargetGroup(target.Group))
-                .Where(target => !string.IsNullOrWhiteSpace(target.TargetName))
-                .GroupBy(target => target.TargetName, StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First());
-
-            foreach (var target in targets)
+            foreach (var target in supportedNamedBuildTargets.Value)
             {
                 registry.Add(
                     $"conduit_settings.platforms.{target.TargetName}.enable_in_development_mode",
@@ -795,12 +825,8 @@ namespace Conduit
 
             Register(null, "common");
             var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var target in Enum.GetValues(typeof(BuildTarget)).Cast<BuildTarget>())
+            foreach (var target in supportedBuildTargets.Value)
             {
-                var group = BuildPipeline.GetBuildTargetGroup(target);
-                if (group == BuildTargetGroup.Unknown || !BuildPipeline.IsBuildTargetSupported(group, target))
-                    continue;
-
                 string? path = getPath.Invoke(null, new object?[] { target }) as string;
                 if (path == null || !seenPaths.Add(path))
                     continue;
@@ -863,26 +889,26 @@ namespace Conduit
             string prefix,
             Func<string, string?>? mapPath = null)
         {
-            var candidates = AssetDatabase.FindAssets($"t:{type.Name}")
-                .Select(guid => (Guid: guid, Path: AssetDatabase.GUIDToAssetPath(guid)))
-                .Where(candidate => candidate.Path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                .Select(candidate => (
-                    candidate.Guid,
-                    Asset: AssetDatabase.LoadAssetAtPath(candidate.Path, type)
-                ))
-                .Where(candidate => candidate.Asset != null)
-                .Select(candidate => (candidate.Guid, Asset: candidate.Asset!))
-                .ToList();
-            var duplicateNames = candidates
-                .GroupBy(candidate => ProjectSettingKey.Canonicalize(candidate.Asset.name))
-                .Where(group => group.Count() > 1)
-                .Select(group => group.Key)
-                .ToHashSet(StringComparer.Ordinal);
+            var guids = AssetDatabase.FindAssets($"t:{type.Name}", assetsSearchFolders);
+            var candidates = new List<(string Guid, Object Asset, string Name)>(guids.Length);
+            var nameCounts = new Dictionary<string, int>(guids.Length, StringComparer.Ordinal);
+            foreach (var guid in guids)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                    || AssetDatabase.LoadAssetAtPath(path, type) is not { } asset)
+                    continue;
+
+                var name = ProjectSettingKey.Canonicalize(asset.name);
+                candidates.Add((guid, asset, name));
+                nameCounts.TryGetValue(name, out var count);
+                nameCounts[name] = count + 1;
+            }
 
             foreach (var candidate in candidates)
             {
-                string name = ProjectSettingKey.Canonicalize(candidate.Asset.name);
-                if (name.Length == 0 || duplicateNames.Contains(name))
+                var name = candidate.Name;
+                if (name.Length == 0 || nameCounts[name] > 1)
                     name = (name.Length == 0 ? "asset" : name)
                            + "_"
                            + candidate.Guid[..8].ToLowerInvariant();
@@ -895,6 +921,87 @@ namespace Conduit
                     mapPath
                 );
             }
+        }
+
+        static bool TryParseSerializedMapElement(
+            string path,
+            out string map,
+            out int index,
+            out ReadOnlySpan<char> field)
+        {
+            index = 0;
+            field = default;
+            int marker = path.IndexOf(ArrayElementMarker, StringComparison.Ordinal);
+            if (marker <= 0 || path.AsSpan(0, marker).IndexOf('.') >= 0
+                || !TryParseArrayElement(path, marker, out index, out field))
+            {
+                map = string.Empty;
+                return false;
+            }
+
+            map = path[..marker];
+            return true;
+        }
+
+        static bool TryParseArrayElement(
+            string path,
+            ReadOnlySpan<char> arrayPath,
+            out int index,
+            out ReadOnlySpan<char> field)
+        {
+            index = 0;
+            field = default;
+            return path.AsSpan().StartsWith(arrayPath, StringComparison.Ordinal)
+                   && TryParseArrayElement(path, arrayPath.Length, out index, out field);
+        }
+
+        static bool TryParseArrayElement(
+            string path,
+            int arrayPathLength,
+            out int index,
+            out ReadOnlySpan<char> field)
+        {
+            index = 0;
+            var suffix = path.AsSpan(arrayPathLength);
+            if (!suffix.StartsWith(ArrayElementMarker, StringComparison.Ordinal))
+            {
+                index = 0;
+                field = default;
+                return false;
+            }
+
+            int indexStart = arrayPathLength + ArrayElementMarker.Length;
+            int indexEnd = path.IndexOf(']', indexStart);
+            var indexText = indexEnd < 0
+                ? default
+                : path.AsSpan(indexStart, indexEnd - indexStart);
+            if (indexText.Length == 0
+                || !int.TryParse(
+                    indexText,
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out index
+                ))
+            {
+                field = default;
+                return false;
+            }
+
+            int fieldStart = indexEnd + 1;
+            if (fieldStart == path.Length)
+            {
+                field = ReadOnlySpan<char>.Empty;
+                return true;
+            }
+
+            if (path[fieldStart] != '.' || ++fieldStart == path.Length)
+            {
+                field = default;
+                return false;
+            }
+
+            field = path.AsSpan(fieldStart);
+            return true;
         }
 
         static void SaveSingleton(Object target)
@@ -935,13 +1042,19 @@ namespace Conduit
 
         static Type? ResolveType(string fullName)
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-                if (assembly.GetType(fullName, throwOnError: false) is { } type)
-                    return type;
+            lock (resolvedTypeCacheGate)
+            {
+                if (resolvedTypeCache.TryGetValue(fullName, out var cached))
+                    return cached;
 
-            string shortName = fullName[(fullName.LastIndexOf('.') + 1)..];
-            return TypeCache.GetTypesDerivedFrom<ScriptableObject>()
-                .FirstOrDefault(type => type.FullName == fullName || type.Name == shortName);
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    if (assembly.GetType(fullName, throwOnError: false) is { } type)
+                        return resolvedTypeCache[fullName] = type;
+
+                string shortName = fullName[(fullName.LastIndexOf('.') + 1)..];
+                return resolvedTypeCache[fullName] = TypeCache.GetTypesDerivedFrom<ScriptableObject>()
+                    .FirstOrDefault(type => type.FullName == fullName || type.Name == shortName);
+            }
         }
 
         static string PlatformKey(string value)

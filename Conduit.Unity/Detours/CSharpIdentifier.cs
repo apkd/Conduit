@@ -13,6 +13,9 @@ namespace Conduit
 
         public static string EscapeQualified(string value)
         {
+            if (value.IndexOf('.') < 0)
+                return Escape(value);
+
             var builder = new StringBuilder(value.Length);
             var start = 0;
             for (var index = 0; index <= value.Length; index++)

@@ -12,7 +12,10 @@ namespace Conduit
         public static string Status() => JsonUtility.ToJson(CreateSnapshot());
 
         static PingSnapshot CreateSnapshot()
-            => new()
+        {
+            var scenes = BuildScenes(out var dirtyScenes);
+            var activeDetours = DetourRuntime.ActiveMethodNames;
+            return new()
             {
                 unity_version = Application.unityVersion,
                 platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
@@ -28,33 +31,43 @@ namespace Conduit
                 is_test_runner_active = ConduitToolRunner.IsTestRunnerActive(),
                 active_test_mode = ConduitToolRunner.GetActiveTestRunMode(),
                 active_command_type = ConduitToolRunner.GetActiveCommandType(),
-                active_detour_count = DetourRuntime.ActiveCount,
-                active_detours = DetourRuntime.ActiveMethodNames,
+                active_detour_count = activeDetours.Length,
+                active_detours = activeDetours,
                 profiler_status_line = profiler.BuildStatusLine(),
                 recording_status_line = RecordTool.BuildStatusLine(),
-                scenes = BuildScenes(),
-                dirty_scenes = ConduitSceneCommandUtility.GetDirtySceneDescriptions(),
+                scenes = scenes,
+                dirty_scenes = dirtyScenes,
             };
+        }
 
-        static string[] BuildScenes()
+        static string[] BuildScenes(out string[] dirtyScenes)
         {
-            if (SceneManager.sceneCount == 0)
+            var sceneCount = SceneManager.sceneCount;
+            if (sceneCount == 0)
+            {
+                dirtyScenes = Array.Empty<string>();
                 return Array.Empty<string>();
+            }
 
             using var pooledScenes = ConduitUtility.GetPooledList<string>(out var scenes);
+            using var pooledDirtyScenes = ConduitUtility.GetPooledList<string>(out var dirty);
             var activeScene = SceneManager.GetActiveScene();
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 var scenePath = ConduitUtility.FormatScenePath(scene, "untitled");
+                var isDirty = scene.isDirty;
+                if (isDirty)
+                    dirty.Add(scenePath);
 
-                var state = scene.isDirty ? "dirty" : "clean";
+                var state = isDirty ? "dirty" : "clean";
                 if (scene == activeScene)
                     state += ", active";
 
                 scenes.Add($"{scenePath} [{state}]");
             }
 
+            dirtyScenes = dirty.ToArray();
             return scenes.ToArray();
         }
 

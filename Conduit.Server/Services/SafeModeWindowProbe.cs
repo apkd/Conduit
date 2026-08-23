@@ -10,6 +10,17 @@ static class SafeModeWindowProbe
             .TryFindMatchingProcessWindowTitle(processId, IsSafeModeWindowTitle)
             ?.Title;
 
+    internal static string? TryReadSafeModeWindowSignal(
+        int processId,
+        string? mainWindowTitle) =>
+        UnityWindowTitleProbe
+            .TryFindMatchingProcessWindowTitle(
+                processId,
+                IsSafeModeWindowTitle,
+                mainWindowTitle
+            )
+            ?.Title;
+
     internal static string? TryReadHyprlandClientsSafeModeWindowSignal(string? json, int processId) =>
         TryReadSafeModeWindowTitle(UnityWindowTitleProbe.ReadHyprlandClientsWindowTitles(json, processId));
 

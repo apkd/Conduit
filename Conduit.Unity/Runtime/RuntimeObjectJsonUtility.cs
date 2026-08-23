@@ -1,12 +1,13 @@
 #nullable enable
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Reflection;
 using System.Text;
 using UnityEngine;
+using UnityEngine.Pool;
 using Object = UnityEngine.Object;
 
 namespace Conduit.Runtime
@@ -15,6 +16,8 @@ namespace Conduit.Runtime
     static class RuntimeObjectJsonUtility
     {
         const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
+        static readonly ConcurrentDictionary<Type, PropertyInfo[]> writableProperties = new();
+        static readonly ConcurrentDictionary<Type, Dictionary<string, PropertyInfo>> writablePropertyLookups = new();
 
         public static string ToJson(Object target)
             => target switch
@@ -32,7 +35,10 @@ namespace Conduit.Runtime
 
             var body = UnwrapTarget(RuntimeJsonObject.Parse(json), target.GetType());
             var before = ToJson(target);
-            var requestedPaths = new HashSet<string>(StringComparer.Ordinal);
+            using var pooledRequestedPaths = CollectionPool<HashSet<string>, string>.Get(
+                out var requestedPaths
+            );
+            requestedPaths.Clear();
             switch (target)
             {
                 case GameObject gameObject:
@@ -56,18 +62,58 @@ namespace Conduit.Runtime
 
         static string FormatChanges(string before, string after, HashSet<string> requestedPaths)
         {
-            var changed = new List<string>();
+            using var pooledChanged = ListPool<string>.Get(out var changed);
+            changed.Clear();
             CollectChangedPaths(RuntimeJsonObject.Parse(before), RuntimeJsonObject.Parse(after), string.Empty, changed);
-            changed.RemoveAll(path => !requestedPaths.Any(requested =>
-                string.Equals(path, requested, StringComparison.Ordinal)
-                || path.StartsWith(requested + ".", StringComparison.Ordinal)
-                || requested.StartsWith(path + ".", StringComparison.Ordinal)
-            ));
+            var retainedCount = 0;
+            for (var index = 0; index < changed.Count; ++index)
+            {
+                var path = changed[index];
+                if (IsRequestedPath(path))
+                    changed[retainedCount++] = path;
+            }
+            if (retainedCount < changed.Count)
+                changed.RemoveRange(retainedCount, changed.Count - retainedCount);
             if (changed.Count == 0)
                 return "No serialized properties changed.";
 
             changed.Sort(StringComparer.Ordinal);
-            return "Applied changes:\n- " + string.Join("\n- ", changed);
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
+            builder.Append("Applied changes:");
+            foreach (var path in changed)
+                builder.Append("\n- ").Append(path);
+
+            return builder.ToString();
+
+            bool IsRequestedPath(string path)
+            {
+                if (requestedPaths.Contains(path))
+                    return true;
+
+                foreach (var requested in requestedPaths)
+                    if (IsNestedPath(path, requested) || IsNestedPath(requested, path))
+                        return true;
+
+                return false;
+            }
+        }
+
+        static bool IsNestedPath(string path, string prefix)
+            => path.Length > prefix.Length
+               && path.StartsWith(prefix, StringComparison.Ordinal)
+               && path[prefix.Length] == '.';
+
+        static bool IsJsonObject(string json)
+        {
+            foreach (var character in json)
+            {
+                if (char.IsWhiteSpace(character))
+                    continue;
+
+                return character == '{';
+            }
+
+            return false;
         }
 
         static void CollectChangedPaths(
@@ -76,13 +122,19 @@ namespace Conduit.Runtime
             string prefix,
             List<string> changed)
         {
-            var beforeMembers = before.Members.ToDictionary(static member => member.Name, StringComparer.Ordinal);
-            var afterMembers = after.Members.ToDictionary(static member => member.Name, StringComparer.Ordinal);
-            foreach (var name in beforeMembers.Keys.Concat(afterMembers.Keys).Distinct(StringComparer.Ordinal))
+            using var pooledAfterMembers = DictionaryPool<string, RuntimeJsonMember>.Get(
+                out var afterMembers
+            );
+            afterMembers.Clear();
+            afterMembers.EnsureCapacity(after.Members.Count);
+            foreach (var member in after.Members)
+                afterMembers.Add(member.Name, member);
+
+            foreach (var beforeMember in before.Members)
             {
+                var name = beforeMember.Name;
                 var path = prefix.Length == 0 ? name : prefix + "." + name;
-                if (!beforeMembers.TryGetValue(name, out var beforeMember)
-                    || !afterMembers.TryGetValue(name, out var afterMember))
+                if (!afterMembers.Remove(name, out var afterMember))
                 {
                     changed.Add(path);
                     continue;
@@ -90,8 +142,7 @@ namespace Conduit.Runtime
 
                 if (beforeMember.Source == afterMember.Source)
                     continue;
-                if (beforeMember.Source.TrimStart().StartsWith("{", StringComparison.Ordinal)
-                    && afterMember.Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                if (beforeMember.IsObject && afterMember.IsObject)
                     CollectChangedPaths(
                         RuntimeJsonObject.Parse(beforeMember.Source),
                         RuntimeJsonObject.Parse(afterMember.Source),
@@ -101,28 +152,59 @@ namespace Conduit.Runtime
                 else
                     changed.Add(path);
             }
+
+            foreach (var name in afterMembers.Keys)
+                changed.Add(prefix.Length == 0 ? name : prefix + "." + name);
         }
 
-        static string SerializeGameObject(GameObject gameObject) =>
-            WriteObject(
-                ("name", Quote(gameObject.name)),
-                ("activeSelf", gameObject.activeSelf ? "true" : "false"),
-                ("layer", gameObject.layer.ToString(CultureInfo.InvariantCulture)),
-                ("tag", Quote(gameObject.tag)),
-                ("hideFlags", ((int)gameObject.hideFlags).ToString(CultureInfo.InvariantCulture))
+        static string SerializeGameObject(GameObject gameObject)
+        {
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(
+                out var builder,
+                gameObject.name.Length + gameObject.tag.Length + 128
             );
+            builder.Append("{\n  \"name\": ");
+            AppendQuoted(builder, gameObject.name);
+            builder.Append(",\n  \"activeSelf\": ")
+                .Append(gameObject.activeSelf ? "true" : "false")
+                .Append(",\n  \"layer\": ")
+                .Append(gameObject.layer.ToString(CultureInfo.InvariantCulture))
+                .Append(",\n  \"tag\": ");
+            AppendQuoted(builder, gameObject.tag);
+            return builder
+                .Append(",\n  \"hideFlags\": ")
+                .Append(((int)gameObject.hideFlags).ToString(CultureInfo.InvariantCulture))
+                .Append("\n}")
+                .ToString();
+        }
 
-        static string SerializeTransform(Transform transform) =>
-            WriteObject(
-                ("localPosition", JsonUtility.ToJson(transform.localPosition, true)),
-                ("localRotation", JsonUtility.ToJson(transform.localRotation, true)),
-                ("localScale", JsonUtility.ToJson(transform.localScale, true))
+        static string SerializeTransform(Transform transform)
+        {
+            var localPosition = JsonUtility.ToJson(transform.localPosition, true);
+            var localRotation = JsonUtility.ToJson(transform.localRotation, true);
+            var localScale = JsonUtility.ToJson(transform.localScale, true);
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(
+                out var builder,
+                localPosition.Length + localRotation.Length + localScale.Length + 96
             );
+            builder.Append("{\n  \"localPosition\": ");
+            AppendIndented(builder, localPosition, 2);
+            builder.Append(",\n  \"localRotation\": ");
+            AppendIndented(builder, localRotation, 2);
+            builder.Append(",\n  \"localScale\": ");
+            AppendIndented(builder, localScale, 2);
+            return builder.Append("\n}").ToString();
+        }
 
         static string SerializeWritableProperties(Object target)
         {
-            var values = new List<(string Name, string Json)>();
-            foreach (var property in GetWritableProperties(target.GetType()))
+            var properties = GetWritableProperties(target.GetType());
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(
+                out var builder,
+                4 + properties.Length * 32
+            );
+            var count = 0;
+            foreach (var property in properties)
             {
                 object? value;
                 try
@@ -134,11 +216,16 @@ namespace Conduit.Runtime
                     continue;
                 }
 
-                if (TrySerializeValue(value, property.PropertyType, out var json))
-                    values.Add((property.Name, json));
+                if (!TrySerializeValue(value, property.PropertyType, out var json))
+                    continue;
+
+                builder.Append(count++ == 0 ? "{\n  " : ",\n  ");
+                AppendQuoted(builder, property.Name);
+                builder.Append(": ");
+                AppendIndented(builder, json, 2);
             }
 
-            return WriteObject(values);
+            return count == 0 ? "{}" : builder.Append("\n}").ToString();
         }
 
         static void OverwriteGameObject(
@@ -261,9 +348,28 @@ namespace Conduit.Runtime
             RuntimeJsonObject json,
             HashSet<string> requestedPaths)
         {
-            var properties = GetWritableProperties(target.GetType())
-                .ToDictionary(static property => property.Name, StringComparer.OrdinalIgnoreCase);
-            var edits = new List<(PropertyInfo Property, object? Before, object? After)>();
+            var properties = writablePropertyLookups.GetOrAdd(
+                target.GetType(),
+                static type =>
+                {
+                    var writable = GetWritableProperties(type);
+                    var lookup = new Dictionary<string, PropertyInfo>(
+                        writable.Length,
+                        StringComparer.OrdinalIgnoreCase
+                    );
+                    foreach (var property in writable)
+                        lookup.Add(property.Name, property);
+                    return lookup;
+                }
+            );
+            using var pooledEdits = ListPool<(
+                PropertyInfo Property,
+                object? Before,
+                object? After
+            )>.Get(out var edits);
+            edits.Clear();
+            if (edits.Capacity < json.Members.Count)
+                edits.Capacity = json.Members.Count;
             foreach (var member in json.Members)
             {
                 if (!properties.TryGetValue(member.Name, out var property))
@@ -313,18 +419,31 @@ namespace Conduit.Runtime
         static InvalidOperationException UnknownProperty(Object target, string propertyName) =>
             new($"Runtime property '{propertyName}' does not exist or is not writable on '{target.GetType().Name}'.");
 
-        static IEnumerable<PropertyInfo> GetWritableProperties(Type type) =>
-            type.GetProperties(PublicInstance)
-                .Where(static property =>
-                    property.GetMethod?.IsPublic == true
-                    && property.SetMethod?.IsPublic == true
-                    && property.GetIndexParameters().Length == 0
-                    && IsSupportedPropertyType(property.PropertyType)
-                    && property.GetCustomAttribute<ObsoleteAttribute>() == null
-                )
-                .GroupBy(static property => property.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(static group => group.First())
-                .OrderBy(static property => property.Name, StringComparer.Ordinal);
+        static PropertyInfo[] GetWritableProperties(Type type)
+            => writableProperties.GetOrAdd(type, static value =>
+            {
+                var candidates = value.GetProperties(PublicInstance);
+                var firstByName = new Dictionary<string, PropertyInfo>(
+                    candidates.Length,
+                    StringComparer.OrdinalIgnoreCase
+                );
+                foreach (var property in candidates)
+                    if (property.GetMethod?.IsPublic == true
+                        && property.SetMethod?.IsPublic == true
+                        && property.GetIndexParameters().Length == 0
+                        && IsSupportedPropertyType(property.PropertyType)
+                        && !property.IsDefined(typeof(ObsoleteAttribute), inherit: false))
+                        firstByName.TryAdd(property.Name, property);
+
+                var properties = new PropertyInfo[firstByName.Count];
+                firstByName.Values.CopyTo(properties, 0);
+                Array.Sort(properties, static (left, right) => string.Compare(
+                    left.Name,
+                    right.Name,
+                    StringComparison.Ordinal
+                ));
+                return properties;
+            });
 
         static bool IsSupportedPropertyType(Type type) =>
             type == typeof(string)
@@ -413,9 +532,9 @@ namespace Conduit.Runtime
 
             var source = member.Source;
             if (currentValue != null
-                && source.TrimStart().StartsWith("{", StringComparison.Ordinal)
+                && member.IsObject
                 && TrySerializeValue(currentValue, type, out var currentJson)
-                && currentJson.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                && IsJsonObject(currentJson))
                 source = MergeObjects(currentJson, source);
 
             return JsonUtility.FromJson(source, type);
@@ -429,12 +548,19 @@ namespace Conduit.Runtime
         {
             var current = RuntimeJsonObject.Parse(currentJson);
             var patch = RuntimeJsonObject.Parse(patchJson);
-            var values = current.Members
-                .Select(static member => (member.Name, Json: member.Source))
-                .ToList();
-            var indexes = values
-                .Select(static (value, index) => (value.Name, Index: index))
-                .ToDictionary(static value => value.Name, static value => value.Index, StringComparer.Ordinal);
+            using var pooledValues = ListPool<(string Name, string Json)>.Get(out var values);
+            values.Clear();
+            var capacity = current.Members.Count + patch.Members.Count;
+            if (values.Capacity < capacity)
+                values.Capacity = capacity;
+            using var pooledIndexes = DictionaryPool<string, int>.Get(out var indexes);
+            indexes.Clear();
+            indexes.EnsureCapacity(capacity);
+            foreach (var member in current.Members)
+            {
+                indexes.Add(member.Name, values.Count);
+                values.Add((member.Name, member.Source));
+            }
 
             foreach (var member in patch.Members)
             {
@@ -442,8 +568,7 @@ namespace Conduit.Runtime
                 if (indexes.TryGetValue(member.Name, out var index))
                 {
                     var existing = values[index].Json;
-                    if (existing.TrimStart().StartsWith("{", StringComparison.Ordinal)
-                        && source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                    if (IsJsonObject(existing) && IsJsonObject(source))
                         source = MergeObjects(existing, source);
 
                     values[index] = (member.Name, source);
@@ -472,7 +597,7 @@ namespace Conduit.Runtime
             string path,
             HashSet<string> requestedPaths)
         {
-            if (member.Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+            if (member.IsObject)
             {
                 var nested = RuntimeJsonObject.Parse(member.Source);
                 if (nested.Members.Count > 0)
@@ -512,7 +637,7 @@ namespace Conduit.Runtime
             if (json.Members.Count != 1
                 || json.Members[0].Name.Length == 0
                 || !char.IsUpper(json.Members[0].Name[0])
-                || !json.Members[0].Source.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                || !json.Members[0].IsObject)
                 return json;
 
             var wrapperName = json.Members[0].Name;
@@ -535,15 +660,19 @@ namespace Conduit.Runtime
             if (values.Count == 0)
                 return "{}";
 
-            var builder = new StringBuilder("{\n");
+            var capacity = 4;
+            for (var index = 0; index < values.Count; index++)
+                capacity += values[index].Name.Length + values[index].Json.Length + 8;
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder, capacity);
+            builder.Append("{\n");
             for (var index = 0; index < values.Count; index++)
             {
                 if (index > 0)
                     builder.Append(",\n");
 
-                builder.Append("  ")
-                    .Append(Quote(values[index].Name))
-                    .Append(": ");
+                builder.Append("  ");
+                AppendQuoted(builder, values[index].Name);
+                builder.Append(": ");
                 AppendIndented(builder, values[index].Json, 2);
             }
 
@@ -562,7 +691,27 @@ namespace Conduit.Runtime
 
         static string Quote(string value)
         {
-            var builder = new StringBuilder(value.Length + 2);
+            var requiresEscaping = false;
+            foreach (var character in value)
+                if (character is '\\' or '"' || char.IsControl(character))
+                {
+                    requiresEscaping = true;
+                    break;
+                }
+
+            if (!requiresEscaping)
+                return string.Concat("\"", value, "\"");
+
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(
+                out var builder,
+                value.Length + 2
+            );
+            AppendQuoted(builder, value);
+            return builder.ToString();
+        }
+
+        static void AppendQuoted(StringBuilder builder, string value)
+        {
             builder.Append('"');
             foreach (var character in value)
             {
@@ -599,7 +748,7 @@ namespace Conduit.Runtime
                 }
             }
 
-            return builder.Append('"').ToString();
+            builder.Append('"');
         }
     }
 
@@ -615,9 +764,10 @@ namespace Conduit.Runtime
         public string Source { get; }
         public bool IsNull => string.Equals(Source, "null", StringComparison.Ordinal);
         public bool IsString => Source.Length >= 2 && Source[0] == '"';
+        public bool IsObject => Source.Length > 0 && Source[0] == '{';
     }
 
-    sealed class RuntimeJsonObject
+    readonly struct RuntimeJsonObject
     {
         RuntimeJsonObject(string source, IReadOnlyList<RuntimeJsonMember> members)
         {
@@ -644,18 +794,22 @@ namespace Conduit.Runtime
             return value;
         }
 
-        sealed class Parser
+        struct Parser
         {
             readonly string source;
             int index;
 
-            public Parser(string source) => this.source = source;
+            public Parser(string source)
+            {
+                this.source = source;
+                index = 0;
+            }
 
             public IReadOnlyList<RuntimeJsonMember> ParseObject()
             {
                 SkipWhitespace();
                 Expect('{');
-                var members = new List<RuntimeJsonMember>();
+                var members = new List<RuntimeJsonMember>(8);
                 SkipWhitespace();
                 if (TryConsume('}'))
                     return members;
@@ -677,70 +831,108 @@ namespace Conduit.Runtime
                 }
             }
 
-            public string ReadString()
+            public string ReadString() => ReadString(materialize: true)!;
+
+            string? ReadString(bool materialize)
             {
                 SkipWhitespace();
                 Expect('"');
-                var builder = new StringBuilder();
-                while (index < source.Length)
+                var segmentStart = index;
+                StringBuilder? builder = null;
+                BridgeStringBuilderPool.StringBuilderHandle pooledBuilder = default;
+                try
                 {
-                    var character = source[index++];
-                    if (character == '"')
-                        return builder.ToString();
-                    if (character != '\\')
+                    while (index < source.Length)
                     {
-                        builder.Append(character);
-                        continue;
-                    }
+                        var character = source[index++];
+                        if (character == '"')
+                        {
+                            if (!materialize)
+                                return null;
+                            if (builder == null)
+                                return source.Substring(segmentStart, index - segmentStart - 1);
 
-                    if (index >= source.Length)
-                        throw InvalidJson();
-                    switch (source[index++])
-                    {
-                        case '"':
-                            builder.Append('"');
-                            break;
-                        case '\\':
-                            builder.Append('\\');
-                            break;
-                        case '/':
-                            builder.Append('/');
-                            break;
-                        case 'b':
-                            builder.Append('\b');
-                            break;
-                        case 'f':
-                            builder.Append('\f');
-                            break;
-                        case 'n':
-                            builder.Append('\n');
-                            break;
-                        case 'r':
-                            builder.Append('\r');
-                            break;
-                        case 't':
-                            builder.Append('\t');
-                            break;
-                        case 'u':
-                            if (index + 4 > source.Length
-                                || !ushort.TryParse(
-                                    source.Substring(index, 4),
-                                    NumberStyles.HexNumber,
-                                    CultureInfo.InvariantCulture,
-                                    out var codeUnit
-                                ))
-                                throw InvalidJson();
+                            builder.Append(source, segmentStart, index - segmentStart - 1);
+                            return builder.ToString();
+                        }
+                        if (character != '\\')
+                            continue;
 
-                            builder.Append((char)codeUnit);
-                            index += 4;
-                            break;
-                        default:
+                        if (index >= source.Length)
                             throw InvalidJson();
+                        if (materialize && builder == null)
+                        {
+                            pooledBuilder = BridgeStringBuilderPool.Rent(
+                                out var rentedBuilder
+                            );
+                            builder = rentedBuilder;
+                        }
+                        if (materialize)
+                            builder!.Append(source, segmentStart, index - segmentStart - 1);
+                        switch (source[index++])
+                        {
+                            case '"':
+                                if (materialize)
+                                    builder!.Append('"');
+                                break;
+                            case '\\':
+                                if (materialize)
+                                    builder!.Append('\\');
+                                break;
+                            case '/':
+                                if (materialize)
+                                    builder!.Append('/');
+                                break;
+                            case 'b':
+                                if (materialize)
+                                    builder!.Append('\b');
+                                break;
+                            case 'f':
+                                if (materialize)
+                                    builder!.Append('\f');
+                                break;
+                            case 'n':
+                                if (materialize)
+                                    builder!.Append('\n');
+                                break;
+                            case 'r':
+                                if (materialize)
+                                    builder!.Append('\r');
+                                break;
+                            case 't':
+                                if (materialize)
+                                    builder!.Append('\t');
+                                break;
+                            case 'u':
+                                if (index + 4 > source.Length
+                                    || !ushort.TryParse(
+                                        source.AsSpan(index, 4),
+                                        NumberStyles.HexNumber,
+                                        CultureInfo.InvariantCulture,
+                                        out var codeUnit
+                                    ))
+                                    throw InvalidJson();
+
+                                if (materialize)
+                                    builder!.Append((char)codeUnit);
+                                index += 4;
+                                break;
+                            default:
+                                throw InvalidJson();
+                        }
+
+                        segmentStart = index;
                     }
+                }
+                finally
+                {
+                    pooledBuilder.Dispose();
                 }
 
                 throw InvalidJson();
             }
+
+            void SkipString() => ReadString(materialize: false);
 
             public void ExpectEnd()
             {
@@ -758,7 +950,7 @@ namespace Conduit.Runtime
                 switch (source[index])
                 {
                     case '"':
-                        ReadString();
+                        SkipString();
                         return;
                     case '{':
                         SkipObject();
@@ -775,8 +967,10 @@ namespace Conduit.Runtime
                         if (index == start)
                             throw InvalidJson();
 
-                        var token = source.Substring(start, index - start);
-                        if (token is not ("true" or "false" or "null")
+                        var token = source.AsSpan(start, index - start);
+                        if (!token.Equals("true".AsSpan(), StringComparison.Ordinal)
+                            && !token.Equals("false".AsSpan(), StringComparison.Ordinal)
+                            && !token.Equals("null".AsSpan(), StringComparison.Ordinal)
                             && !double.TryParse(
                                 token,
                                 NumberStyles.Float,
@@ -797,7 +991,7 @@ namespace Conduit.Runtime
 
                 while (true)
                 {
-                    ReadString();
+                    SkipString();
                     SkipWhitespace();
                     Expect(':');
                     SkipValue();

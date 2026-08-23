@@ -13,8 +13,13 @@ namespace Conduit;
 /// <summary>Compiles execute-code snippets against assemblies loaded by a Unity target.</summary>
 public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
 {
+    const int MaximumNamespaceCacheEntries = 1024;
     const string SnippetNamespace = "ConduitGenerated.ExecuteCode";
     static readonly TimeSpan referenceCommandTimeout = TimeSpan.FromSeconds(30);
+    static readonly CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
+    static readonly CSharpCompilationOptions debugCompilationOptions = CreateCompilationOptions(OptimizationLevel.Debug);
+    static readonly CSharpCompilationOptions releaseCompilationOptions = CreateCompilationOptions(OptimizationLevel.Release);
+    static readonly EmitOptions emitOptions = new(debugInformationFormat: DebugInformationFormat.PortablePdb);
     static readonly string[] playerUsingDirectives =
     [
         "using System;",
@@ -62,8 +67,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             return SnippetCompilation.FromFailure(referenceFailure);
 
         var snippetRoot = GetSnippetRoot(target, references.PreserveSnippets);
-        var cache = GetSessionCache(target, references.SessionInstanceId)
-            .GetCompilationCache(snippetRoot);
+        var sessionCache = GetSessionCache(target, references.SessionInstanceId);
+        var cache = sessionCache.GetCompilationCache(snippetRoot);
         await cache.Gate.WaitAsync(ct);
         try
         {
@@ -195,7 +200,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 var inferred = InferNamespaces(
                     compile.Diagnostics,
                     references.ReferencePaths!,
-                    inferredNamespaces
+                    inferredNamespaces,
+                    sessionCache.NamespaceCandidates
                 );
                 if (inferred.Count == 0)
                     break;
@@ -276,6 +282,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     {
         var references = await GetReferencesAsync(target, ct);
         return new(
+            references.References,
             references.ReferencePaths,
             references.PreserveSnippets,
             references.SessionInstanceId,
@@ -358,22 +365,42 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     }
 
     TargetSessionCache GetSessionCache(string target, string sessionInstanceId)
-        => sessionCaches.AddOrUpdate(
+    {
+        if (sessionCaches.TryGetValue(target, out var cached)
+            && cached.SessionInstanceId == sessionInstanceId)
+            return cached;
+
+        return sessionCaches.AddOrUpdate(
             target,
-            _ => new(sessionInstanceId),
-            (_, current) => string.Equals(
-                    current.SessionInstanceId,
-                    sessionInstanceId,
-                    StringComparison.Ordinal
-                )
+            static (_, id) => new(id),
+            static (_, current, id) => current.SessionInstanceId == id
                 ? current
-                : new(sessionInstanceId)
+                : new(id),
+            sessionInstanceId
         );
+    }
 
     async Task<ReferenceSetResult> GetReferencesAsync(
         string target,
         CancellationToken ct)
     {
+        if (bridgeClient.TryGetLiveHandshake(target, out var liveHandshake)
+            && liveHandshake is { SessionInstanceId.Length: > 0 })
+        {
+            var liveSession = GetSessionCache(target, liveHandshake.SessionInstanceId);
+            await liveSession.ReferenceGate.WaitAsync(ct);
+            try
+            {
+                // an active connection already proves which Unity session owns the cached manifest.
+                if (liveSession.References is { } cached)
+                    return ReferenceSetResult.Succeeded(cached, liveHandshake);
+            }
+            finally
+            {
+                liveSession.ReferenceGate.Release();
+            }
+        }
+
         var flight = referenceFlights.GetOrAdd(target, static _ => new());
         Task<ReferenceSetResult> task;
         lock (flight)
@@ -450,16 +477,18 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                         CompileError("Unity returned no usable compilation references.")
                     );
 
-                var resolvedPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                var missing = new List<BridgeAssemblyReference>();
+                var resolvedPaths = new Dictionary<string, string>(
+                    manifestReferences.Length,
+                    StringComparer.OrdinalIgnoreCase
+                );
+                var missing = new List<BridgeAssemblyReference>(manifestReferences.Length);
                 foreach (var reference in manifestReferences)
                 {
                     ct.ThrowIfCancellationRequested();
                     var path = TryResolveAccessiblePath(reference);
                     if (path is null
                         && downloadedReferences.TryGetValue(reference.Id, out var downloadedPath)
-                        && File.Exists(downloadedPath)
-                        && (reference.Length <= 0 || new FileInfo(downloadedPath).Length == reference.Length))
+                        && HasExpectedLength(downloadedPath, reference.Length))
                         path = downloadedPath;
 
                     if (path is null)
@@ -485,8 +514,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                         resolvedPaths[pair.Key] = pair.Value;
                 }
 
-                var metadataReferences = new List<MetadataReference>();
-                var referencePaths = new List<string>();
+                var metadataReferences = new List<MetadataReference>(manifestReferences.Length);
+                var referencePaths = new List<string>(manifestReferences.Length);
                 foreach (var reference in manifestReferences)
                 {
                     if (!resolvedPaths.TryGetValue(reference.Id, out var path))
@@ -598,8 +627,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                     );
 
                 var path = Path.Combine(directory, artifact.Sha256 + ".dll");
-                if (!File.Exists(path)
-                    || !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
+                if (!FileMatches(path, bytes))
                     File.WriteAllBytes(path, bytes);
 
                 downloadedReferences[reference.Id] = path;
@@ -607,6 +635,42 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             }
 
             return ReferenceFetchBatchResult.Succeeded(paths);
+
+            static bool FileMatches(string path, byte[] expected)
+            {
+                try
+                {
+                    if (new FileInfo(path) is not { Exists: true } file
+                        || file.Length != expected.LongLength)
+                        return false;
+
+                    using var stream = new FileStream(
+                        path,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete,
+                        bufferSize: 1,
+                        FileOptions.SequentialScan
+                    );
+                    Span<byte> buffer = stackalloc byte[16 * 1024];
+                    var offset = 0;
+                    while (offset < expected.Length)
+                    {
+                        var count = stream.Read(buffer[..Math.Min(buffer.Length, expected.Length - offset)]);
+                        if (count == 0
+                            || !buffer[..count].SequenceEqual(expected.AsSpan(offset, count)))
+                            return false;
+
+                        offset += count;
+                    }
+
+                    return stream.ReadByte() < 0;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            }
         }
         catch (Exception exception)
         {
@@ -635,19 +699,19 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 return null;
         }
 
-        if (!File.Exists(path))
-            return null;
+        return HasExpectedLength(path, reference.Length) ? path : null;
+    }
 
+    static bool HasExpectedLength(string path, long expectedLength)
+    {
         try
         {
             var file = new FileInfo(path);
-            return reference.Length <= 0 || file.Length == reference.Length
-                ? path
-                : null;
+            return file.Exists && (expectedLength <= 0 || file.Length == expectedLength);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return null;
+            return false;
         }
     }
 
@@ -746,7 +810,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     {
         var syntaxTree = CSharpSyntaxTree.ParseText(
             source,
-            new CSharpParseOptions(LanguageVersion.Preview),
+            parseOptions,
             sourceFileName,
             Encoding.UTF8
         );
@@ -754,19 +818,16 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             assemblyNamePrefix + Guid.NewGuid().ToString("N"),
             [syntaxTree],
             references,
-            new(
-                OutputKind.DynamicallyLinkedLibrary,
-                optimizationLevel: optimizationLevel,
-                allowUnsafe: true,
-                nullableContextOptions: NullableContextOptions.Enable
-            )
+            optimizationLevel == OptimizationLevel.Release
+                ? releaseCompilationOptions
+                : debugCompilationOptions
         );
         using var assembly = new MemoryStream();
         using var pdb = new MemoryStream();
         var emit = compilation.Emit(
             assembly,
             pdb,
-            options: new(debugInformationFormat: DebugInformationFormat.PortablePdb)
+            options: emitOptions
         );
         return new(
             emit.Diagnostics,
@@ -774,6 +835,14 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             emit.Success ? pdb.ToArray() : null
         );
     }
+
+    static CSharpCompilationOptions CreateCompilationOptions(OptimizationLevel optimizationLevel)
+        => new(
+            OutputKind.DynamicallyLinkedLibrary,
+            optimizationLevel: optimizationLevel,
+            allowUnsafe: true,
+            nullableContextOptions: NullableContextOptions.Enable
+        );
 
     static string BuildSource(
         string typeName,
@@ -784,7 +853,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         bool async,
         bool returnsValue)
     {
-        var builder = new StringBuilder();
+        var builder = new StringBuilder(parsed.Body.Text.Length + 1024);
         AppendUsingDirectives(
             builder,
             defaultUsingDirectives,
@@ -876,7 +945,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     internal static List<string> InferNamespaces(
         IEnumerable<Diagnostic> diagnostics,
         IReadOnlyCollection<string> referencePaths,
-        IReadOnlyCollection<string> existing)
+        IReadOnlyCollection<string> existing,
+        ConcurrentDictionary<string, string[]>? namespaceCache = null)
     {
         var symbols = diagnostics
             .Where(static value => value.Id is "CS0103" or "CS0246")
@@ -894,29 +964,65 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             static _ => new HashSet<string>(StringComparer.Ordinal),
             StringComparer.Ordinal
         );
-        foreach (var path in referencePaths)
+        var uncachedSymbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var symbol in symbols)
         {
-            try
-            {
-                using var stream = File.OpenRead(path);
-                using var peReader = new PEReader(stream);
-                if (!peReader.HasMetadata)
-                    continue;
+            if (namespaceCache?.TryGetValue(symbol, out var cached) == true)
+                candidates[symbol].UnionWith(cached);
+            else
+                uncachedSymbols.Add(symbol);
+        }
 
-                var reader = peReader.GetMetadataReader();
-                foreach (var handle in reader.TypeDefinitions)
+        if (uncachedSymbols.Count > 0)
+            foreach (var path in referencePaths)
+            {
+                try
                 {
-                    var definition = reader.GetTypeDefinition(handle);
-                    var name = reader.GetString(definition.Name);
-                    if (!candidates.TryGetValue(name, out var namespaces))
+                    using var stream = File.OpenRead(path);
+                    using var peReader = new PEReader(stream);
+                    if (!peReader.HasMetadata)
                         continue;
 
-                    var value = reader.GetString(definition.Namespace);
-                    if (value.Length > 0)
-                        namespaces.Add(value);
+                    var reader = peReader.GetMetadataReader();
+                    foreach (var handle in reader.TypeDefinitions)
+                    {
+                        var definition = reader.GetTypeDefinition(handle);
+                        if (uncachedSymbols.Count <= 6)
+                        {
+                            foreach (var symbol in uncachedSymbols)
+                            {
+                                if (!reader.StringComparer.Equals(definition.Name, symbol))
+                                    continue;
+
+                                var value = reader.GetString(definition.Namespace);
+                                if (value.Length > 0)
+                                    candidates[symbol].Add(value);
+                            }
+                            continue;
+                        }
+
+                        // decoding once and hashing scales better than comparing every handle to a large error set.
+                        var name = reader.GetString(definition.Name);
+                        if (!uncachedSymbols.TryGetValue(name, out var matchedSymbol))
+                            continue;
+
+                        var namespaceName = reader.GetString(definition.Namespace);
+                        if (namespaceName.Length > 0)
+                            candidates[matchedSymbol].Add(namespaceName);
+                    }
                 }
+                catch (Exception exception) when (exception is IOException or BadImageFormatException) { }
             }
-            catch (Exception exception) when (exception is IOException or BadImageFormatException) { }
+
+        if (namespaceCache != null)
+        {
+            var remainingCacheEntries = MaximumNamespaceCacheEntries - namespaceCache.Count;
+            foreach (var symbol in uncachedSymbols)
+            {
+                if (remainingCacheEntries-- <= 0)
+                    break;
+                namespaceCache.TryAdd(symbol, [.. candidates[symbol]]);
+            }
         }
 
         return candidates.Values
@@ -930,11 +1036,24 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
     internal static bool HasErrors(IEnumerable<Diagnostic> diagnostics) =>
         diagnostics.Any(static value => value.Severity == DiagnosticSeverity.Error);
 
-    internal static bool HasAnyError(IEnumerable<Diagnostic> diagnostics, params string[] ids) =>
-        diagnostics.Any(value =>
-            value.Severity == DiagnosticSeverity.Error
-            && ids.Contains(value.Id, StringComparer.Ordinal)
-        );
+    internal static bool HasAnyError(IEnumerable<Diagnostic> diagnostics, string id)
+    {
+        foreach (var diagnostic in diagnostics)
+            if (diagnostic.Severity == DiagnosticSeverity.Error && diagnostic.Id == id)
+                return true;
+
+        return false;
+    }
+
+    internal static bool HasAnyError(IEnumerable<Diagnostic> diagnostics, string firstId, string secondId)
+    {
+        foreach (var diagnostic in diagnostics)
+            if (diagnostic.Severity == DiagnosticSeverity.Error
+                && (diagnostic.Id == firstId || diagnostic.Id == secondId))
+                return true;
+
+        return false;
+    }
 
     internal static bool TryNormalizeBareReturns(
         SnippetChunk body,
@@ -1130,11 +1249,13 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         internal string SessionInstanceId { get; } = sessionInstanceId;
         internal SemaphoreSlim ReferenceGate { get; } = new(1, 1);
         internal CachedReferenceSet? References { get; set; }
+        internal ConcurrentDictionary<string, string[]> NamespaceCandidates { get; } = new(StringComparer.Ordinal);
 
         internal TargetCompilationCache GetCompilationCache(string? snippetRoot) =>
             compilationCaches.GetOrAdd(
                 snippetRoot ?? string.Empty,
-                _ => new(GetHighestArtifactId(snippetRoot))
+                static (_, root) => new(GetHighestArtifactId(root)),
+                snippetRoot
             );
     }
 
@@ -1229,6 +1350,7 @@ sealed record CompiledSnippet(
 }
 
 readonly record struct CompilationReferencePaths(
+    MetadataReference[]? References,
     string[]? Paths,
     bool PreserveSnippets,
     string SessionInstanceId,

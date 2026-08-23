@@ -11,8 +11,21 @@ namespace Conduit
 {
     static class ConduitAssetPathUtility
     {
+        static readonly string projectRootPath = Path.GetFullPath(
+            Path.Combine(Application.dataPath, "..")
+        );
+        static readonly string assetsRootPath = NormalizeFullPath(Path.Combine(projectRootPath, "Assets"));
+        static readonly string packagesRootPath = NormalizeFullPath(Path.Combine(projectRootPath, "Packages"));
+
         public static bool TryResolveAssetPath(string asset, out string assetPath)
         {
+            var candidate = asset.AsSpan().Trim();
+            if (!LooksLikeAssetIdentifier(candidate))
+            {
+                assetPath = string.Empty;
+                return false;
+            }
+
             try
             {
                 assetPath = ResolveAssetPath(asset);
@@ -73,7 +86,7 @@ namespace Conduit
         }
 
         public static string GetProjectRootPath()
-            => Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            => projectRootPath;
 
         public static string AssetPathToAbsolutePath(string assetPath)
         {
@@ -88,16 +101,19 @@ namespace Conduit
             if (!Directory.Exists(directoryPath))
                 throw new InvalidOperationException($"Directory '{directoryAssetPath}' does not exist in the Unity project.");
 
-            var pathMappings = CreatePathMappings(projectRootPath, directoryAssetPath);
+            var pathMappings = CreatePathMappings(directoryAssetPath);
             using var pooledAssets = ConduitUtility.GetPooledSet<string>(out var assets);
             foreach (var filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
             {
-                var assetPath = ConvertAbsoluteToAssetPath(filePath, pathMappings);
-                if (assetPath == null)
+                if (normalizedExtensions.Length > 0
+                    && !ConduitUtility.ContainsExtension(
+                        normalizedExtensions,
+                        GetExtension(filePath.AsSpan())
+                    ))
                     continue;
 
-                if (normalizedExtensions.Length > 0
-                    && !ConduitUtility.ContainsExtension(normalizedExtensions, Path.GetExtension(assetPath)))
+                var assetPath = ConvertNormalizedAbsoluteToAssetPath(filePath, pathMappings);
+                if (assetPath == null)
                     continue;
 
                 assets.Add(assetPath);
@@ -109,33 +125,47 @@ namespace Conduit
         static string[] EnumerateWildcardAssets(string assetPattern, string[] normalizedExtensions)
         {
             var projectRootPath = GetProjectRootPath();
-            var pathMappings = CreatePathMappings(projectRootPath, assetPattern);
+            var pathMappings = CreatePathMappings(assetPattern);
             var assetRegex = new Regex(
                 BuildWildcardRegex(assetPattern),
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
             );
 
             var searchRootAssetPath = GetSearchRootAssetPath(assetPattern);
-            var searchRootPath = searchRootAssetPath is not { Length: > 0 }
-                ? projectRootPath
-                : AssetPathToAbsolutePath(searchRootAssetPath, projectRootPath);
-
-            if (!Directory.Exists(searchRootPath))
-                return Array.Empty<string>();
-
             using var pooledAssets = ConduitUtility.GetPooledSet<string>(out var assets);
-            foreach (var filePath in Directory.EnumerateFiles(searchRootPath, "*", SearchOption.AllDirectories))
+            if (searchRootAssetPath is not { Length: > 0 })
             {
-                var assetPath = ConvertAbsoluteToAssetPath(filePath, pathMappings);
-                if (assetPath == null
-                    || normalizedExtensions.Length > 0 && !ConduitUtility.ContainsExtension(normalizedExtensions, Path.GetExtension(assetPath))
-                    || !assetRegex.IsMatch(assetPath))
-                    continue;
-
-                assets.Add(assetPath);
+                // only Assets and Packages can map back to Unity asset paths; Library dominates broad project scans.
+                ScanDirectory(assetsRootPath);
+                ScanDirectory(packagesRootPath);
             }
+            else
+                ScanDirectory(AssetPathToAbsolutePath(searchRootAssetPath, projectRootPath));
 
             return ConduitUtility.SortStrings(assets, StringComparer.OrdinalIgnoreCase);
+
+            void ScanDirectory(string searchRootPath)
+            {
+                if (!Directory.Exists(searchRootPath))
+                    return;
+
+                foreach (var filePath in Directory.EnumerateFiles(searchRootPath, "*", SearchOption.AllDirectories))
+                {
+                    if (normalizedExtensions.Length > 0
+                        && !ConduitUtility.ContainsExtension(
+                            normalizedExtensions,
+                            GetExtension(filePath.AsSpan())
+                        ))
+                        continue;
+
+                    var assetPath = ConvertNormalizedAbsoluteToAssetPath(filePath, pathMappings);
+                    if (assetPath == null
+                        || !assetRegex.IsMatch(assetPath))
+                        continue;
+
+                    assets.Add(assetPath);
+                }
+            }
         }
 
         static string GetSearchRootAssetPath(string assetPattern)
@@ -160,7 +190,7 @@ namespace Conduit
             }
 
             var projectRootPath = GetProjectRootPath();
-            var pathMappings = CreatePathMappings(projectRootPath, normalizedInput);
+            var pathMappings = CreatePathMappings(normalizedInput);
             var absoluteCandidatePath = Path.GetFullPath(Path.Combine(projectRootPath, normalizedInput.Replace('/', Path.DirectorySeparatorChar)));
             var convertedAssetPath = ConvertAbsoluteToAssetPath(absoluteCandidatePath, pathMappings);
             if (convertedAssetPath == null)
@@ -176,7 +206,7 @@ namespace Conduit
         static bool TryConvertAbsolutePath(string path, out string assetPath)
         {
             var projectRootPath = GetProjectRootPath();
-            assetPath = ConvertAbsoluteToAssetPath(path, CreatePathMappings(projectRootPath)) ?? string.Empty;
+            assetPath = ConvertAbsoluteToAssetPath(path, CreatePathMappings()) ?? string.Empty;
             return assetPath.Length > 0;
         }
 
@@ -187,26 +217,61 @@ namespace Conduit
         }
 
         static string? ConvertAbsoluteToAssetPath(string absolutePath, in PathMappings pathMappings)
-        {
-            var normalizedAbsolutePath = NormalizeFullPath(absolutePath);
+            => ConvertNormalizedAbsoluteToAssetPath(
+                NormalizeFullPath(absolutePath),
+                pathMappings
+            );
 
+        static string? ConvertNormalizedAbsoluteToAssetPath(
+            string normalizedAbsolutePath,
+            in PathMappings pathMappings)
+        {
             if (StartsWithPath(normalizedAbsolutePath, pathMappings.AssetsRootPath))
-                return $"Assets{normalizedAbsolutePath[pathMappings.AssetsRootPath.Length..].Replace(Path.DirectorySeparatorChar, '/')}";
+                return JoinAssetPath(
+                    "Assets",
+                    normalizedAbsolutePath,
+                    pathMappings.AssetsRootPath.Length
+                );
 
             if (StartsWithPath(normalizedAbsolutePath, pathMappings.PackagesRootPath))
-                return $"Packages{normalizedAbsolutePath[pathMappings.PackagesRootPath.Length..].Replace(Path.DirectorySeparatorChar, '/')}";
+                return JoinAssetPath(
+                    "Packages",
+                    normalizedAbsolutePath,
+                    pathMappings.PackagesRootPath.Length
+                );
 
             if (pathMappings.PackagePathMapping is { } mapping)
                 if (StartsWithPath(normalizedAbsolutePath, mapping.AbsoluteRootPath))
-                    return $"{mapping.AssetRootPath}{normalizedAbsolutePath[mapping.AbsoluteRootPath.Length..].Replace(Path.DirectorySeparatorChar, '/')}";
+                    return JoinAssetPath(
+                        mapping.AssetRootPath,
+                        normalizedAbsolutePath,
+                        mapping.AbsoluteRootPath.Length
+                    );
 
             return null;
         }
 
-        static PathMappings CreatePathMappings(string projectRootPath, string? assetPath = null)
+        static string JoinAssetPath(string root, string absolutePath, int suffixOffset)
+            => string.Create(
+                root.Length + absolutePath.Length - suffixOffset,
+                (root, absolutePath, suffixOffset),
+                static (result, state) =>
+                {
+                    state.root.AsSpan().CopyTo(result);
+                    var outputIndex = state.root.Length;
+                    for (var inputIndex = state.suffixOffset;
+                         inputIndex < state.absolutePath.Length;
+                         ++inputIndex)
+                        result[outputIndex++] = IsDirectorySeparator(state.absolutePath[inputIndex])
+                            ? '/'
+                            : state.absolutePath[inputIndex];
+                }
+            );
+
+        static PathMappings CreatePathMappings(string? assetPath = null)
             => new(
-                NormalizeFullPath(Path.Combine(projectRootPath, "Assets")),
-                NormalizeFullPath(Path.Combine(projectRootPath, "Packages")),
+                assetsRootPath,
+                packagesRootPath,
                 assetPath is { Length: > 0 } ? GetPackagePathMapping(assetPath) : null);
 
         static PackagePathMapping? GetPackagePathMapping(string assetPath)
@@ -283,7 +348,16 @@ namespace Conduit
             if (trimmed.IndexOf('\\') < 0)
                 return trimmed.Length == input.Length ? input : trimmed.ToString();
 
-            return trimmed.ToString().Replace('\\', '/');
+            return string.Create(
+                trimmed.Length,
+                input,
+                static (result, source) =>
+                {
+                    var trimmedSource = source.AsSpan().Trim();
+                    for (var index = 0; index < trimmedSource.Length; ++index)
+                        result[index] = trimmedSource[index] == '\\' ? '/' : trimmedSource[index];
+                }
+            );
         }
 
         static string NormalizeFullPath(string path)
@@ -310,10 +384,46 @@ namespace Conduit
         static bool IsDirectorySeparator(char character)
             => character == Path.DirectorySeparatorChar || character == Path.AltDirectorySeparatorChar;
 
+        static ReadOnlySpan<char> GetExtension(ReadOnlySpan<char> path)
+        {
+            for (var index = path.Length - 1; index >= 0; --index)
+            {
+                var character = path[index];
+                if (character == '.')
+                    return index == path.Length - 1 ? ReadOnlySpan<char>.Empty : path[index..];
+                if (IsDirectorySeparator(character))
+                    break;
+            }
+
+            return ReadOnlySpan<char>.Empty;
+        }
+
         static bool IsAssetRelativePath(ReadOnlySpan<char> input)
             => input.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
                || input.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)
                || input.Equals("Assets", StringComparison.OrdinalIgnoreCase)
                || input.Equals("Packages", StringComparison.OrdinalIgnoreCase);
+
+        static bool LooksLikeAssetIdentifier(ReadOnlySpan<char> candidate)
+        {
+            if (ConduitUtility.IsLikelyGuid(candidate)
+                || IsAssetRelativeIdentifier(candidate))
+                return true;
+
+            if (candidate.StartsWith("./", StringComparison.Ordinal)
+                || candidate.StartsWith(".\\", StringComparison.Ordinal))
+                return IsAssetRelativeIdentifier(candidate[2..]);
+
+            return candidate.StartsWith("/", StringComparison.Ordinal)
+                   || candidate.StartsWith("\\\\", StringComparison.Ordinal)
+                   || candidate.Length >= 3
+                   && candidate[1] == ':'
+                   && (candidate[2] == '/' || candidate[2] == '\\');
+        }
+
+        static bool IsAssetRelativeIdentifier(ReadOnlySpan<char> candidate)
+            => IsAssetRelativePath(candidate)
+               || candidate.StartsWith("Assets\\", StringComparison.OrdinalIgnoreCase)
+               || candidate.StartsWith("Packages\\", StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -2,9 +2,7 @@
 
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Globalization;
-using System.Runtime.CompilerServices;
 using System.Text;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -16,46 +14,99 @@ namespace Conduit
     {
         const int MaxDepth = 8;
         const int MaxCollectionItems = 1024;
+        [ThreadStatic] static Formatter? reusableFormatter;
 
         public static string? Format(object? value)
-            => value == null ? null : new Formatter().Format(value, 0);
+        {
+            if (value == null)
+                return null;
+
+            if (value is not (IDictionary or IEnumerable) || value is string)
+                return FormatSimple(value);
+
+            var formatter = reusableFormatter ?? new();
+            reusableFormatter = null;
+            try
+            {
+                return formatter.Format(value, 0);
+            }
+            finally
+            {
+                formatter.Reset();
+                reusableFormatter ??= formatter;
+            }
+        }
+
+        static string FormatSimple(object value)
+            => value switch
+            {
+                string text => text,
+                char character => character.ToString(),
+                bool boolean => boolean ? "true" : "false",
+                Enum enumeration => enumeration.ToString(),
+                sbyte or byte or short or ushort or int or uint or long or ulong
+                    or float or double or decimal => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty,
+                Object unityObject => FormatUnityObject(unityObject),
+                IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
+                _ => value.ToString() ?? string.Empty,
+            };
 
         sealed class Formatter
         {
-            readonly HashSet<object> ancestors = new(ReferenceComparer.Instance);
+            readonly object?[] ancestors = new object?[MaxDepth];
             int remainingItems = MaxCollectionItems;
 
             public string Format(object? value, int depth)
             {
-                if (value == null)
-                    return "null";
-
-                return value switch
-                {
-                    string text => text,
-                    char character => character.ToString(),
-                    bool boolean => boolean ? "true" : "false",
-                    Enum enumeration => enumeration.ToString(),
-                    sbyte or byte or short or ushort or int or uint or long or ulong
-                        or float or double or decimal => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty,
-                    Object unityObject => FormatUnityObject(unityObject),
-                    IDictionary dictionary => FormatDictionary(dictionary, depth),
-                    IEnumerable sequence => FormatSequence(sequence, depth),
-                    IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
-                    _ => value.ToString() ?? string.Empty,
-                };
+                using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder, 256);
+                AppendValue(builder, value, depth);
+                return builder.ToString();
             }
 
-            string FormatDictionary(IDictionary dictionary, int depth)
+            public void Reset()
+                => remainingItems = MaxCollectionItems;
+
+            void AppendValue(StringBuilder builder, object? value, int depth)
+            {
+                if (value == null)
+                {
+                    builder.Append("null");
+                    return;
+                }
+
+                switch (value)
+                {
+                    case string text:
+                        builder.Append(text);
+                        break;
+                    case IDictionary dictionary:
+                        AppendDictionary(builder, dictionary, depth);
+                        break;
+                    case IEnumerable sequence:
+                        AppendSequence(builder, sequence, depth);
+                        break;
+                    default:
+                        builder.Append(FormatSimple(value));
+                        break;
+                }
+            }
+
+            void AppendDictionary(StringBuilder builder, IDictionary dictionary, int depth)
             {
                 if (depth >= MaxDepth)
-                    return "…";
-                if (!ancestors.Add(dictionary))
-                    return "<cycle>";
+                {
+                    builder.Append('…');
+                    return;
+                }
+                if (!TryPushAncestor(dictionary, depth))
+                {
+                    builder.Append("<cycle>");
+                    return;
+                }
 
                 try
                 {
-                    var builder = new StringBuilder("{");
+                    builder.Append('{');
                     var first = true;
                     foreach (DictionaryEntry entry in dictionary)
                     {
@@ -64,30 +115,36 @@ namespace Conduit
 
                         if (!first)
                             builder.Append(", ");
-                        builder.Append(Format(entry.Key, depth + 1))
-                            .Append(": ")
-                            .Append(Format(entry.Value, depth + 1));
+                        AppendValue(builder, entry.Key, depth + 1);
+                        builder.Append(": ");
+                        AppendValue(builder, entry.Value, depth + 1);
                         first = false;
                     }
 
-                    return builder.Append('}').ToString();
+                    builder.Append('}');
                 }
                 finally
                 {
-                    ancestors.Remove(dictionary);
+                    ancestors[depth] = null;
                 }
             }
 
-            string FormatSequence(IEnumerable sequence, int depth)
+            void AppendSequence(StringBuilder builder, IEnumerable sequence, int depth)
             {
                 if (depth >= MaxDepth)
-                    return "…";
-                if (!ancestors.Add(sequence))
-                    return "<cycle>";
+                {
+                    builder.Append('…');
+                    return;
+                }
+                if (!TryPushAncestor(sequence, depth))
+                {
+                    builder.Append("<cycle>");
+                    return;
+                }
 
                 try
                 {
-                    var builder = new StringBuilder("[");
+                    builder.Append('[');
                     var first = true;
                     foreach (var item in sequence)
                     {
@@ -96,16 +153,26 @@ namespace Conduit
 
                         if (!first)
                             builder.Append(", ");
-                        builder.Append(Format(item, depth + 1));
+                        AppendValue(builder, item, depth + 1);
                         first = false;
                     }
 
-                    return builder.Append(']').ToString();
+                    builder.Append(']');
                 }
                 finally
                 {
-                    ancestors.Remove(sequence);
+                    ancestors[depth] = null;
                 }
+            }
+
+            bool TryPushAncestor(object value, int depth)
+            {
+                for (var index = 0; index < depth; index++)
+                    if (ReferenceEquals(ancestors[index], value))
+                        return false;
+
+                ancestors[depth] = value;
+                return true;
             }
 
             bool TryTakeItem(StringBuilder builder, bool first)
@@ -132,13 +199,5 @@ namespace Conduit
             return $"{target.GetType().Name} \"{name}\" [{BridgeObjectId.Format(target)}]";
         }
 
-        sealed class ReferenceComparer : IEqualityComparer<object>
-        {
-            public static readonly ReferenceComparer Instance = new();
-
-            public new bool Equals(object? left, object? right) => ReferenceEquals(left, right);
-
-            public int GetHashCode(object value) => RuntimeHelpers.GetHashCode(value);
-        }
     }
 }

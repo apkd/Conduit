@@ -43,6 +43,7 @@
     <ItemGroup>
         <Compile Include="..\Conduit.Unity\Core\BridgeContract.cs" Link="Bridge\BridgeContract.cs"/>
         <Compile Include="..\Conduit.Unity\Core\BridgeExceptionFormatter.cs" Link="Bridge\BridgeExceptionFormatter.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\BridgeStringBuilderPool.cs" Link="Bridge\BridgeStringBuilderPool.cs"/>
     </ItemGroup>
 
     <ItemGroup>

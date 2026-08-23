@@ -146,9 +146,10 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
 
     static bool TryDismissLinuxAsync(int processId)
     {
+        var processEnvironment = ReadProcessEnvironment(processId);
         var xdotoolPath = SafeModeWindowProbe.ResolveExecutablePath(
             XdotoolExecutableName,
-            TryReadProcessEnvironmentValue(processId, "PATH"),
+            processEnvironment.Path,
             Environment.GetEnvironmentVariable("PATH")
         );
 
@@ -158,9 +159,23 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         // xdotool is limited to x11/xwayland, so linux recovery is intentionally best-effort.
         foreach (var pattern in EnumerateLinuxPromptWindowTitlePatterns())
         {
-            var windows = RunWindowProbeCommand(CreateXdotoolSearchStartInfo(xdotoolPath, processId, pattern));
+            var windows = RunWindowProbeCommand(
+                CreateXdotoolSearchStartInfo(
+                    xdotoolPath,
+                    processId,
+                    pattern,
+                    processEnvironment
+                )
+            );
             foreach (var windowId in SplitLines(windows))
-                if (RunWindowActionCommand(CreateXdotoolReloadStartInfo(xdotoolPath, processId, windowId)))
+                if (RunWindowActionCommand(
+                        CreateXdotoolReloadStartInfo(
+                            xdotoolPath,
+                            processId,
+                            windowId,
+                            processEnvironment
+                        )
+                    ))
                     return true;
         }
 
@@ -174,9 +189,13 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         yield return "reload the scene";
     }
 
-    static ProcessStartInfo CreateXdotoolSearchStartInfo(string xdotoolPath, int processId, string pattern)
+    static ProcessStartInfo CreateXdotoolSearchStartInfo(
+        string xdotoolPath,
+        int processId,
+        string pattern,
+        LinuxProcessEnvironment processEnvironment)
     {
-        var startInfo = CreateXdotoolStartInfo(xdotoolPath, processId);
+        var startInfo = CreateXdotoolStartInfo(xdotoolPath, processEnvironment);
         startInfo.ArgumentList.Add("search");
         startInfo.ArgumentList.Add("--pid");
         startInfo.ArgumentList.Add(processId.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -185,9 +204,13 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         return startInfo;
     }
 
-    static ProcessStartInfo CreateXdotoolReloadStartInfo(string xdotoolPath, int processId, string windowId)
+    static ProcessStartInfo CreateXdotoolReloadStartInfo(
+        string xdotoolPath,
+        int processId,
+        string windowId,
+        LinuxProcessEnvironment processEnvironment)
     {
-        var startInfo = CreateXdotoolStartInfo(xdotoolPath, processId);
+        var startInfo = CreateXdotoolStartInfo(xdotoolPath, processEnvironment);
         startInfo.ArgumentList.Add("windowactivate");
         startInfo.ArgumentList.Add("--sync");
         startInfo.ArgumentList.Add(windowId);
@@ -196,7 +219,9 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         return startInfo;
     }
 
-    static ProcessStartInfo CreateXdotoolStartInfo(string xdotoolPath, int processId)
+    static ProcessStartInfo CreateXdotoolStartInfo(
+        string xdotoolPath,
+        LinuxProcessEnvironment processEnvironment)
     {
         var startInfo = new ProcessStartInfo(xdotoolPath)
         {
@@ -206,15 +231,15 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
             CreateNoWindow = true,
         };
 
-        var processPath = TryReadProcessEnvironmentValue(processId, "PATH");
-        if (!string.IsNullOrWhiteSpace(processPath))
-            startInfo.Environment["PATH"] = processPath;
+        if (!string.IsNullOrWhiteSpace(processEnvironment.Path))
+            startInfo.Environment["PATH"] = processEnvironment.Path;
 
-        var display = TryReadProcessEnvironmentValue(processId, "DISPLAY") ?? Environment.GetEnvironmentVariable("DISPLAY");
+        var display = processEnvironment.Display ?? Environment.GetEnvironmentVariable("DISPLAY");
         if (!string.IsNullOrWhiteSpace(display))
             startInfo.Environment["DISPLAY"] = display;
 
-        var xauthority = TryReadProcessEnvironmentValue(processId, "XAUTHORITY") ?? Environment.GetEnvironmentVariable("XAUTHORITY");
+        var xauthority = processEnvironment.XAuthority
+                         ?? Environment.GetEnvironmentVariable("XAUTHORITY");
         if (!string.IsNullOrWhiteSpace(xauthority))
             startInfo.Environment["XAUTHORITY"] = xauthority;
 
@@ -296,15 +321,33 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
         catch { }
     }
 
-    static string? TryReadProcessEnvironmentValue(int processId, string name)
+    static LinuxProcessEnvironment ReadProcessEnvironment(int processId)
     {
         if (!OperatingSystem.IsLinux())
-            return null;
+            return default;
 
         try
         {
             var bytes = File.ReadAllBytes($"/proc/{processId}/environ");
-            var prefix = Encoding.UTF8.GetBytes($"{name}=");
+            return new(
+                TryReadProcessEnvironmentValue(bytes, "PATH"),
+                TryReadProcessEnvironmentValue(bytes, "DISPLAY"),
+                TryReadProcessEnvironmentValue(bytes, "XAUTHORITY")
+            );
+        }
+        catch
+        {
+            return default;
+        }
+    }
+
+    static string? TryReadProcessEnvironmentValue(byte[] bytes, string name)
+    {
+        try
+        {
+            var nameByteCount = Encoding.UTF8.GetByteCount(name);
+            Span<byte> encodedName = stackalloc byte[nameByteCount];
+            Encoding.UTF8.GetBytes(name, encodedName);
             var offset = 0;
             while (offset < bytes.Length)
             {
@@ -313,9 +356,10 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
                     terminatorOffset = bytes.Length;
 
                 var length = terminatorOffset - offset;
-                if (length > prefix.Length
-                    && bytes.AsSpan(offset, prefix.Length).SequenceEqual(prefix))
-                    return Encoding.UTF8.GetString(bytes, offset + prefix.Length, length - prefix.Length);
+                if (length > nameByteCount
+                    && bytes[offset + nameByteCount] == (byte)'='
+                    && bytes.AsSpan(offset, nameByteCount).SequenceEqual(encodedName))
+                    return Encoding.UTF8.GetString(bytes, offset + nameByteCount + 1, length - nameByteCount - 1);
 
                 offset = terminatorOffset + 1;
             }
@@ -327,4 +371,9 @@ public sealed class UnitySceneReloadPromptRecovery(ILogger<UnitySceneReloadPromp
             return null;
         }
     }
+
+    readonly record struct LinuxProcessEnvironment(
+        string? Path,
+        string? Display,
+        string? XAuthority);
 }

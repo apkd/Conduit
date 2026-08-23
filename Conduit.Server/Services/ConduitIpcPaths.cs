@@ -5,8 +5,11 @@ namespace Conduit;
 static partial class ConduitIpcPaths
 {
     const string RelativeStatePath = "conduit/ipc/v1";
+    static readonly Lazy<string[]> discoveryRoots = new(CreateDiscoveryRoots);
 
-    public static string[] GetDiscoveryRoots()
+    public static string[] GetDiscoveryRoots() => discoveryRoots.Value;
+
+    static string[] CreateDiscoveryRoots()
     {
         if (Environment.GetEnvironmentVariable("CONDUIT_IPC_ROOT") is { Length: > 0 } configured)
             return [Path.GetFullPath(configured)];

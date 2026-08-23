@@ -64,7 +64,7 @@ namespace Conduit
 
         public static string Serialize(JsonDocument document)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             WriteValue(builder, document.Root, 0);
             builder.Append('\n');
             return builder.ToString();
@@ -72,17 +72,34 @@ namespace Conduit
 
         internal static string SerializeValue(JsonValue? value)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             WriteValue(builder, value, 0);
             return builder.ToString();
         }
 
         internal static string Quote(string value)
         {
-            var builder = new StringBuilder();
+            if (!RequiresEscaping(value))
+                return string.Concat("\"", value, "\"");
+
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(
+                out var builder,
+                value.Length + 2
+            );
             WriteString(builder, value);
             return builder.ToString();
+
+            static bool RequiresEscaping(string text)
+            {
+                foreach (var character in text)
+                    if (character is '\\' or '"' || char.IsControl(character))
+                        return true;
+
+                return false;
+            }
         }
+
+        internal static void AppendQuoted(StringBuilder builder, string value) => WriteString(builder, value);
 
         public static bool ContainsComments(string json)
         {
@@ -308,7 +325,7 @@ namespace Conduit
                     {
                         if (char.IsControl(character))
                             builder.Append("\\u")
-                                .Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
+                                .AppendInvariant((int)character, "x4");
                         else
                             builder.Append(character);
 
@@ -408,22 +425,28 @@ namespace Conduit
             string ParseString()
             {
                 Expect('"');
-                var builder = new StringBuilder();
+                var segmentStart = index;
+                StringBuilder? builder = null;
                 while (index < json.Length)
                 {
                     char character = json[index++];
                     if (character == '"')
+                    {
+                        if (builder == null)
+                            return json.Substring(segmentStart, index - segmentStart - 1);
+
+                        builder.Append(json, segmentStart, index - segmentStart - 1);
                         return builder.ToString();
+                    }
 
                     if (character != '\\')
-                    {
-                        builder.Append(character);
                         continue;
-                    }
 
                     if (index >= json.Length)
                         throw new InvalidOperationException("Unexpected end of JSON escape sequence.");
 
+                    builder ??= new();
+                    builder.Append(json, segmentStart, index - segmentStart - 1);
                     switch (json[index++])
                     {
                         case '"':
@@ -454,16 +477,22 @@ namespace Conduit
                             if (index + 4 > json.Length)
                                 throw new InvalidOperationException("Unexpected end of JSON unicode escape.");
 
-                            builder.Append((char)int.Parse(
-                                json[index..(index + 4)],
-                                NumberStyles.HexNumber,
-                                CultureInfo.InvariantCulture
-                            ));
+                            if (!ushort.TryParse(
+                                    json.AsSpan(index, 4),
+                                    NumberStyles.HexNumber,
+                                    CultureInfo.InvariantCulture,
+                                    out var codeUnit
+                                ))
+                                throw new InvalidOperationException("Invalid JSON unicode escape sequence.");
+
+                            builder.Append((char)codeUnit);
                             index += 4;
                             break;
                         default:
                             throw new InvalidOperationException("Invalid JSON escape sequence.");
                     }
+
+                    segmentStart = index;
                 }
 
                 throw new InvalidOperationException("Unexpected end of JSON string.");
@@ -501,11 +530,7 @@ namespace Conduit
             JsonValue ParseLiteral(string literal, JsonValue value)
             {
                 if (index + literal.Length > json.Length
-                    || !string.Equals(
-                        json[index..(index + literal.Length)],
-                        literal,
-                        StringComparison.Ordinal
-                    ))
+                    || string.CompareOrdinal(json, index, literal, 0, literal.Length) != 0)
                     throw new InvalidOperationException($"Expected '{literal}'.");
 
                 index += literal.Length;

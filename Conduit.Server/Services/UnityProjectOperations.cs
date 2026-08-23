@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Cysharp.Text;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using CT = System.Threading.CancellationToken;
@@ -41,6 +42,8 @@ public sealed class UnityProjectOperations(
 
     readonly ConcurrentDictionary<string, ProjectCommandQueue> queues
         = new(StringComparer.OrdinalIgnoreCase);
+
+    readonly Lock queueCreationGate = new();
 
     readonly ConcurrentDictionary<string, ProjectSession> playerSessions
         = new(StringComparer.Ordinal);
@@ -232,7 +235,7 @@ public sealed class UnityProjectOperations(
     ) =>
     [
         $"duration_seconds={durationSeconds.ToString(CultureInfo.InvariantCulture)}",
-        $"adjust_delta_time={adjustDeltaTime.ToString().ToLowerInvariant()}",
+        $"adjust_delta_time={(adjustDeltaTime ? "true" : "false")}",
         $"frame_rate={frameRate.ToString(CultureInfo.InvariantCulture)}",
         $"resolution_scale={resolutionScale.ToString(CultureInfo.InvariantCulture)}",
         $"format={format}",
@@ -601,7 +604,7 @@ public sealed class UnityProjectOperations(
                 $"depth={depth}",
                 $"sort={sort.ToWireName()}",
                 $"limit={limit}",
-                $"only_non_trivial={onlyNonTrivial.ToString().ToLowerInvariant()}",
+                $"only_non_trivial={(onlyNonTrivial ? "true" : "false")}",
             ],
         },
         ct
@@ -630,14 +633,7 @@ public sealed class UnityProjectOperations(
         if (blockedResult is { } preparationResult)
             return preparationResult;
 
-        var queue = queues.GetOrAdd(
-            session.ProjectPath,
-            _ => new(
-                loggerFactory.CreateLogger<ProjectCommandQueue>(),
-                ExecuteQueuedCommandAsync,
-                applicationLifetime.ApplicationStopping
-            )
-        );
+        var queue = GetOrCreateEditorQueue(session.ProjectPath);
 
         var commandTimeout = UnityToolTimeouts.ForCommand(BridgeCommandKinds.Parse(command.CommandType));
 
@@ -735,14 +731,7 @@ public sealed class UnityProjectOperations(
             };
 
         var session = playerSessions.GetOrAdd(playerTarget, static target => new(target));
-        var queue = queues.GetOrAdd(
-            playerTarget,
-            _ => new(
-                loggerFactory.CreateLogger<ProjectCommandQueue>(),
-                ExecuteQueuedPlayerCommandAsync,
-                applicationLifetime.ApplicationStopping
-            )
-        );
+        var queue = GetOrCreatePlayerQueue(playerTarget);
         var commandTimeout = UnityToolTimeouts.ForCommand(
             BridgeCommandKinds.Parse(command.CommandType)
         );
@@ -803,6 +792,46 @@ public sealed class UnityProjectOperations(
         finally
         {
             queuedCommand.Session.FinishCommand(context.RequestId, reachable);
+        }
+    }
+
+    ProjectCommandQueue GetOrCreateEditorQueue(string projectPath)
+    {
+        if (queues.TryGetValue(projectPath, out var queue))
+            return queue;
+
+        lock (queueCreationGate)
+        {
+            if (queues.TryGetValue(projectPath, out queue))
+                return queue;
+
+            queue = new(
+                loggerFactory.CreateLogger<ProjectCommandQueue>(),
+                ExecuteQueuedCommandAsync,
+                applicationLifetime.ApplicationStopping
+            );
+            queues[projectPath] = queue;
+            return queue;
+        }
+    }
+
+    ProjectCommandQueue GetOrCreatePlayerQueue(string playerTarget)
+    {
+        if (queues.TryGetValue(playerTarget, out var queue))
+            return queue;
+
+        lock (queueCreationGate)
+        {
+            if (queues.TryGetValue(playerTarget, out queue))
+                return queue;
+
+            queue = new(
+                loggerFactory.CreateLogger<ProjectCommandQueue>(),
+                ExecuteQueuedPlayerCommandAsync,
+                applicationLifetime.ApplicationStopping
+            );
+            queues[playerTarget] = queue;
+            return queue;
         }
     }
 
@@ -1139,13 +1168,15 @@ public sealed class UnityProjectOperations(
 
         try
         {
-            while (players.Any(IsLive))
+            while (AnyLive(players))
                 await Task.Delay(TimeSpan.FromMilliseconds(100), timeProvider, shutdownCts.Token);
         }
         catch (OperationCanceledException) when (shutdownCts.IsCancellationRequested) { }
 
-        foreach (var player in players.Where(IsLive))
-            failures.Add($"{player.Selector}: the player did not exit within 15 seconds");
+        var remainingPlayers = playerDiscovery.Discover();
+        foreach (var player in players)
+            if (IsInSnapshot(player, remainingPlayers))
+                failures.Add($"{player.Selector}: the player did not exit within 15 seconds");
 
         if (failures.Count > 0)
             testResult.Diagnostic = string.Join(
@@ -1154,12 +1185,33 @@ public sealed class UnityProjectOperations(
                     .Where(static value => !string.IsNullOrWhiteSpace(value))
             );
 
-        bool IsLive(BridgeEndpointDescriptor endpoint) => playerDiscovery.Discover()
-            .Any(candidate => string.Equals(
-                candidate.SessionInstanceId,
-                endpoint.SessionInstanceId,
-                StringComparison.Ordinal
-            ));
+        bool IsLive(BridgeEndpointDescriptor endpoint)
+            => IsInSnapshot(endpoint, playerDiscovery.Discover());
+
+        bool AnyLive(IReadOnlyList<BridgeEndpointDescriptor> expected)
+        {
+            var live = playerDiscovery.Discover();
+            foreach (var endpoint in expected)
+                if (IsInSnapshot(endpoint, live))
+                    return true;
+
+            return false;
+        }
+
+        static bool IsInSnapshot(
+            BridgeEndpointDescriptor endpoint,
+            IReadOnlyList<BridgeEndpointDescriptor> live)
+        {
+            foreach (var candidate in live)
+                if (string.Equals(
+                        candidate.SessionInstanceId,
+                        endpoint.SessionInstanceId,
+                        StringComparison.Ordinal
+                    ))
+                    return true;
+
+            return false;
+        }
     }
 
     internal static ToolExecutionResult ToToolExecutionResult(
@@ -1538,18 +1590,29 @@ public sealed class UnityProjectOperations(
 
     static string AppendLivePlayers(
         string report,
-        IReadOnlyCollection<BridgeEndpointDescriptor> players)
+        BridgeEndpointDescriptor[] players)
     {
-        if (players.Count == 0)
+        if (players.Length == 0)
             return report;
 
-        var builder = new System.Text.StringBuilder(report.TrimEnd());
-        foreach (var player in players
-                     .OrderBy(static value => value.ProcessId)
-                     .ThenBy(static value => value.SessionInstanceId, StringComparer.Ordinal))
+        Array.Sort(players, static (left, right) =>
         {
-            builder.Append("\nLive player detected: ")
-                .Append(PlayerSelector.Format(player.ProcessId));
+            var processId = left.ProcessId.CompareTo(right.ProcessId);
+            return processId != 0
+                ? processId
+                : string.Compare(
+                    left.SessionInstanceId,
+                    right.SessionInstanceId,
+                    StringComparison.Ordinal
+                );
+        });
+
+        using var builder = ZString.CreateStringBuilder();
+        builder.Append(report.AsSpan().TrimEnd());
+        foreach (var player in players)
+        {
+            builder.Append("\nLive player detected: player:");
+            builder.Append(player.ProcessId);
         }
 
         return builder.ToString();

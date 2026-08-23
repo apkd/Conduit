@@ -8,7 +8,13 @@ namespace Conduit
     /// <summary>Provides process facts shared by Editor and player status reports.</summary>
     static class BridgeStatusUtility
     {
-        public static readonly int ProcessId = Process.GetCurrentProcess().Id;
+        public static readonly int ProcessId = GetProcessId();
+
+        static int GetProcessId()
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.Id;
+        }
 
         public static string FormatDuration(TimeSpan duration)
         {

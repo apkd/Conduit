@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace Conduit
 {
@@ -43,21 +44,25 @@ namespace Conduit
         static T FindSingleType<T>(IReadOnlyList<Type> index, ReflectMode mode, string typeQuery, string? memberQuery) where T : class
         {
             var normalizedMember = NormalizeQuery(memberQuery);
-            var candidates = new List<Type>();
-            foreach (var type in index)
-                if (MatchesTypeKind(type, mode.TypeKind))
-                    candidates.Add(type);
-
             // singular type lookup keeps the report tool's exact-name precedence before substring matches.
-            var match = MatchSingleType(candidates, typeQuery);
-            if (match.Kind == TypeMatchKind.Ambiguous)
-                throw new InvalidOperationException(TypeCandidates($"Multiple reflected results match {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.", match.Candidates));
+            var match = reflect.MatchSingleType(index, typeQuery, mode.TypeKind);
 
-            if (match.Kind == TypeMatchKind.None
-                || (normalizedMember.Length > 0 && !TypeDeclaresMatchingMember(match.Type!, ReflectMemberKind.None, normalizedMember)))
+            if (match.Kind == TypeMatchKind.Ambiguous)
+                throw new InvalidOperationException(TypeCandidates(
+                    $"Multiple reflected results match {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.",
+                    match.Candidates,
+                    match.CandidateCount
+                ));
+
+            if (match.Kind == TypeMatchKind.None)
                 throw new InvalidOperationException($"No reflected result matched {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.");
 
-            return (T)(object)match.Type!;
+            var type = match.Type!;
+            if (normalizedMember.Length > 0
+                && !TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember))
+                throw new InvalidOperationException($"No reflected result matched {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.");
+
+            return (T)(object)type;
         }
 
         static T[] FindTypes<T>(IReadOnlyList<Type> index, ReflectMode mode, string? typeQuery, string? memberQuery) where T : class
@@ -67,23 +72,58 @@ namespace Conduit
             if (normalizedType.Length == 0 && normalizedMember.Length == 0)
                 throw new InvalidOperationException("reflect type modes require `type` or `member`.");
 
+            var typeNameQuery = new TypeNameQuery(normalizedType);
+            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Length > 0
+                ? reflect.FindTypesDeclaringMatchingMember(index, normalizedMember)
+                : null;
             var matches = new List<Type>();
-            foreach (var type in index)
+            var workerCount = reflect.GetParallelScanWorkerCount(index.Count);
+            if (workerCount == 1)
+                AppendRange(0, index.Count, matches);
+            else
             {
-                if (!MatchesTypeKind(type, mode.TypeKind))
-                    continue;
+                // contiguous worker ranges retain the sorted type order required by the helper API.
+                var workerMatches = new List<Type>[workerCount];
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new List<Type>();
+                    var start = (int)((long)index.Count * workerIndex / workerCount);
+                    var end = (int)((long)index.Count * (workerIndex + 1) / workerCount);
+                    AppendRange(start, end, localMatches);
+                    workerMatches[workerIndex] = localMatches;
+                });
 
-                if (normalizedType.Length > 0 && !MatchesType(type, normalizedType))
-                    continue;
-
-                if (normalizedMember.Length > 0 && !TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember))
-                    continue;
-
-                matches.Add(type);
+                var matchCount = 0;
+                foreach (var workerResult in workerMatches)
+                    matchCount += workerResult.Count;
+                matches.Capacity = matchCount;
+                foreach (var workerResult in workerMatches)
+                    matches.AddRange(workerResult);
             }
 
-            SortTypes(matches);
+            // filtering the sorted type index preserves its deterministic output order.
             return CastResults<T, Type>(matches);
+
+            void AppendRange(int start, int end, List<Type> destination)
+            {
+                for (var position = start; position < end; position++)
+                {
+                    var type = index[position];
+                    if (!reflect.MatchesTypeKind(index, position, mode.TypeKind))
+                        continue;
+
+                    if (normalizedType.Length > 0
+                        && !reflect.MatchesTypeName(index, position, typeNameQuery))
+                        continue;
+
+                    if (normalizedMember.Length > 0
+                        && !(declaringTypes?.Contains(type)
+                             ?? TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember)))
+                        continue;
+
+                    destination.Add(type);
+                }
+            }
         }
 
         static T[] FindMembers<T>(IReadOnlyList<Type> index, ReflectMode mode, string? typeQuery, string? memberQuery) where T : class
@@ -94,12 +134,11 @@ namespace Conduit
                 throw new InvalidOperationException("reflect member modes require `type` or `member`.");
 
             var effectiveKind = GetEffectiveMemberKind<T>(mode.MemberKind);
-            var matches = new List<MemberInfo>();
-            if (normalizedType.Length > 0)
-                CollectTypeScopedMembers(index, normalizedType, normalizedMember, effectiveKind, matches);
-            else
-                CollectWideMembers(index, normalizedMember, effectiveKind, matches);
+            if (normalizedType.Length == 0)
+                return CollectWideMembers<T>(index, normalizedMember, effectiveKind);
 
+            var matches = new List<MemberInfo>();
+            CollectTypeScopedMembers(index, normalizedType, normalizedMember, effectiveKind, matches);
             SortMembers(matches);
             return CastResults<T, MemberInfo>(matches);
         }
@@ -112,12 +151,16 @@ namespace Conduit
             List<MemberInfo> matches
         )
         {
-            var match = MatchSingleType(index, typeQuery);
+            var match = reflect.MatchSingleType(index, typeQuery);
             if (match.Kind == TypeMatchKind.None)
                 throw new InvalidOperationException($"No type matched '{typeQuery}'.");
 
             if (match.Kind == TypeMatchKind.Ambiguous)
-                throw new InvalidOperationException(TypeCandidates($"Multiple types match '{typeQuery}'. Rerun with a full type name or 'Full.Type.Name, AssemblyName'.", match.Candidates));
+                throw new InvalidOperationException(TypeCandidates(
+                    $"Multiple types match '{typeQuery}'. Rerun with a full type name or 'Full.Type.Name, AssemblyName'.",
+                    match.Candidates,
+                    match.CandidateCount
+                ));
 
             var target = match.Type!;
             CollectDeclaredMembers(target, kind, memberQuery, matches);
@@ -133,16 +176,193 @@ namespace Conduit
                 CollectDeclaredMembers(interfaceType, kind, memberQuery, matches);
         }
 
-        static void CollectWideMembers(
+        static T[] CollectWideMembers<T>(
             IReadOnlyList<Type> index,
             string memberQuery,
-            ReflectMemberKind kind,
-            List<MemberInfo> matches
-        )
+            ReflectMemberKind kind)
+            where T : class
         {
             // wide searches stay declared-only so the same inherited method is reported once per declaring type.
-            foreach (var type in index)
-                CollectDeclaredMembers(type, kind, memberQuery, matches);
+            var includeAccessors = reflect.IsAccessorQuery(memberQuery);
+            var matches = new List<WideMemberIndexEntry>();
+            var matchesByKind = kind == ReflectMemberKind.None
+                ? new[]
+                {
+                    new List<WideMemberIndexEntry>(),
+                    new List<WideMemberIndexEntry>(),
+                    new List<WideMemberIndexEntry>(),
+                    new List<WideMemberIndexEntry>(),
+                }
+                : null;
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
+                Append(ReflectMemberKind.Field, matchesByKind?[0] ?? matches);
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
+                Append(ReflectMemberKind.Property, matchesByKind?[1] ?? matches);
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
+            {
+                var methodMatches = matchesByKind?[2] ?? matches;
+                Append(ReflectMemberKind.Method, methodMatches);
+                if (includeAccessors)
+                {
+                    var accessorMatches = new List<WideMemberIndexEntry>();
+                    Append(
+                        ReflectMemberKind.Method,
+                        accessorMatches,
+                        accessorsOnly: true
+                    );
+                    methodMatches = MergeSortedMatches(methodMatches, accessorMatches);
+                    if (matchesByKind == null)
+                        matches = methodMatches;
+                    else
+                        matchesByKind[2] = methodMatches;
+                }
+            }
+            if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
+                Append(ReflectMemberKind.Constructor, matchesByKind?[3] ?? matches);
+
+            var matchCount = matches.Count;
+            if (matchesByKind != null)
+                foreach (var values in matchesByKind)
+                    matchCount += values.Count;
+            if (matchCount == 0)
+                return Array.Empty<T>();
+
+            var results = new T[matchCount];
+            if (matchesByKind == null)
+                for (var resultIndex = 0; resultIndex < matches.Count; ++resultIndex)
+                    results[resultIndex] = (T)(object)matches[resultIndex].Member;
+            else
+                MergeMatches(results, matchesByKind);
+            return results;
+
+            void Append(
+                ReflectMemberKind memberKind,
+                List<WideMemberIndexEntry> destination,
+                bool accessorsOnly = false)
+            {
+                var members = reflect.GetWideMemberIndex(index, memberKind, accessorsOnly);
+                var segments = members.Segments;
+                var entryCount = 0;
+                foreach (var segment in segments)
+                    entryCount += segment.Entries.Length;
+
+                var workerCount = reflect.GetParallelScanWorkerCount(entryCount);
+                if (workerCount == 1)
+                {
+                    AppendRange(0, entryCount, destination);
+                    return;
+                }
+
+                // logical entry ranges balance large assemblies while preserving index order on merge.
+                var workerMatches = new List<WideMemberIndexEntry>[workerCount];
+                Parallel.For(0, workerCount, workerIndex =>
+                {
+                    var localMatches = new List<WideMemberIndexEntry>();
+                    var start = (int)((long)entryCount * workerIndex / workerCount);
+                    var end = (int)((long)entryCount * (workerIndex + 1) / workerCount);
+                    AppendRange(start, end, localMatches);
+                    workerMatches[workerIndex] = localMatches;
+                });
+
+                var matchCount = destination.Count;
+                foreach (var workerResult in workerMatches)
+                    matchCount += workerResult.Count;
+                if (destination.Capacity < matchCount)
+                    destination.Capacity = matchCount;
+                foreach (var workerResult in workerMatches)
+                    destination.AddRange(workerResult);
+
+                void AppendRange(
+                    int start,
+                    int end,
+                    List<WideMemberIndexEntry> rangeMatches)
+                {
+                    var segmentStart = 0;
+                    foreach (var segment in segments)
+                    {
+                        var segmentEnd = segmentStart + segment.Entries.Length;
+                        if (segmentEnd <= start)
+                        {
+                            segmentStart = segmentEnd;
+                            continue;
+                        }
+                        if (segmentStart >= end)
+                            return;
+
+                        var first = Math.Max(0, start - segmentStart);
+                        var last = Math.Min(segment.Entries.Length, end - segmentStart);
+                        for (var entryIndex = first; entryIndex < last; entryIndex++)
+                        {
+                            var member = segment.Entries[entryIndex];
+                            if (MatchesMember(member, memberQuery))
+                                rangeMatches.Add(member);
+                        }
+
+                        segmentStart = segmentEnd;
+                    }
+                }
+            }
+
+            static List<WideMemberIndexEntry> MergeSortedMatches(
+                List<WideMemberIndexEntry> left,
+                List<WideMemberIndexEntry> right)
+            {
+                if (left.Count == 0)
+                    return right;
+                if (right.Count == 0)
+                    return left;
+
+                var merged = new List<WideMemberIndexEntry>(left.Count + right.Count);
+                var leftIndex = 0;
+                var rightIndex = 0;
+                while (leftIndex < left.Count && rightIndex < right.Count)
+                    merged.Add(reflect.CompareWideMemberEntries(
+                        left[leftIndex],
+                        right[rightIndex]
+                    ) <= 0
+                        ? left[leftIndex++]
+                        : right[rightIndex++]);
+
+                while (leftIndex < left.Count)
+                    merged.Add(left[leftIndex++]);
+                while (rightIndex < right.Count)
+                    merged.Add(right[rightIndex++]);
+                return merged;
+            }
+
+            static void MergeMatches(T[] destination, List<WideMemberIndexEntry>[] sources)
+            {
+                var positions = new int[sources.Length];
+                var destinationIndex = 0;
+                while (destinationIndex < destination.Length)
+                {
+                    Type? nextType = null;
+                    for (var sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
+                    {
+                        if (positions[sourceIndex] == sources[sourceIndex].Count)
+                            continue;
+
+                        var declaringType = sources[sourceIndex][positions[sourceIndex]].DeclaringType;
+                        if (nextType == null || reflect.CompareTypes(declaringType, nextType) < 0)
+                            nextType = declaringType;
+                    }
+
+                    for (var sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
+                    {
+                        var source = sources[sourceIndex];
+                        while (positions[sourceIndex] < source.Count)
+                        {
+                            var entry = source[positions[sourceIndex]];
+                            if (!ReferenceEquals(entry.DeclaringType, nextType)
+                                && reflect.CompareTypes(entry.DeclaringType, nextType) != 0)
+                                break;
+
+                            destination[destinationIndex++] = (T)(object)entry.Member;
+                            positions[sourceIndex]++;
+                        }
+                    }
+                }
+            }
         }
 
         static void CollectDeclaredMembers(Type type, ReflectMemberKind kind, string memberQuery, List<MemberInfo> matches)
@@ -284,71 +504,54 @@ namespace Conduit
             }
         }
 
-        static bool MatchesTypeKind(Type type, ReflectTypeKind kind)
-            => kind switch
-            {
-                ReflectTypeKind.Any       => true,
-                ReflectTypeKind.Class     => type.IsClass && !typeof(Delegate).IsAssignableFrom(type),
-                ReflectTypeKind.Struct    => type.IsValueType && !type.IsEnum,
-                ReflectTypeKind.Enum      => type.IsEnum,
-                ReflectTypeKind.Interface => type.IsInterface,
-                ReflectTypeKind.Delegate  => type.IsSubclassOf(typeof(MulticastDelegate)),
-                _                         => true,
-            };
-
         static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, string memberQuery)
-        {
-            var matches = new List<MemberInfo>();
-            CollectDeclaredMembers(type, kind, memberQuery, matches);
-            return matches.Count > 0;
-        }
+            => reflect.TypeDeclaresMatchingMember(type, kind, memberQuery);
 
         static FieldInfo[] GetFields(Type type)
-            => type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+            => reflect.GetFields(type);
 
         static PropertyInfo[] GetProperties(Type type)
-            => type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+            => reflect.GetProperties(type);
 
-        static MethodInfo[] GetMethods(Type type, string memberQuery)
-        {
-            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-            var filtered = new List<MethodInfo>();
-            foreach (var method in methods)
-                if (IsAccessorQuery(memberQuery) || !IsPropertyOrEventAccessor(method))
-                    filtered.Add(method);
-
-            return filtered.ToArray();
-        }
-
-        static bool IsAccessorQuery(string memberQuery)
-            => memberQuery.StartsWith("get_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("set_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("add_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("remove_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("raise_", StringComparison.OrdinalIgnoreCase);
+        static MethodInfo[] GetMethods(Type type, string memberQuery) => reflect.GetMethods(type, memberQuery);
 
         static ConstructorInfo[] GetConstructors(Type type)
-            => type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+            => reflect.GetConstructors(type);
 
         static bool MatchesMember(MemberInfo member, string query)
             => MemberMatchRank(member, query) < int.MaxValue;
 
+        static bool MatchesMember(WideMemberIndexEntry member, string query)
+            => MemberMatchRank(
+                member.Name,
+                member.DeclaringType,
+                member.Member is ConstructorInfo,
+                query
+            ) < int.MaxValue;
+
         static int MemberMatchRank(MemberInfo member, string query)
+            => MemberMatchRank(
+                member.Name,
+                member.DeclaringType ?? typeof(object),
+                member is ConstructorInfo,
+                query
+            );
+
+        static int MemberMatchRank(
+            string memberName,
+            Type declaringType,
+            bool isConstructor,
+            string query)
         {
             if (query.Length == 0)
                 return 0;
 
-            if (string.Equals(member.Name, query, StringComparison.OrdinalIgnoreCase))
-                return 0;
+            var nameRank = TextMatchRank(memberName, query);
+            if (nameRank < int.MaxValue)
+                return nameRank;
 
-            if (member.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
-                return 1;
-
-            if (Contains(member.Name, query))
-                return 2;
-
-            if (member is ConstructorInfo constructor && constructor.DeclaringType != null)
-                return ConstructorMatchRank(constructor.DeclaringType, query);
+            if (isConstructor)
+                return ConstructorMatchRank(declaringType, query);
 
             return int.MaxValue;
         }
@@ -360,69 +563,18 @@ namespace Conduit
                 return 0;
 
             var shortName = ShortTypeName(declaringType);
-            if (string.Equals(shortName, query, StringComparison.OrdinalIgnoreCase))
-                return 0;
-
-            if (shortName.StartsWith(query, StringComparison.OrdinalIgnoreCase))
-                return 1;
-
-            return Contains(shortName, query) ? 2 : int.MaxValue;
+            return TextMatchRank(shortName, query);
         }
 
-        static bool MatchesType(Type type, string query)
-            => Contains(type.FullName ?? type.Name, query)
-               || Contains(type.Name, query)
-               || Contains(DisplayTypeName(type, includeNamespace: false), query)
-               || Contains(DisplayTypeName(type, includeNamespace: true), query)
-               || Contains($"{type.FullName}, {type.Assembly.GetName().Name}", query);
-
-        static TypeMatch MatchSingleType(IReadOnlyList<Type> index, string query)
+        static int TextMatchRank(string value, string query)
         {
-            var exactQualified = FindTypes(index, type => string.Equals($"{type.FullName}, {type.Assembly.GetName().Name}", query, StringComparison.OrdinalIgnoreCase));
-            if (exactQualified.Count > 0)
-                return SelectTypeMatch(exactQualified);
-
-            var exactFullName = FindTypes(index, type => string.Equals(type.FullName, query, StringComparison.OrdinalIgnoreCase));
-            if (exactFullName.Count > 0)
-                return SelectTypeMatch(exactFullName);
-
-            var exactDisplayName = FindTypes(index, type => string.Equals(DisplayTypeName(type, includeNamespace: true), query, StringComparison.OrdinalIgnoreCase)
-                                                            || string.Equals(DisplayTypeName(type, includeNamespace: false), query, StringComparison.OrdinalIgnoreCase));
-            if (exactDisplayName.Count > 0)
-                return SelectTypeMatch(exactDisplayName);
-
-            var contains = FindTypes(index, type => MatchesType(type, query));
-            if (contains.Count == 0)
-                return TypeMatch.None();
-
-            return SelectTypeMatch(contains);
+            var offset = value.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (offset < 0)
+                return int.MaxValue;
+            if (offset > 0)
+                return 2;
+            return value.Length == query.Length ? 0 : 1;
         }
-
-        static TypeMatch SelectTypeMatch(List<Type> matches)
-        {
-            SortTypes(matches);
-            return matches.Count == 1
-                ? TypeMatch.Matched(matches[0])
-                : TypeMatch.Ambiguous(matches);
-        }
-
-        static List<Type> FindTypes(IReadOnlyList<Type> index, Func<Type, bool> predicate)
-        {
-            var matches = new List<Type>();
-            foreach (var type in index)
-                if (predicate(type))
-                    matches.Add(type);
-
-            return matches;
-        }
-
-        static bool IsPropertyOrEventAccessor(MethodInfo method)
-            => method.IsSpecialName
-               && (method.Name.StartsWith("get_", StringComparison.Ordinal)
-                   || method.Name.StartsWith("set_", StringComparison.Ordinal)
-                   || method.Name.StartsWith("add_", StringComparison.Ordinal)
-                   || method.Name.StartsWith("remove_", StringComparison.Ordinal)
-                   || method.Name.StartsWith("raise_", StringComparison.Ordinal));
 
         static string DisplayTypeName(Type type, bool includeNamespace)
         {
@@ -435,7 +587,7 @@ namespace Conduit
                 definitionName = definitionName[..tick];
 
             var arguments = type.GetGenericArguments();
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             builder.Append(definitionName);
             builder.Append('<');
             for (var index = 0; index < arguments.Length; index++)
@@ -453,13 +605,11 @@ namespace Conduit
         static string PlainTypeName(Type type, bool includeNamespace)
         {
             var name = includeNamespace
-                ? type.FullName ?? type.Name
-                : type.Name;
+                ? reflect.GetFullTypeName(type)
+                : reflect.GetTypeName(type);
 
             return name.Replace('+', '.');
         }
-
-        static void SortTypes(List<Type> types) => types.Sort(CompareTypes);
 
         static void SortMembers(List<MemberInfo> members) => members.Sort(CompareMembers);
 
@@ -484,13 +634,7 @@ namespace Conduit
         }
 
         static int CompareTypes(Type? left, Type? right)
-        {
-            var assembly = string.Compare(left?.Assembly.GetName().Name, right?.Assembly.GetName().Name, StringComparison.Ordinal);
-            if (assembly != 0)
-                return assembly;
-
-            return string.Compare(left?.FullName ?? left?.Name, right?.FullName ?? right?.Name, StringComparison.Ordinal);
-        }
+            => reflect.CompareTypes(left, right);
 
         static ReflectMemberKind GetMemberKind(MemberInfo member)
             => member switch
@@ -503,14 +647,20 @@ namespace Conduit
             };
 
         static string FormatResultCandidates<T>(string header, IReadOnlyList<T> candidates) where T : class
+            => FormatResultCandidates(header, candidates, candidates.Count);
+
+        static string FormatResultCandidates<T>(
+            string header,
+            IReadOnlyList<T> candidates,
+            int candidateCount) where T : class
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             builder.AppendLine(header);
             builder.AppendLine("Candidates:");
             for (var index = 0; index < candidates.Count && index < MaxCandidates; index++)
                 builder.AppendLine("- " + FormatCandidate(candidates[index]));
 
-            AppendTruncation(builder, candidates.Count, MaxCandidates, "candidates");
+            AppendTruncation(builder, candidateCount, MaxCandidates, "candidates");
             return Trimmed(builder);
         }
 
@@ -522,8 +672,11 @@ namespace Conduit
                 _                 => candidate.ToString() ?? string.Empty,
             };
 
-        static string TypeCandidates(string header, IReadOnlyList<Type> candidates)
-            => FormatResultCandidates(header, candidates);
+        static string TypeCandidates(
+            string header,
+            IReadOnlyList<Type> candidates,
+            int candidateCount)
+            => FormatResultCandidates(header, candidates, candidateCount);
 
         static void AppendTruncation(System.Text.StringBuilder builder, int count, int maxRows, string label)
         {
@@ -542,7 +695,7 @@ namespace Conduit
         {
             var normalizedType = NormalizeQuery(type);
             var normalizedMember = NormalizeQuery(member);
-            var builder = new StringBuilder();
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             builder.Append("reflect query mode='");
             builder.Append(NormalizeQuery(mode));
             builder.Append('\'');
@@ -592,8 +745,7 @@ namespace Conduit
         static bool Contains(string value, string query)
             => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
-        static string ShortTypeName(Type type)
-            => DisplayTypeName(type, includeNamespace: false);
+        static string ShortTypeName(Type type) => reflect.GetShortTypeName(type);
 
         static string Trimmed(StringBuilder builder)
         {

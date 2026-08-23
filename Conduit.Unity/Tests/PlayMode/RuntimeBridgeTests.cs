@@ -157,6 +157,10 @@ public sealed class RuntimeBridgeTests
                 ),
                 Is.SameAs(gameObject.GetComponent<Camera>())
             );
+            Assert.That(
+                ConduitRuntimeSearch.Search<Camera>("Conduit Runtime Camera"),
+                Is.SameAs(gameObject.GetComponent<Camera>())
+            );
         }
         finally
         {
@@ -211,9 +215,13 @@ public sealed class RuntimeBridgeTests
                 objects.Add(new GameObject("Conduit Runtime Truncation"));
 
             var matches = ConduitRuntimeSearch.ResolveMany("Conduit Runtime Truncation");
-            var output = ConduitRuntimeSearch.FormatMatches(matches, includeHint: false);
+            var displayMatches = ConduitRuntimeSearch.ResolveManyForDisplay(
+                "Conduit Runtime Truncation"
+            );
+            var output = ConduitRuntimeSearch.FormatMatches(displayMatches, includeHint: false);
 
             Assert.That(matches.Count, Is.GreaterThanOrEqualTo(30));
+            Assert.That(displayMatches.Count, Is.LessThan(matches.Count));
             Assert.That(output, Does.Contain("Showing the first 25 results; additional matches were omitted."));
         }
         finally
@@ -349,6 +357,13 @@ public sealed class RuntimeBridgeTests
         Assert.That(bounded, Does.Contain("…"));
         Assert.That(bounded, Does.Not.Contain("1024"));
     }
+
+    [Test]
+    public void SharedValueFormatterTreatsNestedStringsAsScalarValues()
+        => Assert.That(
+            BridgeValueFormatter.Format(new[] { "alpha", "beta" }),
+            Is.EqualTo("[alpha, beta]")
+        );
 
     [Test]
     public void SharedLogCaptureDeduplicatesAndUsesCommandLogFormat()

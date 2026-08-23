@@ -6,10 +6,22 @@ namespace Conduit
 {
     static class ConduitPaths
     {
+        static readonly string diagnosticsLogPath = Path.Combine(
+            Path.GetTempPath(),
+            "Conduit",
+            ConduitProjectIdentity.GetPipeName(),
+            "conduit-client.log"
+        );
+        static readonly string referenceCachePath = Path.Combine(
+            ConduitAssetPathUtility.GetProjectRootPath(),
+            "Library",
+            "Conduit.ReferenceCache.json"
+        );
+
         public static string GetDiagnosticsLogPath()
-            => Path.Combine(Path.GetTempPath(), "Conduit", ConduitProjectIdentity.GetPipeName(), "conduit-client.log");
+            => diagnosticsLogPath;
 
         public static string GetReferenceCachePath()
-            => Path.Combine(ConduitAssetPathUtility.GetProjectRootPath(), "Library", "Conduit.ReferenceCache.json");
+            => referenceCachePath;
     }
 }

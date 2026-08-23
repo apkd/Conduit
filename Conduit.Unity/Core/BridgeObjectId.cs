@@ -1,5 +1,6 @@
 #nullable enable
 
+using System;
 using System.Globalization;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -26,18 +27,76 @@ namespace Conduit
 #endif
         }
 
+        public static Object? Resolve(ulong objectId)
+        {
+#if UNITY_6000_4_OR_NEWER
+            var entityId = EntityId.FromULong(objectId);
+            return entityId.IsValid() ? Resources.EntityIdToObject(entityId) : null;
+#else
+            return Resources.InstanceIDToObject(unchecked((int)objectId));
+#endif
+        }
+
         public static string Format(Object target) => Format(Get(target));
 
         public static string Format(ulong objectId)
         {
 #if UNITY_6000_4_OR_NEWER
-            return Prefix + objectId.ToString(CultureInfo.InvariantCulture);
+            var length = CountDigits(objectId);
+            return string.Create(Prefix.Length + length, objectId, (destination, value) =>
+            {
+                Prefix.AsSpan().CopyTo(destination);
+                value.TryFormat(
+                    destination.Slice(Prefix.Length),
+                    out _,
+                    provider: CultureInfo.InvariantCulture
+                );
+            });
 #else
-            return Prefix + unchecked((int)objectId).ToString(CultureInfo.InvariantCulture);
+            var signedObjectId = unchecked((int)objectId);
+            var length = CountDigits(signedObjectId);
+            return string.Create(Prefix.Length + length, signedObjectId, (destination, value) =>
+            {
+                Prefix.AsSpan().CopyTo(destination);
+                value.TryFormat(
+                    destination.Slice(Prefix.Length),
+                    out _,
+                    provider: CultureInfo.InvariantCulture
+                );
+            });
 #endif
         }
 
+#if UNITY_6000_4_OR_NEWER
+        static int CountDigits(ulong value)
+#else
+        static int CountDigits(int value)
+#endif
+        {
+#if !UNITY_6000_4_OR_NEWER
+            var negative = value < 0;
+            var magnitude = negative ? unchecked((uint)-(long)value) : (uint)value;
+#else
+            var magnitude = value;
+#endif
+            var count = 1;
+            while (magnitude >= 10)
+            {
+                magnitude /= 10;
+                count++;
+            }
+
+#if !UNITY_6000_4_OR_NEWER
+            if (negative)
+                count++;
+#endif
+            return count;
+        }
+
         public static bool TryParse(string value, out ulong objectId)
+            => TryParse(value.AsSpan(), out objectId);
+
+        public static bool TryParse(ReadOnlySpan<char> value, out ulong objectId)
         {
 #if UNITY_6000_4_OR_NEWER
             return ulong.TryParse(

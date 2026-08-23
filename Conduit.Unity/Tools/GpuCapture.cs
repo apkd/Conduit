@@ -149,8 +149,7 @@ namespace Conduit
             try
             {
                 RenderTexture.active = source;
-                texture.ReadPixels(new(0f, 0f, source.width, source.height), 0, 0);
-                texture.Apply(updateMipmaps: false, makeNoLongerReadable: false);
+                texture.ReadPixels(new(0f, 0f, source.width, source.height), 0, 0); // encoding reads CPU pixels; no GPU upload is needed
                 var encoded = texture.EncodeToJPG(quality);
                 using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
                 stream.Write(encoded);

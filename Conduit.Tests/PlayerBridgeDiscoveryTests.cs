@@ -108,6 +108,34 @@ public sealed class PlayerBridgeDiscoveryTests
     }
 
     [Test]
+    public async Task DiscoveryObservesAnUpdatedEndpointDescriptor()
+    {
+        var now = new DateTimeOffset(2026, 7, 31, 10, 0, 0, TimeSpan.Zero);
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            WriteEndpoint(root, "player", Endpoint(101, "player", now));
+            var discovery = new UnityPlayerDiscovery(
+                new FakeTimeProvider(now),
+                () => [root]
+            );
+            var initial = discovery.Discover();
+
+            WriteEndpoint(root, "player", Endpoint(202, "player", now));
+            var descriptorPath = Path.Combine(root, "endpoints", "player", "endpoint.json");
+            File.SetLastWriteTimeUtc(descriptorPath, File.GetLastWriteTimeUtc(descriptorPath).AddSeconds(1));
+            var updated = discovery.Discover();
+
+            await Assert.That(initial.Single().ProcessId).IsEqualTo(101);
+            await Assert.That(updated.Single().ProcessId).IsEqualTo(202);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task ResolutionRetriesATransientlyMissingEndpoint()
     {
         var now = new DateTimeOffset(2026, 7, 31, 10, 0, 0, TimeSpan.Zero);
@@ -142,8 +170,8 @@ public sealed class PlayerBridgeDiscoveryTests
         try
         {
             var player = Endpoint(200, "player", DateTimeOffset.UtcNow);
-            player.CompanyName = "TryFinally";
-            player.ProductName = "Sample";
+            player.CompanyName = "  TRYFINALLY";
+            player.ProductName = "sample  ";
 
             await Assert.That(UnityProjectIdentity.Read(first).Matches(player)).IsTrue();
             await Assert.That(UnityProjectIdentity.Read(second).Matches(player)).IsTrue();
@@ -163,7 +191,7 @@ public sealed class PlayerBridgeDiscoveryTests
         try
         {
             var player = Endpoint(200, "player", DateTimeOffset.UtcNow);
-            player.CloudProjectId = "aabbcc";
+            player.CloudProjectId = " AABBCC ";
             player.CompanyName = "TryFinally";
             player.ProductName = "Sample";
 
@@ -174,6 +202,36 @@ public sealed class PlayerBridgeDiscoveryTests
         {
             Directory.Delete(matching, recursive: true);
             Directory.Delete(fallbackOnly, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task ProjectIdentityObservesUpdatedSettings()
+    {
+        var project = CreateProject("TryFinally", "Before", "");
+        try
+        {
+            var before = Endpoint(200, "before", DateTimeOffset.UtcNow);
+            before.CompanyName = "TryFinally";
+            before.ProductName = "Before";
+            await Assert.That(UnityProjectIdentity.Read(project).Matches(before)).IsTrue();
+
+            var settingsPath = Path.Combine(project, "ProjectSettings", "ProjectSettings.asset");
+            File.WriteAllText(
+                settingsPath,
+                "PlayerSettings:\n  companyName: TryFinally\n  productName: After\n  cloudProjectId:\n"
+            );
+            File.SetLastWriteTimeUtc(settingsPath, DateTime.UtcNow.AddSeconds(1));
+
+            var after = Endpoint(201, "after", DateTimeOffset.UtcNow);
+            after.CompanyName = "TryFinally";
+            after.ProductName = "After";
+            await Assert.That(UnityProjectIdentity.Read(project).Matches(after)).IsTrue();
+            await Assert.That(UnityProjectIdentity.Read(project).Matches(before)).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(project, recursive: true);
         }
     }
 

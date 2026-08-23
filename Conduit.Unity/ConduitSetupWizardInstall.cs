@@ -279,8 +279,8 @@ namespace Conduit
             return string.Empty;
         }
 
-        public static async Task<string> DownloadServerAsync(string existingExecutablePath = "")
-            => await DownloadServerAsync(ConfigurationLocation.Project, existingExecutablePath);
+        public static Task<string> DownloadServerAsync(string existingExecutablePath = "")
+            => DownloadServerAsync(ConfigurationLocation.Project, existingExecutablePath);
 
         public static async Task<string> DownloadServerAsync(
             ConfigurationLocation location,
@@ -910,7 +910,7 @@ namespace Conduit
             foreach (var process in Process.GetProcesses())
                 try
                 {
-                    if (process.Id == Process.GetCurrentProcess().Id)
+                    if (process.Id == BridgeStatusUtility.ProcessId)
                         continue;
 
                     if (!PathsEqual(TryGetProcessPath(process), fullPath))

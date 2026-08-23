@@ -252,7 +252,8 @@ static class ProcessQuery
             var results = new List<UnityProjectProcessInfo>();
             foreach (var directoryPath in Directory.EnumerateDirectories("/proc"))
             {
-                if (!int.TryParse(Path.GetFileName(directoryPath), out var processId))
+                var processNameOffset = directoryPath.LastIndexOf(Path.DirectorySeparatorChar) + 1;
+                if (!int.TryParse(directoryPath.AsSpan(processNameOffset), out var processId))
                     continue;
 
                 if (!TryReadProcessInfo(directoryPath, processId, processName, out var processInfo))
@@ -283,14 +284,25 @@ static class ProcessQuery
 
     static bool MatchesProcessName(string processName, string? comm, string? executablePath)
     {
-        if (MatchesProcessName(processName, comm))
-            return true;
-
-        if (MatchesProcessName(processName, Path.GetFileNameWithoutExtension(comm)))
+        if (MatchesComm(processName, comm))
             return true;
 
         return MatchesProcessName(processName, Path.GetFileName(executablePath))
                || MatchesProcessName(processName, Path.GetFileNameWithoutExtension(executablePath));
+    }
+
+    static bool MatchesComm(string processName, string? comm)
+    {
+        var candidate = comm.AsSpan().Trim();
+        if (candidate.Equals(processName.AsSpan(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var extensionOffset = candidate.LastIndexOf('.');
+        return extensionOffset > 0
+               && candidate[..extensionOffset].Equals(
+                   processName.AsSpan(),
+                   StringComparison.OrdinalIgnoreCase
+               );
     }
 
     static bool MatchesProcessName(string processName, string? candidate)
@@ -301,7 +313,7 @@ static class ProcessQuery
     {
         try
         {
-            var target = File.ResolveLinkTarget(Path.Combine(directoryPath, "exe"), true);
+            var target = File.ResolveLinkTarget(Path.Combine(directoryPath, "exe"), false);
             return target?.FullName;
         }
         catch
@@ -314,8 +326,8 @@ static class ProcessQuery
     {
         try
         {
-            var processName = File.ReadAllText(Path.Combine(directoryPath, "comm")).Trim();
-            return processName.Length == 0 ? null : processName;
+            var processName = File.ReadAllText(Path.Combine(directoryPath, "comm"));
+            return string.IsNullOrWhiteSpace(processName) ? null : processName;
         }
         catch
         {

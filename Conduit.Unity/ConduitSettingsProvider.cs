@@ -32,6 +32,7 @@ namespace Conduit
         static readonly Color successColor = new(0.45f, 0.8f, 0.45f);
         static readonly Color errorColor = new(0.85f, 0.45f, 0.45f);
         static readonly Color enabledColor = new(0.8f, 0.8f, 0.8f);
+        static readonly GUIContent codeEditorLabel = new("Code Editor");
         static readonly GUIContent configurationLocationLabel = new(
             "Configuration",
             "Choose the installation scope for the selected code editor. The scope controls where " +
@@ -58,6 +59,8 @@ namespace Conduit
 
         readonly Dictionary<ConduitSetupWizardUtility.ActionKind, bool> actionErrors = new();
         readonly HashSet<string> installedEditorIds = new(StringComparer.Ordinal);
+        readonly Dictionary<string, string> editorLabels = new(StringComparer.Ordinal);
+        readonly GUIContent selectedEditorContent = new();
         ConduitSetupWizardUtility.ActionKind? runningAction;
         ConduitPackageUpdateStatus packageUpdateStatus;
         GUIStyle? groupBoxStyle;
@@ -333,13 +336,14 @@ namespace Conduit
             string selectedLabel = selectedSpec is null
                 ? "Select code editor..."
                 : GetEditorLabel(selectedSpec);
+            selectedEditorContent.text = selectedLabel;
             var rect = EditorGUI.PrefixLabel(
                 EditorGUILayout.GetControlRect(),
-                new GUIContent("Code Editor")
+                codeEditorLabel
             );
             if (!EditorGUI.DropdownButton(
                     rect,
-                    new GUIContent(selectedLabel),
+                    selectedEditorContent,
                     FocusType.Keyboard,
                     EditorStyles.popup
                 ))
@@ -367,9 +371,7 @@ namespace Conduit
             menu.DropDown(rect);
 
             string GetEditorLabel(ConduitSetupWizardUtility.EditorSpec spec)
-                => installedEditorIds.Contains(spec.Id)
-                    ? $"{spec.DisplayName} (installed)"
-                    : spec.DisplayName;
+                => editorLabels[spec.Id];
 
             void AddEditor(ConduitSetupWizardUtility.EditorSpec spec)
                 => menu.AddItem(
@@ -668,9 +670,17 @@ namespace Conduit
         void RefreshInstalledEditors(ConduitSetupWizardUtility.EditorSpec[] specs)
         {
             installedEditorIds.Clear();
+            editorLabels.Clear();
             foreach (var spec in specs)
-                if (ConduitSetupWizardUtility.HasUserConfigurationFile(spec))
+            {
+                var installed = ConduitSetupWizardUtility.HasUserConfigurationFile(spec);
+                if (installed)
                     installedEditorIds.Add(spec.Id);
+
+                editorLabels[spec.Id] = installed
+                    ? $"{spec.DisplayName} (installed)"
+                    : spec.DisplayName;
+            }
         }
 
         void BeginGroup(string title)

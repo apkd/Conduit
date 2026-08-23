@@ -2,7 +2,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,15 +24,21 @@ namespace Conduit
             var displayName = requestedDisplayName;
             try
             {
-                var assemblyArtifact = artifacts.FirstOrDefault(
-                    static artifact => artifact.name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                ) ?? throw new InvalidOperationException("The MCP server did not provide a compiled snippet assembly.");
+                BridgeArtifact? assemblyArtifact = null;
+                BridgeArtifact? pdb = null;
+                foreach (var artifact in artifacts)
+                {
+                    if (artifact.name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                        assemblyArtifact ??= artifact;
+                    else if (artifact.name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase))
+                        pdb ??= artifact;
+                }
+
+                if (assemblyArtifact == null)
+                    throw new InvalidOperationException("The MCP server did not provide a compiled snippet assembly.");
 
                 if (!snippets.TryGetValue(assemblyArtifact.sha256, out var snippet))
                 {
-                    var pdb = artifacts.FirstOrDefault(
-                        static artifact => artifact.name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)
-                    );
                     var assembly = CompiledAssembly.Load(
                         decode(assemblyArtifact),
                         pdb == null ? null : decode(pdb)
@@ -52,7 +57,9 @@ namespace Conduit
                 displayName = snippet.DisplayName;
                 ct.ThrowIfCancellationRequested();
                 var value = snippet.Method.Invoke(null, null);
-                if (value is Task task)
+                if (value is Task<object> resultTask)
+                    value = await resultTask;
+                else if (value is Task task)
                 {
                     await task;
                     value = task.GetType()

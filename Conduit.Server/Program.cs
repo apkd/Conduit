@@ -105,7 +105,12 @@ static bool LooksLikeUnityProject(string path) =>
 
 static async Task RunStdioAsync()
 {
-    var builder = Host.CreateApplicationBuilder();
+    var builder = Host.CreateApplicationBuilder(
+        new HostApplicationBuilderSettings
+        {
+            Args = GetHostArguments(),
+        }
+    );
     ConfigureCommon(builder.Configuration, builder.Logging, builder.Services);
     builder.Services
         .AddMcpServer()
@@ -118,7 +123,12 @@ static async Task RunStdioAsync()
 
 static async Task RunHttpAsync(string? url, ushort? port)
 {
-    var builder = WebApplication.CreateBuilder();
+    var builder = WebApplication.CreateBuilder(
+        new WebApplicationOptions
+        {
+            Args = GetHostArguments(),
+        }
+    );
     if (ResolveHttpUrl(url, port) is { Length: > 0 } resolvedUrl)
         builder.WebHost.UseUrls(resolvedUrl);
 
@@ -144,6 +154,12 @@ static string? ResolveHttpUrl(string? url, ushort? port)
 
     return Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
 }
+
+static string[] GetHostArguments() =>
+[
+    // configuration is read once at startup; a recursive working-tree watcher provides no value.
+    "--hostBuilder:reloadConfigOnChange=false",
+];
 
 static void ConfigureCommon(
     ConfigurationManager configuration,

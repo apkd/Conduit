@@ -34,18 +34,33 @@ namespace Conduit
 
         static string GetDependenciesForAssetPath(string assetPath)
         {
-            using var pooledLines = ConduitUtility.GetPooledList<string>(out var lines);
+            using var pooledDependencies = ConduitUtility.GetPooledList<(string Guid, string Path)>(
+                out var dependencies
+            );
 
             foreach (var dependencyPath in AssetDatabase.GetDependencies(assetPath, false))
                 if (dependencyPath != assetPath)
                     if (AssetDatabase.AssetPathToGUID(dependencyPath) is { Length: > 0 } dependencyGuid)
-                        lines.Add($"{dependencyGuid} | {dependencyPath}");
+                        dependencies.Add((dependencyGuid, dependencyPath));
 
-            if (lines.Count == 0)
+            if (dependencies.Count == 0)
                 return $"No direct dependencies found for '{assetPath}'.";
 
-            lines.Sort(StringComparer.OrdinalIgnoreCase);
-            return string.Join("\n", lines);
+            dependencies.Sort(static (left, right) =>
+            {
+                var guid = StringComparer.OrdinalIgnoreCase.Compare(left.Guid, right.Guid);
+                return guid != 0
+                    ? guid
+                    : StringComparer.OrdinalIgnoreCase.Compare(left.Path, right.Path);
+            });
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            foreach (var dependency in dependencies)
+            {
+                if (builder.Length > 0)
+                    builder.Append('\n');
+                builder.Append(dependency.Guid).Append(" | ").Append(dependency.Path);
+            }
+            return builder.ToString();
         }
 
         static string FindReferencesToForAssetPath(string assetPath, bool rebuildCache)
@@ -57,19 +72,19 @@ namespace Conduit
             if (!cache.TryGetValue(assetGuid, out var referencerGuids) || referencerGuids.Length == 0)
                 return $"No direct references found to '{assetPath}'.";
 
-            using var pooledLines = ConduitUtility.GetPooledList<string>(out var lines);
-            using var pooledSeen = ConduitUtility.GetPooledSet<string>(out var seen);
-
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             foreach (var guid in referencerGuids)
-                if (seen.Add(guid))
-                    if (AssetDatabase.GUIDToAssetPath(guid) is { Length: > 0 } path)
-                        lines.Add($"{guid} | {path}");
+                if (AssetDatabase.GUIDToAssetPath(guid) is { Length: > 0 } path)
+                {
+                    if (builder.Length > 0)
+                        builder.Append('\n');
+                    builder.Append(guid).Append(" | ").Append(path);
+                }
 
-            if (lines.Count == 0)
+            if (builder.Length == 0)
                 return $"No direct references found to '{assetPath}'.";
 
-            lines.Sort(StringComparer.OrdinalIgnoreCase);
-            return string.Join("\n", lines);
+            return builder.ToString();
         }
 
         static string BuildAmbiguousSelectionMessage(string asset, string[] assetPaths, string commandName)
@@ -103,7 +118,9 @@ namespace Conduit
         static Dictionary<string, string[]> RebuildCache()
         {
             var assetGuids = AssetDatabase.FindAssets(string.Empty);
-            var reverseLookup = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            // asset and dependency GUIDs are unique per source asset, so lists avoid one hash table per target
+            var reverseLookup = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var dependencyGuids = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var assetGuid in assetGuids)
             {
@@ -115,12 +132,17 @@ namespace Conduit
                     if (dependencyPath == assetPath)
                         continue;
 
-                    if (AssetDatabase.AssetPathToGUID(dependencyPath) is not { Length: > 0 } dependencyGuid)
+                    if (!dependencyGuids.TryGetValue(dependencyPath, out var dependencyGuid))
+                    {
+                        dependencyGuid = AssetDatabase.AssetPathToGUID(dependencyPath);
+                        dependencyGuids[dependencyPath] = dependencyGuid;
+                    }
+                    if (dependencyGuid.Length == 0)
                         continue;
 
                     if (!reverseLookup.TryGetValue(dependencyGuid, out var referencers))
                     {
-                        referencers = new(StringComparer.OrdinalIgnoreCase);
+                        referencers = new();
                         reverseLookup[dependencyGuid] = referencers;
                     }
 
@@ -130,7 +152,10 @@ namespace Conduit
 
             var cache = new Dictionary<string, string[]>(reverseLookup.Count, StringComparer.OrdinalIgnoreCase);
             foreach (var pair in reverseLookup)
-                cache[pair.Key] = ConduitUtility.SortStrings(pair.Value, StringComparer.OrdinalIgnoreCase);
+            {
+                pair.Value.Sort(StringComparer.OrdinalIgnoreCase);
+                cache[pair.Key] = pair.Value.ToArray();
+            }
 
             return cache;
         }
@@ -178,9 +203,7 @@ namespace Conduit
                 Directory.CreateDirectory(directoryPath);
 
             var keys = new string[cache.Count];
-            var keyIndex = 0;
-            foreach (var key in cache.Keys)
-                keys[keyIndex++] = key;
+            cache.Keys.CopyTo(keys, 0);
 
             Array.Sort(keys, StringComparer.OrdinalIgnoreCase);
             var entries = new SerializableLookupEntry[keys.Length];

@@ -127,7 +127,9 @@ namespace Conduit
 
             // a ContainerWindow has no combined backing buffer, so each stable layout window is
             // reconstructed from the GUIViews that Unity already rendered for it.
-            var containers = new List<(object rootView, string target)>();
+            using var pooledContainers = ConduitUtility.GetPooledList<(object rootView, string target)>(
+                out var containers
+            );
             bool hasMainWindow = false;
             foreach (var container in windows)
             {
@@ -160,7 +162,7 @@ namespace Conduit
             if (!hasMainWindow)
                 throw new InvalidOperationException("Could not find Unity's main editor window.");
 
-            var views = new List<object>();
+            using var pooledViews = ConduitUtility.GetPooledList<object>(out var views);
             var repaint = guiViewRepaintMethod
                           ?? throw new MissingMethodException("UnityEditor.GUIView.Repaint");
             foreach (var container in containers)
@@ -175,7 +177,11 @@ namespace Conduit
             await WaitForNextEditorUpdateAsync();
             await WaitForNextEditorUpdateAsync();
 
-            var sources = new List<EditorCaptureSource>(containers.Count);
+            using var pooledSources = ConduitUtility.GetPooledList<EditorCaptureSource>(
+                out var sources
+            );
+            if (sources.Capacity < containers.Count)
+                sources.Capacity = containers.Count;
             foreach (var container in containers)
                 sources.Add(CreateSource(container.rootView, container.target));
 
@@ -187,7 +193,7 @@ namespace Conduit
                     throw new InvalidOperationException($"Unity editor window '{target}' closed during capture.");
 
                 var rootPosition = GetViewPosition(rootView);
-                var views = new List<object>();
+                using var pooledViews = ConduitUtility.GetPooledList<object>(out var views);
                 CollectGuiViews(rootView, views);
                 if (views.Count == 0)
                     throw new InvalidOperationException($"Unity editor window '{target}' has no visible GUI views.");
@@ -197,7 +203,11 @@ namespace Conduit
                 float scale = GetBackingScaleFactor(views[0]);
                 int width = Mathf.Max(1, Mathf.RoundToInt(rootPosition.width * scale));
                 int height = Mathf.Max(1, Mathf.RoundToInt(rootPosition.height * scale));
-                var captures = new List<GuiViewCapture>(views.Count);
+                using var pooledCaptures = ConduitUtility.GetPooledList<GuiViewCapture>(
+                    out var captures
+                );
+                if (captures.Capacity < views.Count)
+                    captures.Capacity = views.Count;
                 foreach (var view in views)
                 {
                     var position = GetViewPosition(view);
@@ -329,9 +339,14 @@ namespace Conduit
             {
                 ConduitEditorWindowDocking.EnsureCanShow(window, target);
                 var texture = await GetRenderedTextureAsync(window, target, getTexture);
+                var parent = GetParent(window)
+                             ?? throw new InvalidOperationException(
+                                 $"Editor window '{window.titleContent.text}' has no host view."
+                             );
                 return new RenderedTextureSource(
                     target,
                     window,
+                    parent,
                     texture.width,
                     texture.height,
                     getTexture,
@@ -395,6 +410,7 @@ namespace Conduit
                 return new EditorWindowSource(
                     displayName,
                     window,
+                    parent,
                     width,
                     height,
                     CreateGrabPixelsDelegate(parent),
@@ -508,7 +524,10 @@ namespace Conduit
 
         static bool IsSelectedTab(EditorWindow window)
             => GetParent(window) is { } parent
-               && ReferenceEquals(GetSelectedTab(parent), window);
+               && IsSelectedTab(parent, window);
+
+        static bool IsSelectedTab(object parent, EditorWindow window)
+            => ReferenceEquals(GetSelectedTab(parent), window);
 
         static void RestoreWindowState(
             EditorWindow window,
@@ -549,12 +568,14 @@ namespace Conduit
             readonly EditorWindow window;
             readonly Func<RenderTexture?> getTexture;
             readonly bool flipVertically;
+            readonly object parent;
             readonly EditorWindow? previousTab;
             readonly bool ownsWindow;
 
             public RenderedTextureSource(
                 string target,
                 EditorWindow window,
+                object parent,
                 int width,
                 int height,
                 Func<RenderTexture?> getTexture,
@@ -564,6 +585,7 @@ namespace Conduit
                 : base(target, width, height)
             {
                 this.window = window;
+                this.parent = parent;
                 this.getTexture = getTexture;
                 this.flipVertically = flipVertically;
                 this.previousTab = previousTab;
@@ -578,7 +600,7 @@ namespace Conduit
                     return false;
                 }
 
-                if (!IsSelectedTab(window))
+                if (!IsSelectedTab(parent, window))
                 {
                     diagnostic = $"The '{Target}' window is no longer the selected tab.";
                     return false;
@@ -740,14 +762,16 @@ namespace Conduit
                 (Material)EditorGUIUtility.LoadRequired(GrabPixelsMaterialPath);
 
             readonly EditorWindow window;
-            readonly RenderTexture source;
+            readonly object parent;
             readonly Action<RenderTexture, Rect> grabPixels;
             readonly EditorWindow? previousTab;
             readonly bool ownsWindow;
+            readonly RenderTexture grabTarget;
 
             internal EditorWindowSource(
                 string target,
                 EditorWindow window,
+                object parent,
                 int width,
                 int height,
                 Action<RenderTexture, Rect> grabPixels,
@@ -756,10 +780,11 @@ namespace Conduit
                 : base(target, width, height)
             {
                 this.window = window;
+                this.parent = parent;
                 this.grabPixels = grabPixels;
                 this.previousTab = previousTab;
                 this.ownsWindow = ownsWindow;
-                source = GpuCapture.CreateStagingTexture(width, height, depth: 24);
+                grabTarget = GpuCapture.CreateStagingTexture(width, height, depth: 24);
             }
 
             public override bool TryCapture(RenderTexture destination, out string diagnostic)
@@ -770,7 +795,7 @@ namespace Conduit
                     return false;
                 }
 
-                if (!IsSelectedTab(window))
+                if (!IsSelectedTab(parent, window))
                 {
                     diagnostic = $"The editor window '{Target}' is no longer the selected tab.";
                     return false;
@@ -788,13 +813,11 @@ namespace Conduit
 
                 window.Repaint();
                 var previousActive = RenderTexture.active;
-                var temporary = RenderTexture.GetTemporary(source.descriptor);
                 try
                 {
                     // unity's wrapper makes this same backing-buffer capture conditional on window focus
-                    grabPixels(temporary, new(0f, 0f, window.position.width, window.position.height));
-                    Graphics.Blit(temporary, source, captureMaterial);
-                    Graphics.Blit(source, destination);
+                    grabPixels(grabTarget, new(0f, 0f, window.position.width, window.position.height));
+                    Graphics.Blit(grabTarget, destination, captureMaterial);
                     diagnostic = string.Empty;
                     return true;
                 }
@@ -806,7 +829,6 @@ namespace Conduit
                 finally
                 {
                     RenderTexture.active = previousActive;
-                    RenderTexture.ReleaseTemporary(temporary);
                 }
             }
 
@@ -816,8 +838,8 @@ namespace Conduit
             {
                 try
                 {
-                    source.Release();
-                    Object.DestroyImmediate(source);
+                    grabTarget.Release();
+                    Object.DestroyImmediate(grabTarget);
                 }
                 finally
                 {
@@ -842,7 +864,9 @@ namespace Conduit
             internal static EditorWindowState Capture()
             {
                 var windows = Resources.FindObjectsOfTypeAll<EditorWindow>();
-                var selectedTabs = new List<(EditorWindow, object)>();
+                using var pooledSelectedTabs = ConduitUtility.GetPooledList<(EditorWindow, object)>(
+                    out var selectedTabs
+                );
                 foreach (var window in windows)
                 {
                     var parent = GetParent(window);

@@ -4,7 +4,6 @@ using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
@@ -18,11 +17,11 @@ namespace Conduit
 {
     static class ConduitConnection
     {
+        const int MaximumPooledPayloadBufferLength = 1024 * 1024;
         const int MaxConcurrentClients = 254;
         static readonly ConcurrentQueue<InboundClientMessage> inboundMessages = new();
         static readonly ConcurrentDictionary<int, ClientSession> clientSessions = new();
         static readonly UTF8Encoding utf8NoBom = new(false);
-        static readonly byte[] newline = { (byte)'\n' };
         static readonly TimeSpan sendTimeout = TimeSpan.FromSeconds(5);
         static readonly TimeSpan idleReceiveTimeout = TimeSpan.FromSeconds(30);
         static readonly TimeSpan recentAttachmentCooldown = TimeSpan.FromHours(1);
@@ -33,9 +32,10 @@ namespace Conduit
         static bool shuttingDown;
         static volatile bool refreshClientHandshakesRequested;
         static bool toolbarRefreshRequested;
-        static ConduitConnectionStatus status;
-        static DateTimeOffset attachedUntilUtc;
+        static volatile ConduitConnectionStatus status;
+        static long attachedUntilUtcTicks;
         static int handshakeGeneration;
+        static int inboundMessageCount;
         static int nextClientId;
         static readonly string sessionInstanceId = Guid.NewGuid().ToString("N");
 
@@ -60,20 +60,29 @@ namespace Conduit
         internal static ConduitConnectionStatus GetConnectionStatus()
         {
             lock (gate)
-                return GetDisplayStatus(DateTimeOffset.UtcNow);
+                return GetDisplayStatus(DateTime.UtcNow.Ticks);
         }
 
-        public static Task<bool> TrySendCommandStartedAsync(int clientId, string requestId, string? commandType = null)
-        {
-            using var timeoutCts = new CancellationTokenSource(sendTimeout);
-            return TrySendMessageAsync(clientId, BridgeMessage.CreateCommandStarted(requestId), timeoutCts.Token, commandType);
-        }
+        public static Task<bool> TrySendCommandStartedAsync(
+            int clientId,
+            string requestId,
+            string? commandType = null)
+            => TrySendMessageAsync(
+                clientId,
+                BridgeMessage.CreateCommandStarted(requestId),
+                commandType
+            );
 
-        public static Task<bool> TrySendResultAsync(int clientId, string requestId, BridgeCommandResult result, string? commandType = null)
-        {
-            using var timeoutCts = new CancellationTokenSource(sendTimeout);
-            return TrySendMessageAsync(clientId, BridgeMessage.CreateCommandResult(requestId, result), timeoutCts.Token, commandType);
-        }
+        public static Task<bool> TrySendResultAsync(
+            int clientId,
+            string requestId,
+            BridgeCommandResult result,
+            string? commandType = null)
+            => TrySendMessageAsync(
+                clientId,
+                BridgeMessage.CreateCommandResult(requestId, result),
+                commandType
+            );
 
         static async Task RunServerLoopAsync(CancellationToken cancellationToken)
         {
@@ -136,12 +145,16 @@ namespace Conduit
             Directory.CreateDirectory(clientsDirectory);
             TryRestrictDirectory(endpointDirectory);
             WriteEditorEndpointDescriptor(endpointDirectory);
+            using var publicationWatcher = new BridgeFilePublicationWatcher(
+                clientsDirectory,
+                "request.json"
+            );
 
             while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    foreach (var clientDirectory in Directory.GetDirectories(clientsDirectory))
+                    foreach (var clientDirectory in Directory.EnumerateDirectories(clientsDirectory))
                     {
                         var requestPath = Path.Combine(clientDirectory, "request.json");
                         if (!File.Exists(requestPath))
@@ -160,33 +173,45 @@ namespace Conduit
                             continue;
                         }
 
-                        var input = new FileStream(
-                            Path.Combine(clientDirectory, "to-unity.fifo"),
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.ReadWrite,
-                            4096,
-                            FileOptions.Asynchronous
-                        );
-                        var output = new FileStream(
-                            Path.Combine(clientDirectory, "from-unity.fifo"),
-                            FileMode.Open,
-                            FileAccess.Write,
-                            FileShare.ReadWrite,
-                            4096,
-                            FileOptions.Asynchronous
-                        );
-                        File.WriteAllText(
-                            Path.Combine(clientDirectory, "connected"),
-                            string.Empty
-                        );
-                        _ = RunClientLoopAsync(
-                            new(input, output, static () => true),
-                            cancellationToken
-                        );
+                        FileStream? input = null;
+                        FileStream? output = null;
+                        try
+                        {
+                            input = new(
+                                Path.Combine(clientDirectory, "to-unity.fifo"),
+                                FileMode.Open,
+                                FileAccess.Read,
+                                FileShare.ReadWrite,
+                                4096,
+                                FileOptions.Asynchronous
+                            );
+                            output = new(
+                                Path.Combine(clientDirectory, "from-unity.fifo"),
+                                FileMode.Open,
+                                FileAccess.Write,
+                                FileShare.ReadWrite,
+                                4096,
+                                FileOptions.Asynchronous
+                            );
+                            File.WriteAllText(
+                                Path.Combine(clientDirectory, "connected"),
+                                string.Empty
+                            );
+                            _ = RunClientLoopAsync(
+                                new(input, output, static () => true),
+                                cancellationToken
+                            );
+                            input = null;
+                            output = null;
+                        }
+                        finally
+                        {
+                            input?.Dispose();
+                            output?.Dispose();
+                        }
                     }
 
-                    await Task.Delay(50, cancellationToken);
+                    await publicationWatcher.WaitAsync(cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -220,7 +245,7 @@ namespace Conduit
             {
                 endpoint_id = Path.GetFileName(endpointDirectory),
                 project_path = ConduitProjectIdentity.GetProjectPath(),
-                process_id = Process.GetCurrentProcess().Id,
+                process_id = BridgeStatusUtility.ProcessId,
                 session_instance_id = sessionInstanceId,
                 unity_version = Application.unityVersion,
                 platform = Application.platform.ToString(),
@@ -365,6 +390,7 @@ namespace Conduit
                         || message.message_type == BridgeMessageTypes.Command && message.command != null))
                 {
                     inboundMessages.Enqueue(new() { client_id = session.id, message = message });
+                    Interlocked.Increment(ref inboundMessageCount);
                     continue;
                 }
 
@@ -372,31 +398,45 @@ namespace Conduit
             }
         }
 
-        static async Task<bool> TrySendMessageAsync(int clientId, BridgeMessage message, CancellationToken cancellationToken, string? commandType)
+        static async Task<bool> TrySendMessageAsync(int clientId, BridgeMessage message, string? commandType)
         {
             if (!clientSessions.TryGetValue(clientId, out var session))
                 return false;
 
+            using var timeoutCts = new CancellationTokenSource(sendTimeout);
             commandType ??= ConduitToolRunner.GetActiveCommandType();
-            var context = BuildMessageContext(clientId, message, commandType);
-            var outboundMessage = new OutboundClientMessage(BridgeProtocol.Serialize(message), context);
+            var outboundMessage = new OutboundClientMessage(
+                BridgeProtocol.Serialize(message),
+                clientId,
+                message.message_type,
+                message.request_id,
+                commandType
+            );
             if (!TryQueueMessage(session, outboundMessage))
                 return false;
 
             try
             {
-                return await WaitForSendCompletionAsync(outboundMessage.Completion.Task, cancellationToken);
+                using var cancellationRegistration = timeoutCts.Token.Register(
+                    static state => ((TaskCompletionSource<bool>)state).TrySetCanceled(),
+                    outboundMessage.Completion
+                );
+                return await outboundMessage.Completion.Task;
             }
             catch (OperationCanceledException)
             {
-                ConduitDiagnostics.Warn($"Timed out while sending {context}. Closing the current pipe connection.");
+                ConduitDiagnostics.Warn($"Timed out while sending {outboundMessage.Context}. Closing the current pipe connection.");
                 ClearConnection(session);
                 return false;
             }
         }
 
-        static string BuildMessageContext(int clientId, BridgeMessage message, string? commandType)
-            => $"bridge message '{message.message_type}' for request '{message.request_id ?? string.Empty}' ({commandType ?? "unknown_command"}) on pid {Process.GetCurrentProcess().Id}, session {sessionInstanceId}, client {clientId}";
+        static string BuildMessageContext(
+            int clientId,
+            string messageType,
+            string? requestId,
+            string? commandType)
+            => $"bridge message '{messageType}' for request '{requestId ?? string.Empty}' ({commandType ?? "unknown_command"}) on pid {BridgeStatusUtility.ProcessId}, session {sessionInstanceId}, client {clientId}";
 
         static void RegisterConnection(ClientSession session)
         {
@@ -455,28 +495,42 @@ namespace Conduit
         static void OnEditorUpdate()
         {
 #if UNITY_6000_3_OR_NEWER && MODULE_IMGUI && MODULE_UIELEMENTS
-            bool refreshToolbar;
-            lock (gate)
+            var refreshToolbar = false;
+            var attachmentDeadline = Volatile.Read(ref attachedUntilUtcTicks);
+            if (Volatile.Read(ref toolbarRefreshRequested)
+                || status == ConduitConnectionStatus.Disconnected
+                && attachmentDeadline != 0
+                && DateTime.UtcNow.Ticks >= attachmentDeadline)
             {
-                if (!toolbarRefreshRequested
-                    && status == ConduitConnectionStatus.Disconnected
-                    && attachedUntilUtc != default
-                    && DateTimeOffset.UtcNow >= attachedUntilUtc)
+                lock (gate)
                 {
-                    attachedUntilUtc = default;
-                    toolbarRefreshRequested = true;
-                }
+                    if (!toolbarRefreshRequested
+                        && status == ConduitConnectionStatus.Disconnected
+                        && attachedUntilUtcTicks != 0
+                        && DateTime.UtcNow.Ticks >= attachedUntilUtcTicks)
+                    {
+                        Volatile.Write(ref attachedUntilUtcTicks, 0);
+                        toolbarRefreshRequested = true;
+                    }
 
-                refreshToolbar = toolbarRefreshRequested;
-                toolbarRefreshRequested = false;
+                    refreshToolbar = toolbarRefreshRequested;
+                    toolbarRefreshRequested = false;
+                }
             }
 
             if (refreshToolbar)
                 ConduitToolbar.Refresh();
 #endif
 
-            while (inboundMessages.TryDequeue(out var inboundMessage))
-                ConduitToolRunner.HandleIncomingCommand(inboundMessage.client_id, inboundMessage.message);
+            if (Volatile.Read(ref inboundMessageCount) > 0)
+                while (inboundMessages.TryDequeue(out var inboundMessage))
+                {
+                    Interlocked.Decrement(ref inboundMessageCount);
+                    ConduitToolRunner.HandleIncomingCommand(
+                        inboundMessage.client_id,
+                        inboundMessage.message
+                    );
+                }
 
             ConduitToolRunner.PumpQueuedCommands();
             if (refreshClientHandshakesRequested)
@@ -505,19 +559,23 @@ namespace Conduit
         {
             lock (gate)
             {
-                var nowUtc = DateTimeOffset.UtcNow;
-                var previousDisplayStatus = GetDisplayStatus(nowUtc);
+                var nowUtcTicks = DateTime.UtcNow.Ticks;
+                var previousDisplayStatus = GetDisplayStatus(nowUtcTicks);
                 ConduitConnection.status = status;
                 if (status == ConduitConnectionStatus.Connected)
-                    attachedUntilUtc = nowUtc + recentAttachmentCooldown;
+                    Volatile.Write(
+                        ref attachedUntilUtcTicks,
+                        nowUtcTicks + recentAttachmentCooldown.Ticks
+                    );
 
-                if (previousDisplayStatus != GetDisplayStatus(nowUtc))
+                if (previousDisplayStatus != GetDisplayStatus(nowUtcTicks))
                     toolbarRefreshRequested = true;
             }
         }
 
-        static ConduitConnectionStatus GetDisplayStatus(DateTimeOffset nowUtc)
-            => status == ConduitConnectionStatus.Connected || nowUtc < attachedUntilUtc
+        static ConduitConnectionStatus GetDisplayStatus(long nowUtcTicks)
+            => status == ConduitConnectionStatus.Connected
+               || nowUtcTicks < Volatile.Read(ref attachedUntilUtcTicks)
                 ? ConduitConnectionStatus.Connected
                 : ConduitConnectionStatus.Disconnected;
 
@@ -528,8 +586,8 @@ namespace Conduit
                 project_path = projectPath,
                 display_name = Path.GetFileName(projectPath),
                 unity_version = Application.unityVersion,
-                editor_process_id = Process.GetCurrentProcess().Id,
-                process_id = Process.GetCurrentProcess().Id,
+                editor_process_id = BridgeStatusUtility.ProcessId,
+                process_id = BridgeStatusUtility.ProcessId,
                 endpoint_kind = "editor",
                 platform = Application.platform.ToString(),
                 cloud_project_id = CloudProjectSettings.projectId,
@@ -544,11 +602,14 @@ namespace Conduit
 
         static async Task<string?> ReadLineAsync(StreamReader reader, CancellationToken cancellationToken)
         {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var readTask = reader.ReadLineAsync();
-            var completedTask = await Task.WhenAny(readTask, Task.Delay(sendTimeout, cancellationToken));
+            var timeoutTask = Task.Delay(sendTimeout, timeoutCts.Token);
+            var completedTask = await Task.WhenAny(readTask, timeoutTask);
             if (completedTask != readTask)
                 throw new OperationCanceledException(cancellationToken);
 
+            timeoutCts.Cancel();
             return await readTask;
         }
 
@@ -558,9 +619,14 @@ namespace Conduit
             if (ShouldKeepConnectionOpen(session.id))
                 return await readTask;
 
-            var completedTask = await Task.WhenAny(readTask, Task.Delay(idleReceiveTimeout, cancellationToken));
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var timeoutTask = Task.Delay(idleReceiveTimeout, timeoutCts.Token);
+            var completedTask = await Task.WhenAny(readTask, timeoutTask);
             if (completedTask == readTask)
+            {
+                timeoutCts.Cancel();
                 return await readTask;
+            }
 
             if (ShouldKeepConnectionOpen(session.id))
                 return await readTask;
@@ -608,7 +674,7 @@ namespace Conduit
 
                 started = false;
                 shuttingDown = true;
-                attachedUntilUtc = default;
+                Volatile.Write(ref attachedUntilUtcTicks, 0);
                 cancellationTokenSource = serverLoopCts;
                 serverLoopCts = null;
 
@@ -693,36 +759,44 @@ namespace Conduit
         static void WritePayload(Stream stream, string payload)
         {
             var byteCount = utf8NoBom.GetByteCount(payload);
-            var buffer = ArrayPool<byte>.Shared.Rent(byteCount);
+            var bufferLength = checked(byteCount + 1);
+            var buffer = bufferLength <= MaximumPooledPayloadBufferLength
+                ? ArrayPool<byte>.Shared.Rent(bufferLength)
+                : new byte[bufferLength];
             try
             {
                 var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+                buffer[written++] = (byte)'\n';
                 stream.Write(buffer, 0, written);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (buffer.Length <= MaximumPooledPayloadBufferLength)
+                    ArrayPool<byte>.Shared.Return(buffer);
             }
 
-            stream.Write(newline, 0, newline.Length);
             stream.Flush();
         }
 
         static async Task WritePayloadAsync(Stream stream, string payload, CancellationToken cancellationToken)
         {
             var byteCount = utf8NoBom.GetByteCount(payload);
-            var buffer = ArrayPool<byte>.Shared.Rent(byteCount);
+            var bufferLength = checked(byteCount + 1);
+            var buffer = bufferLength <= MaximumPooledPayloadBufferLength
+                ? ArrayPool<byte>.Shared.Rent(bufferLength)
+                : new byte[bufferLength];
             try
             {
                 var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+                buffer[written++] = (byte)'\n';
                 await stream.WriteAsync(buffer, 0, written, cancellationToken);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (buffer.Length <= MaximumPooledPayloadBufferLength)
+                    ArrayPool<byte>.Shared.Return(buffer);
             }
 
-            await stream.WriteAsync(newline, 0, newline.Length, cancellationToken);
             await stream.FlushAsync(cancellationToken);
         }
 
@@ -791,16 +865,6 @@ namespace Conduit
                 outboundMessage.TrySetResult(false);
         }
 
-        static async Task<bool> WaitForSendCompletionAsync(Task<bool> completionTask, CancellationToken cancellationToken)
-        {
-            var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            var completedTask = await Task.WhenAny(completionTask, cancellationTask);
-            if (completedTask != completionTask)
-                throw new OperationCanceledException(cancellationToken);
-
-            return await completionTask;
-        }
-
         struct InboundClientMessage
         {
             public int client_id;
@@ -825,15 +889,33 @@ namespace Conduit
 
         sealed class OutboundClientMessage
         {
-            public OutboundClientMessage(string payload, string context)
+            readonly int clientId;
+            readonly string messageType;
+            readonly string? requestId;
+            readonly string? commandType;
+
+            public OutboundClientMessage(
+                string payload,
+                int clientId,
+                string messageType,
+                string? requestId,
+                string? commandType)
             {
                 Payload = payload;
-                Context = context;
+                this.clientId = clientId;
+                this.messageType = messageType;
+                this.requestId = requestId;
+                this.commandType = commandType;
             }
 
             public string Payload { get; }
 
-            public string Context { get; }
+            public string Context => BuildMessageContext(
+                clientId,
+                messageType,
+                requestId,
+                commandType
+            );
 
             public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

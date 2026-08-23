@@ -113,20 +113,6 @@ namespace Conduit
         public static ConstructorInfo[] Constructors(string? type = null, string? member = null) => FindMany<ConstructorInfo>("constructors", type, member);
 
         internal static Type? ResolveType(string query)
-        {
-            var matches = Types(query);
-            Type? exact = null;
-            foreach (var match in matches)
-            {
-                if (!string.Equals(match.Name, query, StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(match.FullName, query, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (exact != null)
-                    return null;
-                exact = match;
-            }
-
-            return exact ?? (matches.Length == 1 ? matches[0] : null);
-        }
+            => reflect.ResolveTypeName(query);
     }
 }

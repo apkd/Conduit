@@ -45,7 +45,7 @@ namespace Conduit
                 return "varargs function pointers are not supported";
 
             var iterator = IntPtr.Zero;
-            for (var index = 0; index < api.SignatureGetParameterCount(signature); index++)
+            for (uint index = 0, count = api.SignatureGetParameterCount(signature); index < count; index++)
             {
                 var reason = GetUnsupportedReason(api.SignatureGetParameters(signature, ref iterator), api);
                 if (reason != null)

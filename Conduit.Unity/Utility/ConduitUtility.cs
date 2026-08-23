@@ -14,6 +14,79 @@ namespace Conduit
 {
     static class ConduitUtility
     {
+        const int MaximumPooledStringBuilderCapacity = 256 * 1024;
+        const int MaximumPooledCollectionCount = 32 * 1024;
+
+        internal struct PooledListHandle<T> : IDisposable
+        {
+            List<T>? list;
+
+            internal PooledListHandle(List<T> list) => this.list = list;
+
+            public void Dispose()
+            {
+                if (list == null)
+                    return;
+
+                var rented = list;
+                if (rented.Capacity > MaximumPooledCollectionCount)
+                {
+                    rented.Clear();
+                    rented.Capacity = 0;
+                }
+
+                list = null;
+                ListPool<T>.Release(rented);
+            }
+        }
+
+        internal struct PooledSetHandle<T> : IDisposable
+        {
+            HashSet<T>? set;
+
+            internal PooledSetHandle(HashSet<T> set) => this.set = set;
+
+            public void Dispose()
+            {
+                if (set == null)
+                    return;
+
+                var rented = set;
+                if (rented.EnsureCapacity(0) > MaximumPooledCollectionCount)
+                {
+                    rented.Clear();
+                    rented.TrimExcess();
+                }
+
+                set = null;
+                CollectionPool<HashSet<T>, T>.Release(rented);
+            }
+        }
+
+        internal struct PooledDictionaryHandle<TKey, TValue> : IDisposable
+        {
+            Dictionary<TKey, TValue>? dictionary;
+
+            internal PooledDictionaryHandle(Dictionary<TKey, TValue> dictionary)
+                => this.dictionary = dictionary;
+
+            public void Dispose()
+            {
+                if (dictionary == null)
+                    return;
+
+                var rented = dictionary;
+                if (rented.EnsureCapacity(0) > MaximumPooledCollectionCount)
+                {
+                    rented.Clear();
+                    rented.TrimExcess();
+                }
+
+                dictionary = null;
+                DictionaryPool<TKey, TValue>.Release(rented);
+            }
+        }
+
         internal struct StringBuilderHandle : IDisposable
         {
             StringBuilder? builder;
@@ -64,30 +137,44 @@ namespace Conduit
         }
 
         public static string FormatScenePath(Scene scene, string unsavedLabel)
-            => !string.IsNullOrWhiteSpace(scene.path)
-                ? scene.path
-                : string.IsNullOrWhiteSpace(scene.name)
-                    ? $"<{unsavedLabel}>"
-                    : $"<{unsavedLabel}:{scene.name}>";
+        {
+            var path = scene.path;
+            if (!string.IsNullOrWhiteSpace(path))
+                return path;
+
+            var name = scene.name;
+            return string.IsNullOrWhiteSpace(name)
+                ? $"<{unsavedLabel}>"
+                : $"<{unsavedLabel}:{name}>";
+        }
 
         /// <summary>
         /// Rents a pooled list and clears any previously retained contents.
         /// </summary>
-        public static PooledObject<List<T>> GetPooledList<T>(out List<T> list)
+        public static PooledListHandle<T> GetPooledList<T>(out List<T> list)
         {
-            var pooled = ListPool<T>.Get(out list);
+            _ = ListPool<T>.Get(out list);
             list.Clear();
-            return pooled;
+            return new(list);
         }
 
         /// <summary>
         /// Rents a pooled hash set and clears any previously retained contents.
         /// </summary>
-        public static PooledObject<HashSet<T>> GetPooledSet<T>(out HashSet<T> set)
+        public static PooledSetHandle<T> GetPooledSet<T>(out HashSet<T> set)
         {
-            var pooled = CollectionPool<HashSet<T>, T>.Get(out set);
+            _ = CollectionPool<HashSet<T>, T>.Get(out set);
             set.Clear();
-            return pooled;
+            return new(set);
+        }
+
+        /// <summary>Rents a pooled dictionary and clears any previously retained entries.</summary>
+        public static PooledDictionaryHandle<TKey, TValue> GetPooledDictionary<TKey, TValue>(
+            out Dictionary<TKey, TValue> dictionary)
+        {
+            _ = DictionaryPool<TKey, TValue>.Get(out dictionary);
+            dictionary.Clear();
+            return new(dictionary);
         }
 
         /// <summary>
@@ -112,7 +199,8 @@ namespace Conduit
                 return;
 
             builder.Clear();
-            GenericPool<StringBuilder>.Release(builder);
+            if (builder.Capacity <= MaximumPooledStringBuilderCapacity)
+                GenericPool<StringBuilder>.Release(builder);
         }
 
         public static StringBuilder Trim(this StringBuilder builder)
@@ -134,6 +222,40 @@ namespace Conduit
                 builder.Length--;
 
             return builder;
+        }
+
+        /// <summary>Appends a value with invariant formatting without creating an intermediate string.</summary>
+        public static StringBuilder AppendInvariant(
+            this StringBuilder builder,
+            int value,
+            ReadOnlySpan<char> format = default)
+        {
+            Span<char> buffer = stackalloc char[64];
+            return value.TryFormat(
+                buffer,
+                out var written,
+                format,
+                CultureInfo.InvariantCulture
+            )
+                ? builder.Append(buffer[..written])
+                : builder.Append(value.ToString(format.ToString(), CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>Appends a value with invariant formatting without creating an intermediate string.</summary>
+        public static StringBuilder AppendInvariant(
+            this StringBuilder builder,
+            float value,
+            ReadOnlySpan<char> format = default)
+        {
+            Span<char> buffer = stackalloc char[64];
+            return value.TryFormat(
+                buffer,
+                out var written,
+                format,
+                CultureInfo.InvariantCulture
+            )
+                ? builder.Append(buffer[..written])
+                : builder.Append(value.ToString(format.ToString(), CultureInfo.InvariantCulture));
         }
 
         /// <summary>
@@ -178,9 +300,20 @@ namespace Conduit
         /// Checks extension membership using ordinal-ignore-case comparison.
         /// </summary>
         public static bool ContainsExtension(IReadOnlyList<string> normalizedExtensions, string extension)
+            => ContainsExtension(normalizedExtensions, extension.AsSpan());
+
+        /// <summary>
+        /// Checks span-based extension membership without materializing a substring.
+        /// </summary>
+        public static bool ContainsExtension(
+            IReadOnlyList<string> normalizedExtensions,
+            ReadOnlySpan<char> extension)
         {
             for (var index = 0; index < normalizedExtensions.Count; index++)
-                if (string.Equals(normalizedExtensions[index], extension, StringComparison.OrdinalIgnoreCase))
+                if (normalizedExtensions[index].AsSpan().Equals(
+                        extension,
+                        StringComparison.OrdinalIgnoreCase
+                    ))
                     return true;
 
             return false;
@@ -213,7 +346,9 @@ namespace Conduit
                 return false;
 
             foreach (var character in value)
-                if (!Uri.IsHexDigit(character))
+                if (character is not (>= '0' and <= '9')
+                    and not (>= 'a' and <= 'f')
+                    and not (>= 'A' and <= 'F'))
                     return false;
 
             return true;
@@ -242,8 +377,42 @@ namespace Conduit
         public static string BuildHierarchyPath(Transform transform)
         {
             using var pooledBuilder = GetStringBuilder(out var builder);
-            AppendHierarchySegment(builder, transform);
+            AppendHierarchySegment(builder, transform, 0);
             return builder.ToString();
+
+            static void AppendHierarchySegment(StringBuilder builder, Transform current, int depth)
+            {
+                // cap call depth while retaining the cheaper recursive path for normal scene hierarchies.
+                if (depth == 256)
+                {
+                    AppendDeepAncestors(builder, current);
+                    return;
+                }
+
+                var parent = current.parent;
+                if (parent != null)
+                {
+                    AppendHierarchySegment(builder, parent, depth + 1);
+                    builder.Append('/');
+                }
+
+                builder.Append(current.name);
+            }
+
+            static void AppendDeepAncestors(StringBuilder builder, Transform current)
+            {
+                using var pooledAncestors = GetPooledList<Transform>(out var ancestors);
+                for (Transform? ancestor = current; ancestor != null; ancestor = ancestor.parent)
+                    ancestors.Add(ancestor);
+
+                for (var index = ancestors.Count - 1; index >= 0; index--)
+                {
+                    if (index < ancestors.Count - 1)
+                        builder.Append('/');
+
+                    builder.Append(ancestors[index].name);
+                }
+            }
         }
 
         /// <summary>
@@ -284,20 +453,6 @@ namespace Conduit
         /// Formats the identifier of a Unity object for display in tool output.
         /// </summary>
         public static string FormatObjectId(Object target) => FormatObjectId(GetObjectId(target));
-
-        /// <summary>
-        /// Appends a transform and its parents to a hierarchy-path builder.
-        /// </summary>
-        static void AppendHierarchySegment(StringBuilder builder, Transform transform)
-        {
-            if (transform.parent != null)
-            {
-                AppendHierarchySegment(builder, transform.parent);
-                builder.Append('/');
-            }
-
-            builder.Append(transform.name);
-        }
 
         /// <summary>
         /// Removes diagnostics that only repeat the exception message.

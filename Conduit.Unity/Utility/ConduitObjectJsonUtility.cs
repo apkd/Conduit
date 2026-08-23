@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -75,8 +76,8 @@ namespace Conduit
             var normalizedJson = NormalizeOverwriteJson(target, json);
             var beforeJson = EditorJsonUtility.ToJson(target, true);
             var beforeOwningGameObjectName = GetComparableOwningGameObjectName(target, normalizedJson);
-            var updatedTarget = ApplyOverwrite(target, normalizedJson);
-            var afterJson = EditorJsonUtility.ToJson(updatedTarget, true);
+            var updatedTarget = ApplyOverwrite(target, normalizedJson, beforeJson, out var afterJson);
+            afterJson ??= EditorJsonUtility.ToJson(updatedTarget, true);
             using var pooledPaths = ConduitUtility.GetPooledList<string>(out var changedPaths);
             CollectChangedSerializedPaths(beforeJson, afterJson, changedPaths);
             AddOwningGameObjectNameChangeIfNeeded(updatedTarget, beforeOwningGameObjectName, changedPaths);
@@ -114,20 +115,19 @@ namespace Conduit
             if (beforeJson == afterJson)
                 return;
 
-            if (!TryFlattenJson(beforeJson, out var beforeValues) || !TryFlattenJson(afterJson, out var afterValues))
+            using var pooledBeforeValues = ConduitUtility.GetPooledDictionary<string, string>(out var beforeValues);
+            using var pooledAfterValues = ConduitUtility.GetPooledDictionary<string, string>(out var afterValues);
+            if (!TryFlattenJson(beforeJson, beforeValues) || !TryFlattenJson(afterJson, afterValues))
                 throw new InvalidOperationException("Could not diff serialized JSON after overwrite.");
 
             foreach (var pair in beforeValues)
             {
-                if (!afterValues.TryGetValue(pair.Key, out var afterValue) || pair.Value != afterValue)
+                if (!afterValues.Remove(pair.Key, out var afterValue) || pair.Value != afterValue)
                     changedPaths.Add(pair.Key);
             }
 
-            foreach (var pair in afterValues)
-            {
-                if (!beforeValues.ContainsKey(pair.Key))
-                    changedPaths.Add(pair.Key);
-            }
+            foreach (var path in afterValues.Keys)
+                changedPaths.Add(path);
         }
 
         static string FormatChangedPathList(List<string> changedPaths)
@@ -166,9 +166,8 @@ namespace Conduit
             changedPaths.Add("GameObject.m_Name");
         }
 
-        static bool TryFlattenJson(string json, out Dictionary<string, string> values)
+        static bool TryFlattenJson(string json, Dictionary<string, string> values)
         {
-            values = new(StringComparer.Ordinal);
             var index = 0;
             SkipWhitespace(json, ref index);
             if (!TryFlattenJsonValue(json, ref index, string.Empty, values))
@@ -289,7 +288,15 @@ namespace Conduit
                 return false;
 
             if (path.Length > 0)
-                values[path] = string.Concat(PrimitiveValuePrefix, json.AsSpan(start, index - start).ToString());
+                values[path] = string.Create(
+                    1 + index - start,
+                    (Json: json, Start: start, Length: index - start),
+                    static (destination, state) =>
+                    {
+                        destination[0] = PrimitiveValuePrefix[0];
+                        state.Json.AsSpan(state.Start, state.Length).CopyTo(destination[1..]);
+                    }
+                );
 
             return true;
         }
@@ -376,64 +383,81 @@ namespace Conduit
             if (!TryConsume(json, ref index, '"'))
                 return false;
 
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            while (index < json.Length)
+            var start = index;
+            ConduitUtility.StringBuilderHandle pooledBuilder = default;
+            StringBuilder? builder = null;
+            try
             {
-                var character = json[index++];
-                if (character == '"')
+                while (index < json.Length)
                 {
-                    value = builder.ToString();
-                    return true;
-                }
+                    var character = json[index++];
+                    if (character == '"')
+                    {
+                        value = builder == null
+                            ? json.Substring(start, index - start - 1)
+                            : builder.ToString();
+                        return true;
+                    }
 
-                if (character != '\\')
-                {
-                    builder.Append(character);
-                    continue;
-                }
+                    if (character != '\\')
+                    {
+                        builder?.Append(character);
+                        continue;
+                    }
 
-                if (index >= json.Length)
-                    return false;
+                    if (builder == null)
+                    {
+                        pooledBuilder = ConduitUtility.GetStringBuilder(out builder);
+                        builder.Append(json, start, index - start - 1);
+                    }
 
-                var escape = json[index++];
-                switch (escape)
-                {
-                    case '"':
-                    case '\\':
-                    case '/':
-                        builder.Append(escape);
-                        break;
-                    case 'b':
-                        builder.Append('\b');
-                        break;
-                    case 'f':
-                        builder.Append('\f');
-                        break;
-                    case 'n':
-                        builder.Append('\n');
-                        break;
-                    case 'r':
-                        builder.Append('\r');
-                        break;
-                    case 't':
-                        builder.Append('\t');
-                        break;
-                    case 'u':
-                        if (index + 4 > json.Length)
-                            return false;
-
-                        if (!ushort.TryParse(json.AsSpan(index, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codeUnit))
-                            return false;
-
-                        builder.Append((char)codeUnit);
-                        index += 4;
-                        break;
-                    default:
+                    if (index >= json.Length)
                         return false;
-                }
-            }
 
-            return false;
+                    var escape = json[index++];
+                    switch (escape)
+                    {
+                        case '"':
+                        case '\\':
+                        case '/':
+                            builder.Append(escape);
+                            break;
+                        case 'b':
+                            builder.Append('\b');
+                            break;
+                        case 'f':
+                            builder.Append('\f');
+                            break;
+                        case 'n':
+                            builder.Append('\n');
+                            break;
+                        case 'r':
+                            builder.Append('\r');
+                            break;
+                        case 't':
+                            builder.Append('\t');
+                            break;
+                        case 'u':
+                            if (index + 4 > json.Length)
+                                return false;
+
+                            if (!ushort.TryParse(json.AsSpan(index, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codeUnit))
+                                return false;
+
+                            builder.Append((char)codeUnit);
+                            index += 4;
+                            break;
+                        default:
+                            return false;
+                    }
+                }
+
+                return false;
+            }
+            finally
+            {
+                pooledBuilder.Dispose();
+            }
         }
 
         static bool TrySkipJsonValue(string json, ref int index)
@@ -527,17 +551,19 @@ namespace Conduit
         static Material OverwriteMaterial(Material target, string json)
         {
             ValidateEditablePersistentAsset(target);
-            if (!TryFlattenJson(json, out var values))
+            using var pooledValues = ConduitUtility.GetPooledDictionary<string, string>(out var values);
+            if (!TryFlattenJson(json, values))
                 throw new InvalidOperationException("Material JSON payload was invalid.");
 
-            var serializedObject = new SerializedObject(target);
-            var shaderPropertyTypes = GetMaterialShaderPropertyTypes(target);
-            var directEdits = new List<MaterialDirectEdit>();
-            var tagEdits = new Dictionary<string, string>(StringComparer.Ordinal);
-            var floatEdits = new Dictionary<string, float>(StringComparer.Ordinal);
-            var intEdits = new Dictionary<string, int>(StringComparer.Ordinal);
-            var colorEdits = new Dictionary<string, Color>(StringComparer.Ordinal);
-            var consumedPaths = new HashSet<string>(StringComparer.Ordinal);
+            using var serializedObject = new SerializedObject(target);
+            using var pooledShaderPropertyTypes = ConduitUtility.GetPooledDictionary<string, ShaderPropertyType>(out var shaderPropertyTypes);
+            using var pooledDirectEdits = ConduitUtility.GetPooledList<MaterialDirectEdit>(out var directEdits);
+            using var pooledTagEdits = ConduitUtility.GetPooledDictionary<string, string>(out var tagEdits);
+            using var pooledFloatEdits = ConduitUtility.GetPooledDictionary<string, float>(out var floatEdits);
+            using var pooledIntEdits = ConduitUtility.GetPooledDictionary<string, int>(out var intEdits);
+            using var pooledColorEdits = ConduitUtility.GetPooledDictionary<string, Color>(out var colorEdits);
+            using var pooledConsumedPaths = ConduitUtility.GetPooledSet<string>(out var consumedPaths);
+            GetMaterialShaderPropertyTypes(target, shaderPropertyTypes);
 
             CollectDirectMaterialEdits(serializedObject, values, directEdits, consumedPaths);
             CollectMaterialTagEdits(values, tagEdits, consumedPaths);
@@ -640,7 +666,6 @@ namespace Conduit
             Dictionary<string, string> values,
             HashSet<string> consumedPaths)
         {
-            var canonicalPassNames = GetMaterialShaderPassNames(serializedObject, target);
             if (values.TryGetValue("disabledShaderPasses", out var rootValue))
             {
                 if (rootValue != EmptyArrayValue)
@@ -650,7 +675,7 @@ namespace Conduit
                 return Array.Empty<string>();
             }
 
-            var disabledPassesByIndex = new Dictionary<int, string>();
+            using var pooledDisabledPasses = ConduitUtility.GetPooledDictionary<int, string>(out var disabledPassesByIndex);
             foreach (var pair in values)
             {
                 if (!TryParseIndexedChildPath(pair.Key, "disabledShaderPasses", out var index, out var childPath))
@@ -669,12 +694,15 @@ namespace Conduit
             if (disabledPassesByIndex.Count == 0)
                 return null;
 
-            var indexes = new int[disabledPassesByIndex.Count];
-            disabledPassesByIndex.Keys.CopyTo(indexes, 0);
-            Array.Sort(indexes);
-            var desiredPasses = new string[indexes.Length];
-            var seenNames = new HashSet<string>(StringComparer.Ordinal);
-            for (var arrayIndex = 0; arrayIndex < indexes.Length; arrayIndex++)
+            using var pooledPassNames = ConduitUtility.GetPooledDictionary<string, string>(out var canonicalPassNames);
+            GetMaterialShaderPassNames(serializedObject, target, canonicalPassNames);
+            using var pooledIndexes = ConduitUtility.GetPooledList<int>(out var indexes);
+            foreach (var index in disabledPassesByIndex.Keys)
+                indexes.Add(index);
+            indexes.Sort();
+            var desiredPasses = new string[indexes.Count];
+            using var pooledSeenNames = ConduitUtility.GetPooledSet<string>(out var seenNames);
+            for (var arrayIndex = 0; arrayIndex < indexes.Count; arrayIndex++)
             {
                 var requestedPassName = disabledPassesByIndex[indexes[arrayIndex]];
                 var normalizedPassName = NormalizeMaterialShaderPassName(requestedPassName);
@@ -697,12 +725,16 @@ namespace Conduit
             HashSet<string> consumedPaths)
         {
             CollectMaterialNamedScalarEdits(
+                shaderPropertyTypes,
                 values,
+                floatEdits,
                 "m_SavedProperties.m_Floats",
                 consumedPaths,
                 decode: DecodeFloatValue,
-                validate: propertyName => ValidateMaterialShaderPropertyType(shaderPropertyTypes, propertyName, "float", ShaderPropertyType.Float, ShaderPropertyType.Range),
-                assign: (propertyName, value) => floatEdits[propertyName] = value);
+                label: "float",
+                supportedType: ShaderPropertyType.Float,
+                alternateSupportedType: ShaderPropertyType.Range
+            );
         }
 
         static void CollectMaterialIntEdits(
@@ -712,21 +744,27 @@ namespace Conduit
             HashSet<string> consumedPaths)
         {
             CollectMaterialNamedScalarEdits(
+                shaderPropertyTypes,
                 values,
+                intEdits,
                 "m_SavedProperties.m_Ints",
                 consumedPaths,
                 decode: DecodeIntValue,
-                validate: propertyName => ValidateMaterialShaderPropertyType(shaderPropertyTypes, propertyName, "integer", ShaderPropertyType.Int),
-                assign: (propertyName, value) => intEdits[propertyName] = value);
+                label: "integer",
+                supportedType: ShaderPropertyType.Int
+            );
         }
 
         static void CollectMaterialNamedScalarEdits<TValue>(
+            Dictionary<string, ShaderPropertyType> shaderPropertyTypes,
             Dictionary<string, string> values,
+            Dictionary<string, TValue> edits,
             string collectionPath,
             HashSet<string> consumedPaths,
             Func<string, string, TValue> decode,
-            Action<string> validate,
-            Action<string, TValue> assign)
+            string label,
+            ShaderPropertyType supportedType,
+            ShaderPropertyType? alternateSupportedType = null)
         {
             if (values.TryGetValue(collectionPath, out var rootValue))
             {
@@ -736,7 +774,7 @@ namespace Conduit
                 consumedPaths.Add(collectionPath);
             }
 
-            var entries = new Dictionary<int, MaterialNamedScalarEntry>();
+            using var pooledEntries = ConduitUtility.GetPooledDictionary<int, MaterialNamedScalarEntry>(out var entries);
             foreach (var pair in values)
             {
                 if (!TryParseIndexedChildPath(pair.Key, collectionPath, out var index, out var childPath))
@@ -765,10 +803,11 @@ namespace Conduit
             if (entries.Count == 0)
                 return;
 
-            var indexes = new int[entries.Count];
-            entries.Keys.CopyTo(indexes, 0);
-            Array.Sort(indexes);
-            var seenNames = new HashSet<string>(StringComparer.Ordinal);
+            using var pooledIndexes = ConduitUtility.GetPooledList<int>(out var indexes);
+            foreach (var index in entries.Keys)
+                indexes.Add(index);
+            indexes.Sort();
+            using var pooledSeenNames = ConduitUtility.GetPooledSet<string>(out var seenNames);
             foreach (var index in indexes)
             {
                 var entry = entries[index];
@@ -778,8 +817,17 @@ namespace Conduit
                 if (!seenNames.Add(propertyName))
                     throw new InvalidOperationException($"Material overwrite received duplicate key '{propertyName}' in '{collectionPath}'.");
 
-                validate(propertyName);
-                assign(propertyName, decode($"{collectionPath}[{index}].second", encodedValue));
+                ValidateMaterialShaderPropertyType(
+                    shaderPropertyTypes,
+                    propertyName,
+                    label,
+                    supportedType,
+                    alternateSupportedType
+                );
+                edits[propertyName] = decode(
+                    $"{collectionPath}[{index}].second",
+                    encodedValue
+                );
             }
         }
 
@@ -800,7 +848,7 @@ namespace Conduit
                 consumedPaths.Add(collectionPath);
             }
 
-            var entries = new Dictionary<int, MaterialColorEntry>();
+            using var pooledEntries = ConduitUtility.GetPooledDictionary<int, MaterialColorEntry>(out var entries);
             foreach (var pair in values)
             {
                 if (!TryParseIndexedChildPath(pair.Key, collectionPath, out var index, out var childPath))
@@ -842,10 +890,11 @@ namespace Conduit
             if (entries.Count == 0)
                 return;
 
-            var indexes = new int[entries.Count];
-            entries.Keys.CopyTo(indexes, 0);
-            Array.Sort(indexes);
-            var seenNames = new HashSet<string>(StringComparer.Ordinal);
+            using var pooledIndexes = ConduitUtility.GetPooledList<int>(out var indexes);
+            foreach (var index in entries.Keys)
+                indexes.Add(index);
+            indexes.Sort();
+            using var pooledSeenNames = ConduitUtility.GetPooledSet<string>(out var seenNames);
             foreach (var index in indexes)
             {
                 var entry = entries[index];
@@ -876,47 +925,47 @@ namespace Conduit
             }
         }
 
-        static Dictionary<string, ShaderPropertyType> GetMaterialShaderPropertyTypes(Material target)
+        static void GetMaterialShaderPropertyTypes(
+            Material target,
+            Dictionary<string, ShaderPropertyType> propertyTypes)
         {
             if (target.shader == null)
                 throw new InvalidOperationException("Material overwrite could not resolve a shader for the target material.");
 
             var shader = target.shader;
             var propertyCount = shader.GetPropertyCount();
-            var propertyTypes = new Dictionary<string, ShaderPropertyType>(propertyCount, StringComparer.Ordinal);
             for (var index = 0; index < propertyCount; index++)
                 propertyTypes[shader.GetPropertyName(index)] = shader.GetPropertyType(index);
-
-            return propertyTypes;
         }
 
         static void ValidateMaterialShaderPropertyType(
             Dictionary<string, ShaderPropertyType> shaderPropertyTypes,
             string propertyName,
             string label,
-            params ShaderPropertyType[] supportedTypes)
+            ShaderPropertyType supportedType,
+            ShaderPropertyType? alternateSupportedType = null)
         {
             if (!shaderPropertyTypes.TryGetValue(propertyName, out var propertyType))
                 throw new InvalidOperationException($"Material overwrite does not support {label} property '{propertyName}'.");
 
-            foreach (var supportedType in supportedTypes)
-                if (propertyType == supportedType)
-                    return;
+            if (propertyType == supportedType || propertyType == alternateSupportedType)
+                return;
 
             throw new InvalidOperationException($"Material overwrite does not support {label} property '{propertyName}'.");
         }
 
-        static Dictionary<string, string> GetMaterialShaderPassNames(SerializedObject serializedObject, Material target)
+        static void GetMaterialShaderPassNames(
+            SerializedObject serializedObject,
+            Material target,
+            Dictionary<string, string> passNames)
         {
-            var passNames = new Dictionary<string, string>(StringComparer.Ordinal);
             AddRuntimeMaterialShaderPassNames(target, passNames);
             AddSerializedMaterialShaderPassNames(serializedObject, passNames);
-            return passNames;
         }
 
         static void AddRuntimeMaterialShaderPassNames(Material target, Dictionary<string, string> passNames)
         {
-            for (var index = 0; index < target.passCount; index++)
+            for (int index = 0, passCount = target.passCount; index < passCount; index++)
             {
                 if (target.GetPassName(index) is not { Length: > 0 } passName)
                     continue;
@@ -933,7 +982,7 @@ namespace Conduit
             if (disabledPasses is not { isArray: true })
                 return;
 
-            for (var index = 0; index < disabledPasses.arraySize; index++)
+            for (int index = 0, count = disabledPasses.arraySize; index < count; index++)
             {
                 var passName = disabledPasses.GetArrayElementAtIndex(index).stringValue;
                 if (string.IsNullOrWhiteSpace(passName))
@@ -1050,7 +1099,7 @@ namespace Conduit
 
         static SerializedProperty? FindMaterialSavedPropertyEntry(SerializedProperty arrayProperty, string propertyName)
         {
-            for (var index = 0; index < arrayProperty.arraySize; index++)
+            for (int index = 0, count = arrayProperty.arraySize; index < count; index++)
             {
                 var entry = arrayProperty.GetArrayElementAtIndex(index);
                 if (entry.FindPropertyRelative("first") is not { stringValue: var currentName })
@@ -1246,8 +1295,13 @@ namespace Conduit
             return value;
         }
 
-        static Object ApplyOverwrite(Object target, string json)
+        static Object ApplyOverwrite(
+            Object target,
+            string json,
+            string beforeJson,
+            out string? afterJson)
         {
+            afterJson = null;
             if (target == null)
                 throw new InvalidOperationException("Resolved object was null.");
 
@@ -1262,7 +1316,7 @@ namespace Conduit
 
             if (target is GameObject or Component)
             {
-                OverwriteSceneObject(target, json);
+                afterJson = OverwriteSceneObject(target, json, beforeJson);
                 return target;
             }
 
@@ -1336,7 +1390,7 @@ namespace Conduit
             return RemapToPrefabContents(originalTarget, prefabRoot);
         }
 
-        static void OverwriteSceneObject(Object target, string json)
+        static string OverwriteSceneObject(Object target, string json, string beforeJson)
         {
             var gameObject = GetOwningGameObject(target)
                              ?? throw new InvalidOperationException("Could not resolve the owning scene object.");
@@ -1345,15 +1399,17 @@ namespace Conduit
             if (!scene.IsValid() || !scene.isLoaded)
                 throw new InvalidOperationException("Resolved scene object does not belong to a loaded scene.");
 
-            var beforeJson = EditorJsonUtility.ToJson(target, true);
             var beforeOwningGameObjectName = gameObject.name;
             Undo.RecordObject(target, UndoName);
             EditorJsonUtility.FromJsonOverwrite(json, target);
             ApplyOwningGameObjectNameOverwrite(target, json);
             MarkPrefabOverrideIfNeeded(target);
-            if (beforeJson != EditorJsonUtility.ToJson(target, true)
+            var afterJson = EditorJsonUtility.ToJson(target, true);
+            if (beforeJson != afterJson
                 || beforeOwningGameObjectName != gameObject.name)
                 EditorSceneManager.MarkSceneDirty(scene);
+
+            return afterJson;
         }
 
         static void OverwritePersistentObject(Object target, string json)
@@ -1378,7 +1434,8 @@ namespace Conduit
         static bool TryReadRootNameOverwrite(string json, out string name)
         {
             name = string.Empty;
-            if (!TryFlattenJson(json, out var values))
+            using var pooledValues = ConduitUtility.GetPooledDictionary<string, string>(out var values);
+            if (!TryFlattenJson(json, values))
                 return false;
 
             if (values.TryGetValue("m_Name", out var directValue))
@@ -1412,17 +1469,21 @@ namespace Conduit
                 case GameObject gameObject:
                     return FindGameObjectByPath(prefabContentsRoot.transform, BuildRelativeTransformPath(gameObject.transform));
                 case Component component:
+                {
                     var mappedGameObject = FindGameObjectByPath(prefabContentsRoot.transform, BuildRelativeTransformPath(component.transform));
-                    var originalComponents = component.gameObject.GetComponents(component.GetType());
-                    var componentIndex = Array.IndexOf(originalComponents, component);
+                    using var pooledOriginalComponents = ConduitUtility.GetPooledList<Component>(out var originalComponents);
+                    component.gameObject.GetComponents(component.GetType(), originalComponents);
+                    var componentIndex = originalComponents.IndexOf(component);
                     if (componentIndex < 0)
                         throw new InvalidOperationException($"Could not determine component index for '{component.GetType().FullName}'.");
 
-                    var mappedComponents = mappedGameObject.GetComponents(component.GetType());
-                    if (componentIndex >= mappedComponents.Length)
+                    using var pooledMappedComponents = ConduitUtility.GetPooledList<Component>(out var mappedComponents);
+                    mappedGameObject.GetComponents(component.GetType(), mappedComponents);
+                    if (componentIndex >= mappedComponents.Count)
                         throw new InvalidOperationException($"Could not remap component '{component.GetType().FullName}' inside prefab contents.");
 
                     return mappedComponents[componentIndex];
+                }
                 default:
                     return originalTarget;
             }
@@ -1433,24 +1494,25 @@ namespace Conduit
             if (relativePath is not { Length: > 0 })
                 return prefabRoot.gameObject;
 
-            var current = prefabRoot;
-            foreach (var segment in relativePath.Split('/'))
-            {
-                current = current.Find(segment);
-                if (current == null)
-                    throw new InvalidOperationException($"Could not find prefab object path '{relativePath}'.");
-            }
-
-            return current.gameObject;
+            return prefabRoot.Find(relativePath) is { } current
+                ? current.gameObject
+                : throw new InvalidOperationException($"Could not find prefab object path '{relativePath}'.");
         }
 
         static string BuildRelativeTransformPath(Transform transform)
         {
-            var segments = new Stack<string>();
+            using var pooledSegments = ConduitUtility.GetPooledList<string>(out var segments);
             for (var current = transform; current != null && current.parent != null; current = current.parent)
-                segments.Push(current.name);
+                segments.Add(current.name);
 
-            return string.Join("/", segments);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            for (var index = segments.Count - 1; index >= 0; --index)
+            {
+                if (builder.Length > 0)
+                    builder.Append('/');
+                builder.Append(segments[index]);
+            }
+            return builder.ToString();
         }
 
         static GameObject? GetOwningGameObject(Object target)

@@ -3,7 +3,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using UnityEditor;
 
 namespace Conduit
@@ -13,13 +12,39 @@ namespace Conduit
         const int MaximumDisplayedMatches = 32;
 
         internal static string Execute(PendingOperationState operation)
-            => Execute(operation, ProjectSettingsRegistry.Build());
+        {
+            var requestedOperation = ParseOperation(
+                operation.args.Length > 0 ? operation.args[0] : null
+            );
+            try
+            {
+                return Execute(
+                    operation,
+                    ProjectSettingsRegistry.Build(),
+                    requestedOperation
+                );
+            }
+            finally
+            {
+                if (requestedOperation != ProjectSettingsOperation.Get)
+                    ProjectSettingsRegistry.Invalidate();
+            }
+        }
 
         internal static string Execute(
             PendingOperationState operation,
             ProjectSettingsRegistry registry)
+            => Execute(
+                operation,
+                registry,
+                ParseOperation(operation.args.Length > 0 ? operation.args[0] : null)
+            );
+
+        static string Execute(
+            PendingOperationState operation,
+            ProjectSettingsRegistry registry,
+            ProjectSettingsOperation requestedOperation)
         {
-            var requestedOperation = ParseOperation(operation.args.FirstOrDefault());
             string key = operation.target ?? string.Empty;
             if (requestedOperation != ProjectSettingsOperation.Get
                 && EditorApplication.isPlayingOrWillChangePlaymode)
@@ -46,9 +71,38 @@ namespace Conduit
                 .Select(group => group.First())
                 .OrderBy(setting => setting.Key, StringComparer.Ordinal)
                 .ToList();
-            var matchingKeys = MatchKeys(distinct.Select(setting => setting.Key), query)
-                .ToHashSet(StringComparer.Ordinal);
-            return distinct.Where(setting => matchingKeys.Contains(setting.Key)).ToList();
+            return MatchDistinct(distinct, query);
+        }
+
+        static List<ProjectSetting> MatchDistinct(
+            IReadOnlyList<ProjectSetting> settings,
+            string query)
+        {
+            string normalized = ProjectSettingKey.Canonicalize(query);
+            if (normalized.Length == 0)
+                return new(settings);
+
+            var matches = new List<ProjectSetting>();
+            foreach (var setting in settings)
+                if (setting.Key == normalized)
+                    matches.Add(setting);
+            if (matches.Count > 0)
+                return matches;
+
+            string compactQuery = Compact(normalized);
+            foreach (var setting in settings)
+                if (setting.CompactKey == compactQuery)
+                    matches.Add(setting);
+            if (matches.Count > 0)
+                return matches;
+
+            var queryTokens = ProjectSettingKey.Tokens(normalized);
+            foreach (var setting in settings)
+                if (IsOrderedTokenPrefix(queryTokens, setting.Tokens)
+                    || setting.CompactKey.IndexOf(compactQuery, StringComparison.Ordinal) >= 0)
+                    matches.Add(setting);
+
+            return matches;
         }
 
         static ProjectSettingsOperation ParseOperation(string? operation)
@@ -67,11 +121,7 @@ namespace Conduit
         static string Get(ProjectSettingsRegistry registry, string query)
         {
             string normalized = ProjectSettingKey.Canonicalize(query);
-            var groups = registry.Settings
-                .Select(setting => TopLevelGroup(setting.Key))
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(group => group, StringComparer.Ordinal)
-                .ToList();
+            var groups = registry.TopLevelGroups;
             if (normalized.Length == 0)
                 return ListGroups(groups);
 
@@ -88,22 +138,28 @@ namespace Conduit
 
             if (requestedGroup != null)
             {
-                var registrations = registry.Settings
-                    .Where(setting => setting.Key.StartsWith(requestedGroup + ".", StringComparison.Ordinal))
-                    .GroupBy(setting => setting.Key, StringComparer.Ordinal)
-                    .ToList();
-                var duplicate = registrations.FirstOrDefault(group => group.Count() > 1);
-                if (duplicate != null)
-                    throw DuplicateKey(duplicate.Key, duplicate.Count());
+                string groupPrefix = requestedGroup + ".";
+                var groupSettings = new List<ProjectSetting>();
+                ProjectSetting? duplicate = null;
+                foreach (var setting in registry.DistinctSettings)
+                {
+                    if (!setting.Key.StartsWith(groupPrefix, StringComparison.Ordinal))
+                        continue;
 
-                var groupSettings = registrations
-                    .Select(group => group.Single())
-                    .OrderBy(setting => setting.Key, StringComparer.Ordinal)
-                    .ToList();
+                    groupSettings.Add(setting);
+                    if (duplicate == null && registry.CountRegistrations(setting.Key) > 1)
+                        duplicate = setting;
+                }
+                if (duplicate != null)
+                    throw DuplicateKey(
+                        duplicate.Key,
+                        registry.CountRegistrations(duplicate.Key)
+                    );
+
                 return ReadGroup(requestedGroup, groupSettings);
             }
 
-            var matches = Match(registry.Settings, query);
+            var matches = Match(registry, normalized);
             if (matches.Count == 0)
                 return $"No project settings match '{query.Trim()}'.";
 
@@ -116,7 +172,7 @@ namespace Conduit
             ProjectSettingsRegistry registry,
             string query)
         {
-            var matches = Match(registry.Settings, query);
+            var matches = Match(registry, query);
             if (matches.Count == 0)
                 return $"No project settings match '{query.Trim()}'.";
             if (matches.Count != 1)
@@ -235,10 +291,19 @@ namespace Conduit
 
         static ProjectSetting GetUnique(ProjectSettingsRegistry registry, ProjectSetting setting)
         {
-            int registrations = registry.Settings.Count(candidate => candidate.Key == setting.Key);
+            int registrations = registry.CountRegistrations(setting.Key);
             if (registrations != 1)
                 throw DuplicateKey(setting.Key, registrations);
             return setting;
+        }
+
+        static List<ProjectSetting> Match(ProjectSettingsRegistry registry, string query)
+        {
+            var normalized = ProjectSettingKey.Canonicalize(query);
+            if (normalized.Length > 0 && registry.TryGetDistinct(normalized, out var exact))
+                return new() { exact };
+
+            return MatchDistinct(registry.DistinctSettings, normalized);
         }
 
         static void EnsureUniqueWhenExact(
@@ -300,7 +365,7 @@ namespace Conduit
         }
 
         static string Compact(string key)
-            => key.Replace(".", string.Empty).Replace("_", string.Empty);
+            => ProjectSettingKey.Compact(key);
 
         static string CollectionKey(string appendKey)
         {
@@ -308,15 +373,10 @@ namespace Conduit
             return separator < 0 ? appendKey : appendKey[..separator];
         }
 
-        static string TopLevelGroup(string key)
-        {
-            int separator = key.IndexOf('.');
-            return separator < 0 ? key : key[..separator];
-        }
-
         static string ListGroups(IReadOnlyList<string> groups)
         {
-            var builder = new StringBuilder()
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder
                 .Append("Found ")
                 .Append(groups.Count)
                 .Append(groups.Count == 1
@@ -329,7 +389,8 @@ namespace Conduit
 
         static string ReadGroup(string group, IReadOnlyList<ProjectSetting> settings)
         {
-            var builder = new StringBuilder()
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder
                 .Append("Found ")
                 .Append(settings.Count)
                 .Append(settings.Count == 1
@@ -351,7 +412,8 @@ namespace Conduit
             if (matches.Count == 1)
                 return $"{matches[0].Key} = {ReadSafely(matches[0])}";
 
-            var builder = new StringBuilder()
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder
                 .Append("Found ")
                 .Append(matches.Count)
                 .Append(" project settings matching '")
@@ -359,12 +421,18 @@ namespace Conduit
                 .Append("' (showing ")
                 .Append(Math.Min(matches.Count, MaximumDisplayedMatches))
                 .Append("):");
-            foreach (var match in matches.Take(MaximumDisplayedMatches))
+            var displayed = 0;
+            foreach (var match in matches)
+            {
+                if (displayed++ == MaximumDisplayedMatches)
+                    break;
+
                 builder
                     .Append('\n')
                     .Append(match.Key)
                     .Append(" = ")
                     .Append(ReadSafely(match));
+            }
             return builder.ToString();
         }
 
@@ -378,7 +446,8 @@ namespace Conduit
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(key => key, StringComparer.Ordinal)
                 .ToList();
-            var builder = new StringBuilder()
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder
                 .Append("Cannot ")
                 .Append(verb)
                 .Append(" '")
@@ -390,8 +459,14 @@ namespace Conduit
                 .Append(". Use a more specific key (showing ")
                 .Append(Math.Min(keys.Count, MaximumDisplayedMatches))
                 .Append("):");
-            foreach (string key in keys.Take(MaximumDisplayedMatches))
+            var displayed = 0;
+            foreach (string key in keys)
+            {
+                if (displayed++ == MaximumDisplayedMatches)
+                    break;
+
                 builder.Append('\n').Append(key);
+            }
             return builder.ToString();
         }
 

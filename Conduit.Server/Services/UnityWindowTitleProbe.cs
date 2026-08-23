@@ -18,15 +18,30 @@ static class UnityWindowTitleProbe
         "/bin",
     ];
 
+    [ThreadStatic] static bool processEnvironmentCacheActive;
+    [ThreadStatic] static int processEnvironmentCacheProcessId;
+    [ThreadStatic] static byte[]? processEnvironmentCache;
+    [ThreadStatic] static Dictionary<string, string?>? processEnvironmentValueCache;
+
     internal static UnityWindowTitleSignal? TryFindMatchingProcessWindowTitle(int processId, Func<string, bool> predicate)
+        => TryFindMatchingProcessWindowTitle(
+            processId,
+            predicate,
+            TryReadMainWindowTitle(processId)
+        );
+
+    internal static UnityWindowTitleSignal? TryFindMatchingProcessWindowTitle(
+        int processId,
+        Func<string, bool> predicate,
+        string? mainWindowTitle)
     {
         if (processId <= 0)
             return null;
 
-        if (TryReadMainWindowTitle(processId) is { } mainWindowTitle && predicate(mainWindowTitle))
+        if (mainWindowTitle is not null && predicate(mainWindowTitle))
             return new(mainWindowTitle, false, "process");
 
-        foreach (var signal in ReadProcessWindowTitles(processId))
+        foreach (var signal in ReadProcessWindowTitles(processId, mainWindowTitle))
             if (predicate(signal.Title))
                 return signal;
 
@@ -34,28 +49,51 @@ static class UnityWindowTitleProbe
     }
 
     internal static List<UnityWindowTitleSignal> ReadProcessWindowTitles(int processId)
+        => ReadProcessWindowTitles(processId, TryReadMainWindowTitle(processId));
+
+    static List<UnityWindowTitleSignal> ReadProcessWindowTitles(
+        int processId,
+        string? mainWindowTitle)
     {
         var titles = new List<UnityWindowTitleSignal>(4);
         if (processId <= 0)
             return titles;
 
-        // keep the cheap process api first; platform probes fill in secondary modal/progress windows.
-        if (TryReadMainWindowTitle(processId) is { } mainWindowTitle)
-            AddTitle(titles, mainWindowTitle, isFocused: false, "process");
-
-        if (OperatingSystem.IsWindows())
-            TryAddWindowsWindowTitles(titles, processId);
-
-        if (OperatingSystem.IsLinux())
+        var previousCacheActive = processEnvironmentCacheActive;
+        var previousCacheProcessId = processEnvironmentCacheProcessId;
+        var previousCache = processEnvironmentCache;
+        var previousValueCache = processEnvironmentValueCache;
+        processEnvironmentCacheActive = true;
+        processEnvironmentCacheProcessId = processId;
+        processEnvironmentCache = TryReadProcessEnvironment(processId);
+        processEnvironmentValueCache = new(StringComparer.Ordinal);
+        try
         {
-            TryAddX11WindowTitles(titles, processId);
-            AddTitles(titles, TryReadHyprlandWindowTitles(processId));
-            AddTitles(titles, TryReadSwayWindowTitles(processId));
-            AddTitles(titles, TryReadNiriWindowTitles(processId));
-        }
+            // keep the cheap process api first; platform probes fill in secondary modal/progress windows.
+            if (mainWindowTitle is not null)
+                AddTitle(titles, mainWindowTitle, isFocused: false, "process");
 
-        titles.Sort(static (left, right) => right.IsFocused.CompareTo(left.IsFocused));
-        return titles;
+            if (OperatingSystem.IsWindows())
+                TryAddWindowsWindowTitles(titles, processId);
+
+            if (OperatingSystem.IsLinux())
+            {
+                TryAddX11WindowTitles(titles, processId);
+                AddTitles(titles, TryReadHyprlandWindowTitles(processId));
+                AddTitles(titles, TryReadSwayWindowTitles(processId));
+                AddTitles(titles, TryReadNiriWindowTitles(processId));
+            }
+
+            titles.Sort(static (left, right) => right.IsFocused.CompareTo(left.IsFocused));
+            return titles;
+        }
+        finally
+        {
+            processEnvironmentCacheActive = previousCacheActive;
+            processEnvironmentCacheProcessId = previousCacheProcessId;
+            processEnvironmentCache = previousCache;
+            processEnvironmentValueCache = previousValueCache;
+        }
     }
 
     internal static string? TryReadMainWindowTitle(int processId)
@@ -67,9 +105,10 @@ static class UnityWindowTitleProbe
         try
         {
             process.Refresh();
-            return string.IsNullOrWhiteSpace(process.MainWindowTitle)
+            var title = process.MainWindowTitle;
+            return string.IsNullOrWhiteSpace(title)
                 ? null
-                : process.MainWindowTitle.Trim();
+                : title.Trim();
         }
         catch
         {
@@ -242,7 +281,7 @@ static class UnityWindowTitleProbe
     static void AddTitle(List<UnityWindowTitleSignal> titles, string? title, bool isFocused, string source)
     {
         var normalizedTitle = title?.Trim();
-        if (string.IsNullOrWhiteSpace(normalizedTitle))
+        if (normalizedTitle is not { Length: > 0 })
             return;
 
         for (var index = 0; index < titles.Count; index++)
@@ -513,12 +552,9 @@ static class UnityWindowTitleProbe
             if (!Directory.Exists(xdgRuntimeDirectory))
                 return null;
 
-            return Directory
-                .EnumerateFileSystemEntries(xdgRuntimeDirectory, "sway-ipc.*.sock")
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .Select(file => file.FullName)
-                .FirstOrDefault();
+            return FindNewestPath(
+                Directory.EnumerateFileSystemEntries(xdgRuntimeDirectory, "sway-ipc.*.sock")
+            );
         }
         catch
         {
@@ -548,12 +584,7 @@ static class UnityWindowTitleProbe
                 ? $"niri.{waylandDisplay}.*.sock"
                 : "niri.wayland-*.sock";
 
-            return Directory
-                .EnumerateFileSystemEntries(xdgRuntimeDirectory, pattern)
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .Select(file => file.FullName)
-                .FirstOrDefault();
+            return FindNewestPath(Directory.EnumerateFileSystemEntries(xdgRuntimeDirectory, pattern));
         }
         catch
         {
@@ -576,19 +607,34 @@ static class UnityWindowTitleProbe
             if (!Directory.Exists(hyprlandDirectory))
                 return null;
 
-            var bestCandidate = Directory
-                .EnumerateDirectories(hyprlandDirectory)
-                .Where(directory => File.Exists(Path.Combine(directory, ".socket.sock")))
-                .Select(directory => new DirectoryInfo(directory))
-                .OrderByDescending(directory => directory.LastWriteTimeUtc)
-                .FirstOrDefault();
-
-            return bestCandidate?.Name;
+            var bestCandidate = FindNewestPath(
+                Directory
+                    .EnumerateDirectories(hyprlandDirectory)
+                    .Where(directory => File.Exists(Path.Combine(directory, ".socket.sock")))
+            );
+            return bestCandidate is null ? null : Path.GetFileName(bestCandidate);
         }
         catch
         {
             return null;
         }
+    }
+
+    static string? FindNewestPath(IEnumerable<string> paths)
+    {
+        string? newestPath = null;
+        var newestWriteTime = DateTime.MinValue;
+        foreach (var path in paths)
+        {
+            var writeTime = File.GetLastWriteTimeUtc(path);
+            if (writeTime <= newestWriteTime)
+                continue;
+
+            newestPath = path;
+            newestWriteTime = writeTime;
+        }
+
+        return newestPath;
     }
 
     static void TryKillProcessTree(Process process)
@@ -903,8 +949,27 @@ static class UnityWindowTitleProbe
 
         try
         {
-            var bytes = File.ReadAllBytes($"/proc/{processId}/environ");
-            var prefix = Encoding.UTF8.GetBytes($"{name}=");
+            var useCache = processEnvironmentCacheActive
+                           && processEnvironmentCacheProcessId == processId;
+            if (useCache
+                && processEnvironmentValueCache!.TryGetValue(name, out var cachedValue))
+                return cachedValue;
+
+            var bytes = useCache
+                ? processEnvironmentCache
+                : TryReadProcessEnvironment(processId);
+            if (bytes is null)
+            {
+                if (useCache)
+                    processEnvironmentValueCache![name] = null;
+                return null;
+            }
+
+            var nameByteCount = Encoding.UTF8.GetByteCount(name);
+            Span<byte> encodedName = nameByteCount <= 128
+                ? stackalloc byte[nameByteCount]
+                : new byte[nameByteCount];
+            Encoding.UTF8.GetBytes(name, encodedName);
             var offset = 0;
             while (offset < bytes.Length)
             {
@@ -913,14 +978,41 @@ static class UnityWindowTitleProbe
                     terminatorOffset = bytes.Length;
 
                 var length = terminatorOffset - offset;
-                if (length > prefix.Length
-                    && bytes.AsSpan(offset, prefix.Length).SequenceEqual(prefix))
-                    return Encoding.UTF8.GetString(bytes, offset + prefix.Length, length - prefix.Length);
+                if (length > nameByteCount
+                    && bytes[offset + nameByteCount] == (byte)'='
+                    && bytes.AsSpan(offset, nameByteCount).SequenceEqual(encodedName))
+                {
+                    var value = Encoding.UTF8.GetString(
+                        bytes,
+                        offset + nameByteCount + 1,
+                        length - nameByteCount - 1
+                    );
+                    if (useCache)
+                        processEnvironmentValueCache![name] = value;
+                    return value;
+                }
 
                 offset = terminatorOffset + 1;
             }
 
+            if (useCache)
+                processEnvironmentValueCache![name] = null;
             return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static byte[]? TryReadProcessEnvironment(int processId)
+    {
+        if (!OperatingSystem.IsLinux())
+            return null;
+
+        try
+        {
+            return File.ReadAllBytes($"/proc/{processId}/environ");
         }
         catch
         {

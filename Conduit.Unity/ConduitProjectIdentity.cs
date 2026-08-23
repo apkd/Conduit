@@ -16,12 +16,16 @@ namespace Conduit
         const int PipeNameSlugMaxLength = 32;
         const ulong PipeNameHashOffset = 14695981039346656037UL;
         const ulong PipeNameHashPrime = 1099511628211UL;
+        static readonly string projectPath = NormalizeProjectPath(
+            Path.GetFullPath(Path.Combine(Application.dataPath, ".."))
+        );
+        static readonly string pipeName = GetPipeName(projectPath);
 
         public static string GetProjectPath()
-            => NormalizeProjectPath(Path.GetFullPath(Path.Combine(Application.dataPath, "..")));
+            => projectPath;
 
         public static string GetPipeName()
-            => GetPipeName(GetProjectPath());
+            => pipeName;
 
         public static string GetPipeName(string projectPath)
         {

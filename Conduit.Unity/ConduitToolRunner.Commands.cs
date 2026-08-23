@@ -7,7 +7,7 @@ namespace Conduit
 {
     static partial class ConduitToolRunner
     {
-        static async Task ExecuteStatusAsync(
+        static Task ExecuteStatusAsync(
             int clientId,
             string requestId,
             long usageStartedUtcTicks
@@ -28,7 +28,7 @@ namespace Conduit
             }
 
             ConduitToolUsage.CompleteCall(BridgeCommandTypes.Status, usageStartedUtcTicks);
-            await ConduitConnection.TrySendResultAsync(
+            return ConduitConnection.TrySendResultAsync(
                 clientId,
                 requestId,
                 result,
@@ -106,29 +106,35 @@ namespace Conduit
         static Task ExecuteDetourAsync(PendingOperationState operation)
             => CompleteCurrentAsync(detour.Execute(operation));
 
-        static async Task ExecuteViewBurstAsmAsync(PendingOperationState operation)
+        static Task ExecuteViewBurstAsmAsync(PendingOperationState operation)
         {
+            BridgeCommandResult result;
             try
             {
                 var cpu = operation.args is { Length: > 0 } ? operation.args[0] : "x86";
-                await CompleteCurrentAsync(view_burst_asm.ViewBurstAsm(operation.target ?? string.Empty, cpu));
+                result = view_burst_asm.ViewBurstAsm(operation.target ?? string.Empty, cpu);
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
-        static async Task ExecuteReflectAsync(PendingOperationState operation)
+        static Task ExecuteReflectAsync(PendingOperationState operation)
         {
+            BridgeCommandResult result;
             try
             {
-                await CompleteCurrentAsync(reflect.Reflect(operation.args));
+                result = reflect.Reflect(operation.args);
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
         static Task ExecuteProjectSettingsAsync(PendingOperationState operation)
@@ -146,59 +152,69 @@ namespace Conduit
             }
         }
 
-        static async Task ExecuteProfilerOverviewAsync(PendingOperationState operation)
+        static Task ExecuteProfilerOverviewAsync(PendingOperationState operation)
         {
+            BridgeCommandResult result;
             try
             {
-                await CompleteCurrentAsync(profiler.Overview(operation.args));
+                result = profiler.Overview(operation.args);
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
-        static async Task ExecuteProfilerBrowseAsync(PendingOperationState operation)
+        static Task ExecuteProfilerBrowseAsync(PendingOperationState operation)
         {
+            BridgeCommandResult result;
             try
             {
-                await CompleteCurrentAsync(profiler.Browse(operation.args));
+                result = profiler.Browse(operation.args);
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
-        static async Task ExecuteProfilerHasMarkerAsync(PendingOperationState operation)
+        static Task ExecuteProfilerHasMarkerAsync(PendingOperationState operation)
         {
+            BridgeCommandResult result;
             try
             {
                 var markerName = operation.args.Length > 0
                     ? operation.args[0]
                     : string.Empty;
-                await CompleteCurrentAsync(
-                    CreateSuccessResult(
-                        profiler.HasMarker(markerName) ? "true" : "false"
-                    )
+                result = CreateSuccessResult(
+                    profiler.HasMarker(markerName) ? "true" : "false"
                 );
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
-        static async Task ExecuteCommandAsync(Func<string> getResult)
+        static Task ExecuteCommandAsync(Func<string> getResult)
         {
+            BridgeCommandResult result;
             try
             {
-                await CompleteCurrentAsync(CreateSuccessResult(getResult()));
+                result = CreateSuccessResult(getResult());
             }
             catch (Exception exception)
             {
-                await CompleteCurrentAsync(CreateExceptionResult(exception));
+                result = CreateExceptionResult(exception);
             }
+
+            return CompleteCurrentAsync(result);
         }
 
         static async Task ExecuteCommandAsync(Func<Task<string>> getResult)

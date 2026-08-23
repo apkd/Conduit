@@ -599,6 +599,85 @@ public sealed class UnityProjectEnvironmentProbeTests
     }
 
     [Test]
+    public async Task ReadCompilationDiagnosticsTracksAppendedBlocksWithoutRetainingOldDiagnostics()
+    {
+        const string compilationError = "Assets/Broken.cs(1,1): error CS0001: Broken";
+        const string compilationWarning = "Assets/Fixed.cs(2,2): warning CS0002: Warning";
+        var logPath = CreateTempLog($"## Script Compilation Error\n{compilationError}\n");
+
+        try
+        {
+            var probe = new UnityProjectEnvironmentProbe();
+            var initial = probe.ReadLatestCompilationDiagnostics(logPath);
+            File.AppendAllText(logPath, "Unrelated editor activity\n");
+            var unchanged = probe.ReadLatestCompilationDiagnostics(logPath);
+            File.AppendAllText(
+                logPath,
+                $"*** Tundra build finished\n{compilationWarning}\n"
+            );
+            var latest = probe.ReadLatestCompilationDiagnostics(logPath);
+
+            await Assert.That(initial.ErrorText).IsEqualTo(compilationError);
+            await Assert.That(unchanged.ErrorText).IsEqualTo(compilationError);
+            await Assert.That(latest.ErrorCount).IsEqualTo(0);
+            await Assert.That(latest.WarningText).IsEqualTo(compilationWarning);
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
+    [Test]
+    public async Task ReadCompilationDiagnosticsRechecksAnIncompleteTrailingLine()
+    {
+        var logPath = CreateTempLog("## Script Compilation Error\nAssets/Broken.cs(1,1): err");
+
+        try
+        {
+            var probe = new UnityProjectEnvironmentProbe();
+            var incomplete = probe.ReadLatestCompilationDiagnostics(logPath);
+            File.AppendAllText(logPath, "or CS0001: Broken\n");
+            var completed = probe.ReadLatestCompilationDiagnostics(logPath);
+
+            await Assert.That(incomplete.ErrorCount).IsEqualTo(0);
+            await Assert.That(completed.ErrorCount).IsEqualTo(1);
+            await Assert.That(completed.ErrorText)
+                .IsEqualTo("Assets/Broken.cs(1,1): error CS0001: Broken");
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
+    [Test]
+    public async Task ReadCompilationDiagnosticsDetectsSameLengthRewriteWithUnchangedTimestamp()
+    {
+        const string initialLog = "## Script Compilation Error\nAssets/A.cs(1,1): error CS0001: Broken\n";
+        const string rewrittenLog = "## Script Compilation Error\nAssets/A.cs(1,1): error CS0001: Fixed!\n";
+        var logPath = CreateTempLog(initialLog);
+
+        try
+        {
+            var probe = new UnityProjectEnvironmentProbe();
+            var initial = probe.ReadLatestCompilationDiagnostics(logPath);
+            var timestamp = File.GetLastWriteTimeUtc(logPath);
+            File.WriteAllText(logPath, rewrittenLog);
+            File.SetLastWriteTimeUtc(logPath, timestamp);
+
+            var rewritten = probe.ReadLatestCompilationDiagnostics(logPath);
+
+            await Assert.That(initial.ErrorText).Contains("Broken");
+            await Assert.That(rewritten.ErrorText).Contains("Fixed!");
+        }
+        finally
+        {
+            DeleteTempLog(logPath);
+        }
+    }
+
+    [Test]
     public async Task ResolveUnityEditorPathUsesMatchedProcessPathFirst()
     {
         var processPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "Unity-from-process"));

@@ -720,10 +720,10 @@ namespace Conduit
             CodecArguments = codecArguments;
             IsGif = isGif;
             ProbeFilter = inputFilter.Replace("vflip,", string.Empty);
+            // quality values are validated before selection and do not change encoder availability.
             ProbeKey = encoderName
                        + "\n" + inputFilter
-                       + "\n" + string.Join("\n", preInputArguments)
-                       + "\n" + string.Join("\n", codecArguments);
+                       + "\n" + string.Join("\n", preInputArguments);
         }
 
         public string EncoderName { get; }

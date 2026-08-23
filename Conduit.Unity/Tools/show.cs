@@ -22,9 +22,12 @@ namespace Conduit
     {
         const int MaxStringLength = 256;
         const int MaxCollectionPreview = 4;
+        const int MaxEnumerableScan = 4096;
         const int CompactHierarchyGameObjectThreshold = 8;
         static readonly ConcurrentDictionary<Type, FieldInfo[]> fieldCache = new();
         static readonly ConcurrentDictionary<Type, IndexableAccess> indexableAccessCache = new();
+        static readonly ConcurrentDictionary<Type, Type> enumerableElementTypeCache = new();
+        static readonly ConcurrentDictionary<Type, CustomShowAccess> customShowAccessCache = new();
 
         static readonly Dictionary<string, string> commonComponentIdentifiers
             = new(StringComparer.Ordinal)
@@ -131,9 +134,7 @@ namespace Conduit
             if (target is EditorWindow window)
                 return DebugEditorWindow(window);
 
-            var assetPath = EditorUtility.IsPersistent(target)
-                ? AssetDatabase.GetAssetPath(target)
-                : string.Empty;
+            var assetPath = match.AssetPath ?? string.Empty;
 
             if (!string.IsNullOrWhiteSpace(assetPath))
             {
@@ -148,8 +149,8 @@ namespace Conduit
 
             return target switch
             {
-                GameObject gameObject => DebugExactGameObject(gameObject),
-                _                     => DebugLooseObject(target),
+                GameObject gameObject => DebugExactGameObject(gameObject, assetPath),
+                _                     => DebugLooseObject(target, assetPath),
             };
         }
 
@@ -159,13 +160,15 @@ namespace Conduit
             if (target == null)
                 return false;
 
-            var method = target.GetType().GetMethod(
-                "ToStringForMCP",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                null,
-                Type.EmptyTypes,
-                null
-            );
+            var method = customShowAccessCache
+                .GetOrAdd(target.GetType(), static type => new(type.GetMethod(
+                    "ToStringForMCP",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    Type.EmptyTypes,
+                    null
+                )))
+                .Method;
             if (method == null || method.ReturnType != typeof(string))
                 return false;
 
@@ -183,16 +186,15 @@ namespace Conduit
             builder.AppendLine($"Object: {ConduitUtility.FormatObjectId(window)}");
             builder.AppendLine($"Focused: {(EditorWindow.focusedWindow == window ? "yes" : "no")}");
             builder.AppendLine($"Docked: {(window.docked ? "yes" : "no")}");
-            builder.AppendLine(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Position: x={0:0.###}, y={1:0.###}, width={2:0.###}, height={3:0.###}",
-                    position.x,
-                    position.y,
-                    position.width,
-                    position.height
-                )
-            );
+            builder.Append("Position: x=")
+                .AppendInvariant(position.x, "0.###")
+                .Append(", y=")
+                .AppendInvariant(position.y, "0.###")
+                .Append(", width=")
+                .AppendInvariant(position.width, "0.###")
+                .Append(", height=")
+                .AppendInvariant(position.height, "0.###")
+                .AppendLine();
             return builder.TrimEnd().ToString();
         }
 
@@ -206,9 +208,9 @@ namespace Conduit
             var sceneAsset = AssetDatabase.LoadMainAssetAtPath(assetPath);
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.AppendLine($"Asset: {assetPath}");
-            builder.AppendLine($"Main Object: {DescribeObject(sceneAsset)}");
+            builder.AppendLine($"Main Object: {DescribeObject(sceneAsset, assetPath)}");
             if (sceneAsset != null)
-                AppendObjectIdentifiers(builder, sceneAsset, 0, includeGuid: true);
+                AppendObjectIdentifiers(builder, sceneAsset, 0, includeGuid: true, assetPath: assetPath);
 
             builder.AppendLine("Cannot inspect the hierarchy because the scene is closed.");
             return builder.TrimEnd().ToString();
@@ -242,7 +244,7 @@ namespace Conduit
                 {
                     builder.AppendLine("Imported Subassets:");
                     foreach (var subasset in subassets)
-                        AppendAssetObject(builder, subasset, "Subasset");
+                        AppendAssetObject(builder, subasset, "Subasset", assetPath);
                 }
 
                 return builder.TrimEnd().ToString();
@@ -265,7 +267,7 @@ namespace Conduit
             var mainAsset = AssetDatabase.LoadMainAssetAtPath(assetPath);
 
             builder.AppendLine($"Asset: {assetPath}");
-            builder.AppendLine($"Main Object: {DescribeObject(mainAsset)}");
+            builder.AppendLine($"Main Object: {DescribeObject(mainAsset, assetPath)}");
             var subassetCount = Math.Max(0, allAssets.Count - 1);
             if (subassetCount > 0)
                 builder.AppendLine($"Imported Subassets: {subassetCount}");
@@ -273,23 +275,19 @@ namespace Conduit
             builder.AppendLine();
 
             if (mainAsset != null)
-                AppendAssetObject(builder, mainAsset, "Main Object");
+                AppendAssetObject(builder, mainAsset, "Main Object", assetPath);
 
             foreach (var subasset in allAssets)
                 if (subasset != mainAsset)
-                    AppendAssetObject(builder, subasset, "Subasset");
+                    AppendAssetObject(builder, subasset, "Subasset", assetPath);
 
             return builder.TrimEnd().ToString();
         }
 
-        static string DebugExactGameObject(GameObject gameObject)
+        static string DebugExactGameObject(GameObject gameObject, string assetPath)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            var assetPath = EditorUtility.IsPersistent(gameObject)
-                ? AssetDatabase.GetAssetPath(gameObject)
-                : string.Empty;
-
-            builder.AppendLine($"Object: {DescribeObject(gameObject)}");
+            builder.AppendLine($"Object: {DescribeObject(gameObject, assetPath)}");
             builder.AppendLine(!string.IsNullOrWhiteSpace(assetPath) ? $"Asset: {assetPath}" : $"Scene: {FormatSceneName(gameObject.scene)}");
             builder.AppendLine();
             AppendGameObjectHierarchyDetails(builder, gameObject);
@@ -297,44 +295,33 @@ namespace Conduit
             return builder.TrimEnd().ToString();
         }
 
-        static string DebugLooseObject(Object target)
+        static string DebugLooseObject(Object target, string assetPath)
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            var assetPath = EditorUtility.IsPersistent(target)
-                ? AssetDatabase.GetAssetPath(target)
-                : string.Empty;
-
             if (!string.IsNullOrWhiteSpace(assetPath))
                 builder.AppendLine($"Asset: {assetPath}");
             else if (target is Component component)
                 builder.AppendLine($"Scene: {FormatSceneName(component.gameObject.scene)}");
 
-            builder.AppendLine($"Object: {DescribeObject(target)}");
-            AppendObjectIdentifiers(builder, target, 0, includeGuid: true);
+            builder.AppendLine($"Object: {DescribeObject(target, assetPath)}");
+            AppendObjectIdentifiers(builder, target, 0, includeGuid: true, assetPath: assetPath);
             AppendSerializableFields(builder, target, 2);
             AppendNonSerializableFields(builder, target, 2);
             return builder.TrimEnd().ToString();
         }
 
-        static void AppendHierarchy(StringBuilder builder, Transform transform, bool includeSiblings)
+        static void AppendHierarchy(StringBuilder builder, Transform transform)
         {
-            if (!includeSiblings)
-            {
-                AppendHierarchyRoot(builder, transform);
-                return;
-            }
-
-            var roots = transform.gameObject.scene.GetRootGameObjects();
-            foreach (var root in roots)
-                AppendHierarchyRoot(builder, root.transform);
+            AppendHierarchyRoot(builder, transform);
         }
 
         static void AppendHierarchyRoot(StringBuilder builder, Transform transform)
         {
             builder.AppendLine(transform.name);
 
-            for (var index = 0; index < transform.childCount; index++)
-                AppendHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1);
+            var childCount = transform.childCount;
+            for (var index = 0; index < childCount; index++)
+                AppendHierarchyNode(builder, transform.GetChild(index), string.Empty, index == childCount - 1);
         }
 
         static void AppendHierarchyNode(StringBuilder builder, Transform transform, string prefix, bool isLast)
@@ -344,8 +331,9 @@ namespace Conduit
             builder.AppendLine(transform.name);
 
             var childPrefix = prefix + (isLast ? "  " : "│ ");
-            for (var index = 0; index < transform.childCount; index++)
-                AppendHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1);
+            var childCount = transform.childCount;
+            for (var index = 0; index < childCount; index++)
+                AppendHierarchyNode(builder, transform.GetChild(index), childPrefix, index == childCount - 1);
         }
 
         static string DebugScene(Scene scene)
@@ -354,11 +342,12 @@ namespace Conduit
             builder.AppendLine($"Scene: {FormatSceneName(scene)}");
             builder.AppendLine();
 
-            var componentIdentifiers = BuildSceneComponentIdentifiers(scene);
+            using var pooledRoots = ConduitUtility.GetPooledList<GameObject>(out var roots);
+            scene.GetRootGameObjects(roots);
+            var componentIdentifiers = BuildSceneComponentIdentifiers(roots);
             AppendComponentLegend(builder, componentIdentifiers);
 
             builder.AppendLine("Hierarchy:");
-            var roots = scene.GetRootGameObjects();
             foreach (var root in roots)
                 AppendSceneHierarchyRoot(builder, root.transform, componentIdentifiers);
 
@@ -367,7 +356,8 @@ namespace Conduit
 
         static Scene TryGetLoadedScene(string assetPath)
         {
-            for (int i = 0; i < SceneManager.sceneCount; i++)
+            var sceneCount = SceneManager.sceneCount;
+            for (int i = 0; i < sceneCount; i++)
             {
                 var scene = SceneManager.GetSceneAt(i);
                 if (scene.IsValid())
@@ -379,10 +369,10 @@ namespace Conduit
             return default;
         }
 
-        static Dictionary<Type, string> BuildSceneComponentIdentifiers(Scene scene)
+        static Dictionary<Type, string> BuildSceneComponentIdentifiers(List<GameObject> sceneRoots)
         {
             using var pooledRoots = ConduitUtility.GetPooledList<Transform>(out var roots);
-            foreach (var root in scene.GetRootGameObjects())
+            foreach (var root in sceneRoots)
                 roots.Add(root.transform);
 
             return BuildComponentIdentifiers(roots);
@@ -399,21 +389,25 @@ namespace Conduit
         {
             using var pooledTypes = ConduitUtility.GetPooledList<Type>(out var types);
             using var pooledSeenTypes = ConduitUtility.GetPooledSet<Type>(out var seenTypes);
+            using var pooledComponents = ConduitUtility.GetPooledList<Component>(out var components);
             foreach (var root in roots)
-            foreach (var transform in root.GetComponentsInChildren<Transform>(true))
-            foreach (var component in transform.GetComponents<Component>())
             {
-                if (component is null or Transform or RectTransform)
-                    continue;
+                components.Clear();
+                root.GetComponentsInChildren(true, components);
+                foreach (var component in components)
+                {
+                    if (component is null or Transform or RectTransform)
+                        continue;
 
-                var componentType = component.GetType();
-                if (seenTypes.Add(componentType))
-                    types.Add(componentType);
+                    var componentType = component.GetType();
+                    if (seenTypes.Add(componentType))
+                        types.Add(componentType);
+                }
             }
 
             types.Sort(static (left, right) => StringComparer.Ordinal.Compare(left.Name, right.Name));
 
-            var identifiers = new Dictionary<Type, string>();
+            var identifiers = new Dictionary<Type, string>(types.Count);
             using var pooledUsed = ConduitUtility.GetPooledSet<string>(out var used);
             foreach (var type in types)
             {
@@ -421,7 +415,6 @@ namespace Conduit
                 identifiers.Add(type, identifier);
                 used.Add(identifier);
             }
-
             return identifiers;
         }
 
@@ -445,7 +438,7 @@ namespace Conduit
             );
 
             foreach (var entry in entries)
-                builder.AppendLine($"{entry.Value}={entry.Key.Name}");
+                builder.Append(entry.Value).Append('=').AppendLine(entry.Key.Name);
 
             builder.AppendLine();
         }
@@ -472,7 +465,7 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(componentName))
                 return "CMP";
 
-            var initials = new StringBuilder();
+            using var pooledInitials = ConduitUtility.GetStringBuilder(out var initials);
             for (int index = 0; index < componentName.Length; index++)
             {
                 var character = componentName[index];
@@ -504,34 +497,65 @@ namespace Conduit
             IReadOnlyDictionary<Type, string> componentIdentifiers,
             bool includeObjectIds = true)
         {
-            AppendSceneHierarchyLine(builder, transform, componentIdentifiers, includeObjectIds);
+            using var pooledPending = ConduitUtility.GetPooledList<(
+                Transform Transform,
+                int Depth,
+                bool IsLast
+            )>(out var pending);
+            using var pooledLastAtDepth = ConduitUtility.GetPooledList<bool>(out var lastAtDepth);
+            using var pooledIdentifiers = ConduitUtility.GetPooledList<ComponentIdentifierCount>(out var identifiers);
+            using var pooledComponents = ConduitUtility.GetPooledList<Component>(out var components);
+            AppendSceneHierarchyLine(
+                builder,
+                transform,
+                componentIdentifiers,
+                includeObjectIds,
+                identifiers,
+                components
+            );
+            var rootChildCount = transform.childCount;
+            for (var index = rootChildCount - 1; index >= 0; --index)
+                pending.Add((transform.GetChild(index), 0, index == rootChildCount - 1));
 
-            for (var index = 0; index < transform.childCount; index++)
-                AppendSceneHierarchyNode(builder, transform.GetChild(index), string.Empty, index == transform.childCount - 1, componentIdentifiers, includeObjectIds);
-        }
+            while (pending.Count > 0)
+            {
+                var lastIndex = pending.Count - 1;
+                var (current, depth, isLast) = pending[lastIndex];
+                pending.RemoveAt(lastIndex);
+                if (lastAtDepth.Count == depth)
+                    lastAtDepth.Add(isLast);
+                else
+                    lastAtDepth[depth] = isLast;
 
-        static void AppendSceneHierarchyNode(
-            StringBuilder builder,
-            Transform transform,
-            string prefix,
-            bool isLast,
-            IReadOnlyDictionary<Type, string> componentIdentifiers,
-            bool includeObjectIds)
-        {
-            builder.Append(prefix);
-            builder.Append(isLast ? "└─" : "├─");
-            AppendSceneHierarchyLine(builder, transform, componentIdentifiers, includeObjectIds);
+                for (var index = 0; index < depth; ++index)
+                    builder.Append(lastAtDepth[index] ? "  " : "│ ");
+                builder.Append(isLast ? "└─" : "├─");
+                AppendSceneHierarchyLine(
+                    builder,
+                    current,
+                    componentIdentifiers,
+                    includeObjectIds,
+                    identifiers,
+                    components
+                );
 
-            var childPrefix = prefix + (isLast ? "  " : "│ ");
-            for (var index = 0; index < transform.childCount; index++)
-                AppendSceneHierarchyNode(builder, transform.GetChild(index), childPrefix, index == transform.childCount - 1, componentIdentifiers, includeObjectIds);
+                var childCount = current.childCount;
+                for (var childIndex = childCount - 1; childIndex >= 0; --childIndex)
+                    pending.Add((
+                        current.GetChild(childIndex),
+                        depth + 1,
+                        childIndex == childCount - 1
+                    ));
+            }
         }
 
         static void AppendSceneHierarchyLine(
             StringBuilder builder,
             Transform transform,
             IReadOnlyDictionary<Type, string> componentIdentifiers,
-            bool includeObjectIds)
+            bool includeObjectIds,
+            List<ComponentIdentifierCount> identifiers,
+            List<Component> components)
         {
             var gameObject = transform.gameObject;
             builder.Append(gameObject.name);
@@ -542,7 +566,14 @@ namespace Conduit
             if (includeObjectIds)
                 AppendSceneHierarchyMetadata(builder, ConduitUtility.FormatObjectId(gameObject), ref hasMetadata);
 
-            AppendSceneComponentIdentifiers(builder, gameObject, componentIdentifiers, ref hasMetadata);
+            AppendSceneComponentIdentifiers(
+                builder,
+                gameObject,
+                componentIdentifiers,
+                identifiers,
+                components,
+                ref hasMetadata
+            );
 
             builder.AppendLine(hasMetadata ? "]" : string.Empty);
         }
@@ -551,10 +582,14 @@ namespace Conduit
             StringBuilder builder,
             GameObject gameObject,
             IReadOnlyDictionary<Type, string> componentIdentifiers,
+            List<ComponentIdentifierCount> identifiers,
+            List<Component> components,
             ref bool hasMetadata)
         {
-            using var pooledIdentifiers = ConduitUtility.GetPooledList<ComponentIdentifierCount>(out var identifiers);
-            foreach (var component in gameObject.GetComponents<Component>())
+            identifiers.Clear();
+            components.Clear();
+            gameObject.GetComponents(components);
+            foreach (var component in components)
             {
                 if (component is null or Transform or RectTransform)
                     continue;
@@ -579,11 +614,11 @@ namespace Conduit
             {
                 if (identifier.Count >= 3)
                 {
-                    AppendSceneHierarchyMetadata(
-                        builder,
-                        identifier.Identifier + " ×" + identifier.Count.ToString(CultureInfo.InvariantCulture),
-                        ref hasMetadata
-                    );
+                    builder.Append(hasMetadata ? " | " : " [")
+                        .Append(identifier.Identifier)
+                        .Append(" ×")
+                        .Append(identifier.Count);
+                    hasMetadata = true;
                     continue;
                 }
 
@@ -635,10 +670,12 @@ namespace Conduit
             }
 
             builder.AppendLine("Hierarchy:");
-            AppendHierarchy(builder, gameObject.transform, includeSiblings: false);
+            AppendHierarchy(builder, gameObject.transform);
             builder.AppendLine();
 
-            foreach (var transform in gameObject.GetComponentsInChildren<Transform>(true))
+            using var pooledTransforms = ConduitUtility.GetPooledList<Transform>(out var transforms);
+            gameObject.GetComponentsInChildren(true, transforms);
+            foreach (var transform in transforms)
                 AppendGameObject(builder, transform.gameObject, includeObjectIds);
         }
 
@@ -651,7 +688,8 @@ namespace Conduit
             if (count >= limit)
                 return count;
 
-            for (var index = 0; index < transform.childCount; index++)
+            var childCount = transform.childCount;
+            for (var index = 0; index < childCount; index++)
             {
                 count += CountHierarchyGameObjects(transform.GetChild(index), limit - count);
                 if (count >= limit)
@@ -684,7 +722,9 @@ namespace Conduit
                 builder.Append(" [").Append(ConduitUtility.FormatObjectId(gameObject)).Append(']');
             builder.AppendLine();
 
-            if (gameObject.GetComponents<Component>() is not { Length: > 0 } components)
+            using var pooledComponents = ConduitUtility.GetPooledList<Component>(out var components);
+            gameObject.GetComponents(components);
+            if (components.Count == 0)
             {
                 builder.AppendLine("  Components: <none>");
                 builder.AppendLine();
@@ -711,10 +751,16 @@ namespace Conduit
             builder.AppendLine();
         }
 
-        static void AppendAssetObject(StringBuilder builder, Object assetObject, string label)
+        static void AppendAssetObject(
+            StringBuilder builder,
+            Object assetObject,
+            string label,
+            string assetPath)
         {
-            builder.AppendLine($"{label}: {DescribeObject(assetObject)}");
-            AppendObjectIdentifiers(builder, assetObject, 2, includeGuid: true);
+            builder.Append(label)
+                .Append(": ")
+                .AppendLine(DescribeObject(assetObject, assetPath));
+            AppendObjectIdentifiers(builder, assetObject, 2, includeGuid: true, assetPath: assetPath);
             AppendSerializableFields(builder, assetObject, 2);
             AppendNonSerializableFields(builder, assetObject, 2);
             builder.AppendLine();
@@ -724,23 +770,34 @@ namespace Conduit
         {
             try
             {
-                var serializedObject = new SerializedObject(target);
+                using var serializedObject = new SerializedObject(target);
+                var iterator = serializedObject.GetIterator();
+                var enterChildren = true;
+                var hasAny = false;
+                while (iterator.NextVisible(enterChildren))
+                {
+                    enterChildren = false;
+                    if (iterator.depth != 0 || iterator.propertyPath == "m_ObjectHideFlags")
+                        continue;
 
-                if (GetTopLevelProperties(serializedObject) is not { Length: > 0 } properties)
-                    return;
+                    if (!hasAny)
+                    {
+                        builder.Append(' ', indent);
+                        builder.AppendLine("Serializable:");
+                        hasAny = true;
+                    }
 
-                builder.Append(' ', indent);
-                builder.AppendLine("Serializable:");
-                foreach (var property in properties)
-                    if (property.propertyPath != "m_ObjectHideFlags")
-                        AppendSerializedProperty(builder, target, property, indent + 2);
+                    AppendSerializedProperty(builder, target, iterator, indent + 2);
+                }
             }
             catch (Exception exception)
             {
                 builder.Append(' ', indent);
                 builder.AppendLine("Serializable:");
                 builder.Append(' ', indent + 2);
-                builder.AppendLine($"- <unavailable: {exception.Message}>");
+                builder.Append("- <unavailable: ")
+                    .Append(exception.Message)
+                    .AppendLine(">");
             }
         }
 
@@ -763,25 +820,11 @@ namespace Conduit
                 TryFormatFieldValue(field, target, 0, out var valueText);
 
                 builder.Append(' ', indent + 2);
-                builder.AppendLine($"- {field.Name}: {valueText}");
+                builder.Append("- ")
+                    .Append(field.Name)
+                    .Append(": ")
+                    .AppendLine(valueText);
             }
-        }
-
-        static SerializedProperty[] GetTopLevelProperties(SerializedObject serializedObject)
-        {
-            using var pooledProperties = ConduitUtility.GetPooledList<SerializedProperty>(out var properties);
-            var iterator = serializedObject.GetIterator();
-            var enterChildren = true;
-            while (iterator.NextVisible(enterChildren))
-            {
-                enterChildren = false;
-                if (iterator.depth != 0)
-                    continue;
-
-                properties.Add(iterator.Copy());
-            }
-
-            return properties.ToArray();
         }
 
         static void AppendSerializedProperty(StringBuilder builder, Object target, SerializedProperty property, int indent)
@@ -789,27 +832,35 @@ namespace Conduit
             if (property is { isArray: true, propertyType: not SerializedPropertyType.String })
             {
                 builder.Append(' ', indent);
-                builder.AppendLine($"- {property.name}: {FormatArrayProperty(target, property)}");
+                builder.Append("- ")
+                    .Append(property.name)
+                    .Append(": ")
+                    .AppendLine(FormatArrayProperty(target, property));
                 return;
             }
 
             if (property is { hasVisibleChildren: true, propertyType: SerializedPropertyType.Generic })
             {
                 builder.Append(' ', indent);
-                builder.AppendLine($"- {property.name}:");
-                foreach (var child in GetImmediateChildren(property))
-                    AppendSerializedProperty(builder, target, child, indent + 2);
+                builder.Append("- ").Append(property.name).AppendLine(":");
+                AppendImmediateChildren(builder, target, property, indent + 2);
 
                 return;
             }
 
             builder.Append(' ', indent);
-            builder.AppendLine($"- {property.name}: {FormatSerializedValue(property)}");
+            builder.Append("- ")
+                .Append(property.name)
+                .Append(": ")
+                .AppendLine(FormatSerializedValue(property));
         }
 
-        static SerializedProperty[] GetImmediateChildren(SerializedProperty property)
+        static void AppendImmediateChildren(
+            StringBuilder builder,
+            Object target,
+            SerializedProperty property,
+            int indent)
         {
-            using var pooledChildren = ConduitUtility.GetPooledList<SerializedProperty>(out var children);
             var cursor = property.Copy();
             var end = cursor.GetEndProperty();
             var enterChildren = true;
@@ -817,10 +868,8 @@ namespace Conduit
             {
                 enterChildren = false;
                 if (cursor.depth == property.depth + 1)
-                    children.Add(cursor.Copy());
+                    AppendSerializedProperty(builder, target, cursor, indent);
             }
-
-            return children.ToArray();
         }
 
         static string FormatArrayProperty(Object target, SerializedProperty property)
@@ -833,38 +882,44 @@ namespace Conduit
             var previewCount = GetPreviewCount(elementType);
             if (elementType == typeof(bool))
             {
-                var bits = new StringBuilder();
-                for (var index = 0; index < count; index++)
-                {
-                    var bit = FormatSerializedElement(target, property.GetArrayElementAtIndex(index), 1) == "true" ? '1' : '0';
-                    if (count > previewCount && index >= previewCount - 1 && index < count - 1)
-                        continue;
+                using var pooledBits = ConduitUtility.GetStringBuilder(out var bits);
+                var visibleCount = count <= previewCount ? count : previewCount - 1;
+                for (var index = 0; index < visibleCount; ++index)
+                    bits.Append(FormatBit(index));
 
-                    bits.Append(bit);
-                }
+                if (count <= previewCount)
+                    return bits.ToString();
 
-                return count > previewCount
-                    ? $"{bits.ToString().Insert(previewCount - 1, "...")} (n={count})"
-                    : bits.ToString();
+                bits.Append("...");
+                bits.Append(FormatBit(count - 1));
+                bits.Append(" (n=").Append(count).Append(')');
+                return bits.ToString();
+
+                char FormatBit(int index)
+                    => FormatSerializedElement(target, property.GetArrayElementAtIndex(index), 1) == "true" ? '1' : '0';
             }
 
-            using var pooledPreview = ConduitUtility.GetPooledList<string>(out var preview);
-            var last = string.Empty;
-            for (var index = 0; index < count; index++)
-            {
-                var formatted = FormatSerializedElement(target, property.GetArrayElementAtIndex(index), 1);
-                if (count <= previewCount || preview.Count < previewCount - 1)
-                    preview.Add(formatted);
-
-                last = formatted;
-            }
+            using var pooledPreview = ConduitUtility.GetStringBuilder(out var preview);
+            preview.Append('[');
+            var appendedCount = 0;
+            var visibleItems = count <= previewCount ? count : previewCount - 1;
+            for (var index = 0; index < visibleItems; ++index)
+                AppendPreviewItem(
+                    preview,
+                    ref appendedCount,
+                    FormatSerializedElement(target, property.GetArrayElementAtIndex(index), 1)
+                );
 
             if (count <= previewCount)
-                return $"[{string.Join(", ", preview)}]";
+                return preview.Append(']').ToString();
 
-            preview.Add("...");
-            preview.Add(last);
-            return $"[{string.Join(", ", preview)}] (n={count})";
+            AppendPreviewItem(preview, ref appendedCount, "...");
+            AppendPreviewItem(
+                preview,
+                ref appendedCount,
+                FormatSerializedElement(target, property.GetArrayElementAtIndex(count - 1), 1)
+            );
+            return preview.Append("] (n=").Append(count).Append(')').ToString();
         }
 
         static string FormatSerializedElement(Object target, SerializedProperty property, int depth)
@@ -877,24 +932,34 @@ namespace Conduit
 
             if (property is { hasVisibleChildren: true, propertyType: SerializedPropertyType.Generic })
             {
-                if (GetImmediateChildren(property) is not { Length: > 0 } children)
-                    return "{}";
-
-                var builder = new StringBuilder();
+                using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
                 builder.Append('{');
-                var previewCount = Math.Min(children.Length, MaxCollectionPreview);
-                for (var index = 0; index < previewCount; index++)
+                var cursor = property.Copy();
+                var end = cursor.GetEndProperty();
+                var enterChildren = true;
+                var childCount = 0;
+                while (cursor.NextVisible(enterChildren)
+                       && !SerializedProperty.EqualContents(cursor, end))
                 {
-                    if (index > 0)
-                        builder.Append(", ");
+                    enterChildren = false;
+                    if (cursor.depth != property.depth + 1)
+                        continue;
 
-                    var child = children[index];
-                    builder.Append(child.name);
-                    builder.Append('=');
-                    builder.Append(FormatSerializedElement(target, child, depth + 1));
+                    if (childCount < MaxCollectionPreview)
+                    {
+                        if (childCount > 0)
+                            builder.Append(", ");
+
+                        builder.Append(cursor.name);
+                        builder.Append('=');
+                        builder.Append(FormatSerializedElement(target, cursor, depth + 1));
+                    }
+                    childCount++;
                 }
 
-                if (children.Length > MaxCollectionPreview)
+                if (childCount == 0)
+                    return "{}";
+                if (childCount > MaxCollectionPreview)
                     builder.Append(", ...");
 
                 builder.Append('}');
@@ -1049,6 +1114,9 @@ namespace Conduit
             if (value is Object unityObject)
                 return DescribeObject(unityObject);
 
+            if (value is IList list)
+                return FormatList(list, depth + 1, GetEnumerableElementType(value.GetType()));
+
             if (TryFormatIndexable(value, depth + 1, out var indexableText))
                 return indexableText;
 
@@ -1155,7 +1223,7 @@ namespace Conduit
             var previewCount = GetPreviewCount(access.ElementType);
             if (access.ElementType == typeof(bool))
             {
-                var bits = new StringBuilder();
+                using var pooledBits = ConduitUtility.GetStringBuilder(out var bits);
                 var visibleCount = count <= previewCount ? count : previewCount - 1;
                 for (var index = 0; index < visibleCount; index++)
                     bits.Append(getElement(value, index) is true ? '1' : '0');
@@ -1164,35 +1232,90 @@ namespace Conduit
                     return bits.ToString();
 
                 var lastBit = getElement(value, count - 1) is true ? '1' : '0';
-                return $"{bits}...{lastBit} (n={count})";
+                bits.Append("...").Append(lastBit).Append(" (n=").Append(count).Append(')');
+                return bits.ToString();
             }
 
-            using var pooledPreview = ConduitUtility.GetPooledList<string>(out var previewItems);
+            using var pooledPreview = ConduitUtility.GetStringBuilder(out var preview);
+            preview.Append('[');
+            var appendedCount = 0;
             var visibleItems = count <= previewCount ? count : previewCount - 1;
             for (var index = 0; index < visibleItems; index++)
-                previewItems.Add(FormatValue(getElement(value, index), depth));
+                AppendPreviewItem(
+                    preview,
+                    ref appendedCount,
+                    FormatValue(getElement(value, index), depth)
+                );
 
             if (count <= previewCount)
-                return $"[{string.Join(", ", previewItems)}]";
+                return preview.Append(']').ToString();
 
-            previewItems.Add("...");
-            previewItems.Add(FormatValue(getElement(value, count - 1), depth));
-            return $"[{string.Join(", ", previewItems)}] (n={count})";
+            AppendPreviewItem(preview, ref appendedCount, "...");
+            AppendPreviewItem(
+                preview,
+                ref appendedCount,
+                FormatValue(getElement(value, count - 1), depth)
+            );
+            return preview.Append("] (n=").Append(count).Append(')').ToString();
+        }
+
+        static string FormatList(IList list, int depth, Type elementType)
+        {
+            var count = list.Count;
+            if (count == 0)
+                return elementType == typeof(bool) ? string.Empty : "[]";
+
+            var previewCount = GetPreviewCount(elementType);
+            var visibleCount = count <= previewCount ? count : previewCount - 1;
+            if (elementType == typeof(bool))
+            {
+                using var pooledBits = ConduitUtility.GetStringBuilder(out var bits);
+                for (var index = 0; index < visibleCount; ++index)
+                    bits.Append(list[index] is true ? '1' : '0');
+
+                if (count <= previewCount)
+                    return bits.ToString();
+
+                bits.Append("...");
+                bits.Append(list[count - 1] is true ? '1' : '0');
+                bits.Append(" (n=").Append(count).Append(')');
+                return bits.ToString();
+            }
+
+            using var pooledPreview = ConduitUtility.GetStringBuilder(out var preview);
+            preview.Append('[');
+            var appendedCount = 0;
+            for (var index = 0; index < visibleCount; ++index)
+                AppendPreviewItem(preview, ref appendedCount, FormatValue(list[index], depth));
+
+            if (count <= previewCount)
+                return preview.Append(']').ToString();
+
+            AppendPreviewItem(preview, ref appendedCount, "...");
+            AppendPreviewItem(preview, ref appendedCount, FormatValue(list[count - 1], depth));
+            return preview.Append("] (n=").Append(count).Append(')').ToString();
         }
 
         static string FormatEnumerable(IEnumerable enumerable, int depth, Type elementType)
         {
             if (elementType == typeof(bool))
             {
-                var bits = new List<char>();
+                using var pooledBits = ConduitUtility.GetStringBuilder(out var bits);
                 var count = 0;
                 var previewCount = GetPreviewCount(elementType);
                 var lastBit = '0';
+                var bitScanLimitReached = false;
                 foreach (var item in enumerable)
                 {
+                    if (count == MaxEnumerableScan)
+                    {
+                        bitScanLimitReached = true;
+                        break;
+                    }
+
                     lastBit = item is true ? '1' : '0';
                     if (count < previewCount)
-                        bits.Add(lastBit);
+                        bits.Append(lastBit);
 
                     count++;
                 }
@@ -1201,27 +1324,39 @@ namespace Conduit
                     return string.Empty;
 
                 if (count <= previewCount)
-                    return new(bits.ToArray());
+                    return bits.ToString();
 
-                var preview = new char[previewCount - 1];
-                for (var index = 0; index < preview.Length; index++)
-                    preview[index] = bits[index];
+                bits.Length = previewCount - 1;
+                if (bitScanLimitReached)
+                {
+                    bits.Append("... (n>").Append(MaxEnumerableScan).Append(')');
+                    return bits.ToString();
+                }
 
-                return $"{new string(preview)}...{lastBit} (n={count})";
+                bits.Append("...").Append(lastBit).Append(" (n=").Append(count).Append(')');
+                return bits.ToString();
             }
 
-            var previewItems = new List<string>();
-            var lastItem = string.Empty;
+            using var pooledPreview = ConduitUtility.GetStringBuilder(out var preview);
+            preview.Append('[');
+            var appendedCount = 0;
+            object? lastItem = null;
             var itemCount = 0;
             var maxPreviewCount = GetPreviewCount(elementType);
+            var itemScanLimitReached = false;
             foreach (var item in enumerable)
             {
-                var formatted = FormatValue(item, depth);
-                if (itemCount < maxPreviewCount - 1)
-                    previewItems.Add(formatted);
+                if (itemCount == MaxEnumerableScan)
+                {
+                    itemScanLimitReached = true;
+                    break;
+                }
 
-                lastItem = formatted;
-                itemCount++;
+                if (itemCount < maxPreviewCount - 1)
+                    AppendPreviewItem(preview, ref appendedCount, FormatValue(item, depth));
+
+                lastItem = item;
+                ++itemCount;
             }
 
             if (itemCount == 0)
@@ -1229,15 +1364,33 @@ namespace Conduit
 
             if (itemCount <= maxPreviewCount)
             {
-                if (previewItems.Count < itemCount)
-                    previewItems.Add(lastItem);
+                if (appendedCount < itemCount)
+                    AppendPreviewItem(preview, ref appendedCount, FormatValue(lastItem, depth));
 
-                return $"[{string.Join(", ", previewItems)}]";
+                return preview.Append(']').ToString();
             }
 
-            previewItems.Add("...");
-            previewItems.Add(lastItem);
-            return $"[{string.Join(", ", previewItems)}] (n={itemCount})";
+            AppendPreviewItem(preview, ref appendedCount, "...");
+            if (itemScanLimitReached)
+                return preview
+                    .Append("] (n>")
+                    .Append(MaxEnumerableScan)
+                    .Append(')')
+                    .ToString();
+
+            AppendPreviewItem(preview, ref appendedCount, FormatValue(lastItem, depth));
+            return preview.Append("] (n=").Append(itemCount).Append(')').ToString();
+        }
+
+        static void AppendPreviewItem(
+            StringBuilder builder,
+            ref int itemCount,
+            string item)
+        {
+            if (itemCount++ > 0)
+                builder.Append(", ");
+
+            builder.Append(item);
         }
 
         static Type ResolveDeclaredType(Type rootType, string propertyPath)
@@ -1288,23 +1441,25 @@ namespace Conduit
         }
 
         static Type GetEnumerableElementType(Type type)
-        {
-            if (type == null)
-                return typeof(object);
+            => enumerableElementTypeCache.GetOrAdd(type, static value =>
+            {
+                if (value.IsArray)
+                    return value.GetElementType() ?? typeof(object);
 
-            if (type.IsArray)
-                return type.GetElementType() ?? typeof(object);
+                if (value.IsGenericType)
+                {
+                    var arguments = value.GetGenericArguments();
+                    if (arguments.Length == 1)
+                        return arguments[0];
+                }
 
-            if (type.IsGenericType && type.GetGenericArguments().Length == 1)
-                return type.GetGenericArguments()[0];
-
-            foreach (var candidate in type.GetInterfaces())
-                if (candidate.IsGenericType)
-                    if (candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                foreach (var candidate in value.GetInterfaces())
+                    if (candidate.IsGenericType
+                        && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
                         return candidate.GetGenericArguments()[0];
 
-            return typeof(object);
-        }
+                return typeof(object);
+            });
 
         static int GetPreviewCount(Type elementType)
         {
@@ -1331,24 +1486,36 @@ namespace Conduit
             if (dictionary.Count == 0)
                 return "{}";
 
-            var preview = new List<string>();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            if (dictionary.Count <= MaxCollectionPreview)
+                builder.Append('{');
+            else
+                builder.Append("{count=").Append(dictionary.Count).Append("; first=");
+
+            var count = 0;
             foreach (DictionaryEntry entry in dictionary)
             {
-                if (preview.Count >= MaxCollectionPreview)
+                if (count == MaxCollectionPreview)
                     break;
 
-                preview.Add($"{FormatValue(entry.Key, depth)}=>{FormatValue(entry.Value, depth)}");
+                if (count++ > 0)
+                    builder.Append(", ");
+
+                builder
+                    .Append(FormatValue(entry.Key, depth))
+                    .Append("=>")
+                    .Append(FormatValue(entry.Value, depth));
             }
 
-            return dictionary.Count <= MaxCollectionPreview
-                ? $"{{{string.Join(", ", preview)}}}"
-                : $"{{count={dictionary.Count}; first={string.Join(", ", preview)}}}";
+            return builder.Append('}').ToString();
         }
 
         static string? SummarizeObject(object value, int depth)
         {
             var fields = GetInspectableFields(value.GetType());
-            using var pooledParts = ConduitUtility.GetPooledList<string>(out var parts);
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.Append(value.GetType().Name).Append('{');
+            var count = 0;
             foreach (var field in fields)
             {
                 if (!IsUnitySerializableField(field))
@@ -1356,32 +1523,43 @@ namespace Conduit
 
                 TryFormatFieldValue(field, value, depth, out var fieldValue);
 
-                parts.Add($"{field.Name}={fieldValue}");
-                if (parts.Count >= MaxCollectionPreview)
+                if (count++ > 0)
+                    builder.Append(", ");
+
+                builder.Append(field.Name).Append('=').Append(fieldValue);
+                if (count >= MaxCollectionPreview)
                     break;
             }
 
-            return parts.Count == 0
-                ? null
-                : $"{value.GetType().Name}{{{string.Join(", ", parts)}}}";
+            return count == 0 ? null : builder.Append('}').ToString();
         }
 
         static void AppendObjectIdentifiers(StringBuilder builder, Object target, int indent, bool includeGuid)
         {
+            var assetPath = includeGuid && EditorUtility.IsPersistent(target)
+                ? AssetDatabase.GetAssetPath(target)
+                : string.Empty;
+            AppendObjectIdentifiers(builder, target, indent, includeGuid, assetPath);
+        }
+
+        static void AppendObjectIdentifiers(
+            StringBuilder builder,
+            Object target,
+            int indent,
+            bool includeGuid,
+            string assetPath)
+        {
             builder.Append(' ', indent);
-            builder.AppendLine($"ID: {ConduitUtility.FormatObjectId(target)}");
+            builder.Append("ID: ").AppendLine(ConduitUtility.FormatObjectId(target));
 
-            if (!includeGuid)
-                return;
-
-            if (!EditorUtility.IsPersistent(target) || AssetDatabase.GetAssetPath(target) is not { Length: > 0 } assetPath)
+            if (!includeGuid || assetPath.Length == 0)
                 return;
 
             if (AssetDatabase.AssetPathToGUID(assetPath) is not { Length: > 0 } guid)
                 return;
 
             builder.Append(' ', indent);
-            builder.AppendLine($"GUID: {guid}");
+            builder.Append("GUID: ").AppendLine(guid);
         }
 
         static string DescribeObject(Object target)
@@ -1392,6 +1570,13 @@ namespace Conduit
             var assetPath = EditorUtility.IsPersistent(target)
                 ? AssetDatabase.GetAssetPath(target)
                 : string.Empty;
+            return DescribeObject(target, assetPath);
+        }
+
+        static string DescribeObject(Object target, string assetPath)
+        {
+            if (target == null)
+                return "null";
 
             return target switch
             {
@@ -1420,9 +1605,9 @@ namespace Conduit
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.Append('(');
-            builder.Append(x.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(x, "0.###");
             builder.Append(", ");
-            builder.Append(y.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(y, "0.###");
             builder.Append(')');
             return builder.ToString();
         }
@@ -1431,11 +1616,11 @@ namespace Conduit
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.Append('(');
-            builder.Append(x.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(x, "0.###");
             builder.Append(", ");
-            builder.Append(y.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(y, "0.###");
             builder.Append(", ");
-            builder.Append(z.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(z, "0.###");
             builder.Append(')');
             return builder.ToString();
         }
@@ -1444,13 +1629,13 @@ namespace Conduit
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.Append('(');
-            builder.Append(x.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(x, "0.###");
             builder.Append(", ");
-            builder.Append(y.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(y, "0.###");
             builder.Append(", ");
-            builder.Append(z.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(z, "0.###");
             builder.Append(", ");
-            builder.Append(w.ToString("0.###", CultureInfo.InvariantCulture));
+            builder.AppendInvariant(w, "0.###");
             builder.Append(')');
             return builder.ToString();
         }
@@ -1511,6 +1696,13 @@ namespace Conduit
             public Type ElementType { get; }
             public Func<object, int>? GetLength { get; }
             public Func<object, int, object?>? GetElement { get; }
+        }
+
+        readonly struct CustomShowAccess
+        {
+            public CustomShowAccess(MethodInfo? method) => Method = method;
+
+            public MethodInfo? Method { get; }
         }
     }
 }

@@ -987,7 +987,7 @@ namespace Conduit
                 _      => ".mp4",
             };
 
-            for (var index = 0; index < int.MaxValue; index++)
+            for (var index = FindNextIndex(directory); index < int.MaxValue; ++index)
             {
                 var candidate = new RecordOutputPath(directory, index, extension);
                 if (IsAvailable(index, directory))
@@ -996,6 +996,43 @@ namespace Conduit
 
             throw new InvalidOperationException("Could not allocate a recording output path.");
         }
+
+        static int FindNextIndex(string directory)
+        {
+            var nextIndex = 0;
+            foreach (var path in Directory.EnumerateFiles(directory))
+            {
+                var fileName = Path.GetFileName(path);
+                var suffixOffset = fileName.IndexOf('.');
+                if (suffixOffset <= 0
+                    || !IsRecordingSuffix(fileName.AsSpan(suffixOffset))
+                    || !int.TryParse(
+                        fileName.AsSpan(0, suffixOffset),
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out var index
+                    )
+                    || index < nextIndex)
+                    continue;
+
+                if (index == int.MaxValue)
+                    return 0;
+
+                nextIndex = index + 1;
+            }
+
+            return nextIndex;
+        }
+
+        static bool IsRecordingSuffix(ReadOnlySpan<char> suffix)
+            => suffix.Equals(".mp4", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".webm", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".gif", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".partial.mp4", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".partial.webm", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".partial.gif", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".recording.mkv", StringComparison.OrdinalIgnoreCase)
+               || suffix.Equals(".palette.png", StringComparison.OrdinalIgnoreCase);
 
         public void DeleteTemporaryFiles()
         {

@@ -65,7 +65,7 @@ namespace Conduit
 
             try
             {
-                var builder = new StringBuilder();
+                using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
                 using var reader = new StringReader(stackTrace);
                 string? pendingSourceWrapper = null;
                 while (reader.ReadLine() is { } line)

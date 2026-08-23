@@ -17,14 +17,7 @@ namespace Conduit
             {
                 for (var index = start; index < end; ++index)
                 {
-                    if (!TryParseInstruction(lines[index], out var mnemonic, out _))
-                        continue;
-                    if (mnemonic is "block" or "else" or "end" or "end_function" or "br_if" or "call_indirect"
-                        || mnemonic.StartsWith("i32.", StringComparison.Ordinal)
-                        || mnemonic.StartsWith("i64.", StringComparison.Ordinal)
-                        || mnemonic.StartsWith("f32.", StringComparison.Ordinal)
-                        || mnemonic.StartsWith("f64.", StringComparison.Ordinal)
-                        || mnemonic.StartsWith("v128.", StringComparison.Ordinal))
+                    if (IsWasmInstruction(lines[index]))
                     {
                         isWasm = true;
                         break;
@@ -42,6 +35,31 @@ namespace Conduit
                    || string.Equals(cpu, "x86", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(cpu, "armv8", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(cpu, "armv9", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool IsWasmInstruction(string line)
+        {
+            var text = line.AsSpan().Trim();
+            if (text.Length == 0 || text[^1] == ':' || text[0] is '#' or ';' or '.'
+                || text.StartsWith("//", StringComparison.Ordinal))
+                return false;
+
+            var tokenEnd = ReadTokenEnd(text, 0);
+            if (tokenEnd == 0)
+                return false;
+
+            var mnemonic = text[..tokenEnd];
+            return mnemonic.Equals("block", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.Equals("else", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.Equals("end", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.Equals("end_function", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.Equals("br_if", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.Equals("call_indirect", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.StartsWith("i32.", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.StartsWith("i64.", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.StartsWith("f32.", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.StartsWith("f64.", StringComparison.OrdinalIgnoreCase)
+                   || mnemonic.StartsWith("v128.", StringComparison.OrdinalIgnoreCase);
         }
 
         static void AnalyzeNativeLoops(
@@ -160,17 +178,24 @@ namespace Conduit
                 return;
             }
 
-            // dominance proves loop backedges; lexical direction also finds unrelated and unreachable jumps
-            var reachableBlocks = new HashSet<int>();
+            // dominance proves loop backedges; dense bitsets avoid a hash table per control-flow block
+            var dominatorWordCount = (blocks.Count + 63) / 64;
+            var reachableBlocks = new ulong[dominatorWordCount];
             for (var index = 0; index < reachable.Length; ++index)
                 if (reachable[index])
-                    reachableBlocks.Add(index);
+                    AddBit(reachableBlocks, index);
 
-            var dominators = new HashSet<int>[blocks.Count];
+            var dominators = new ulong[blocks.Count][];
             foreach (var block in blocks)
-                dominators[block.Index] = block.Index == 0
-                    ? new HashSet<int> { 0 }
-                    : reachable[block.Index] ? new HashSet<int>(reachableBlocks) : new HashSet<int>();
+            {
+                var values = new ulong[dominatorWordCount];
+                if (block.Index == 0)
+                    AddBit(values, 0);
+                else if (reachable[block.Index])
+                    Array.Copy(reachableBlocks, values, dominatorWordCount);
+
+                dominators[block.Index] = values;
+            }
 
             var changed = true;
             while (changed)
@@ -181,21 +206,21 @@ namespace Conduit
                     if (!reachable[blockIndex])
                         continue;
 
-                    HashSet<int>? next = null;
+                    ulong[]? next = null;
                     foreach (var predecessor in blocks[blockIndex].Predecessors)
                     {
                         if (!reachable[predecessor])
                             continue;
 
                         if (next == null)
-                            next = new(dominators[predecessor]);
+                            next = (ulong[])dominators[predecessor].Clone();
                         else
-                            next.IntersectWith(dominators[predecessor]);
+                            IntersectBits(next, dominators[predecessor]);
                     }
 
-                    next ??= new();
-                    next.Add(blockIndex);
-                    if (next.SetEquals(dominators[blockIndex]))
+                    next ??= new ulong[dominatorWordCount];
+                    AddBit(next, blockIndex);
+                    if (BitsEqual(next, dominators[blockIndex]))
                         continue;
 
                     dominators[blockIndex] = next;
@@ -211,7 +236,7 @@ namespace Conduit
 
                 foreach (var successor in block.Successors)
                 {
-                    if (!dominators[block.Index].Contains(successor))
+                    if (!ContainsBit(dominators[block.Index], successor))
                         continue;
                     if (!latchesByHeader.TryGetValue(successor, out var latches))
                     {
@@ -282,6 +307,9 @@ namespace Conduit
             }
 
             foreach (var loop in loops)
+                loop.Parent?.Children.Add(loop);
+
+            foreach (var loop in loops)
                 loop.Depth = Depth(loop);
 
             for (var index = 0; index < loops.Count; ++index)
@@ -291,10 +319,9 @@ namespace Conduit
                 loop.Header = BlockLabel(blocks[loop.HeaderBlock], labelsByInstruction);
                 loop.Source = FindSource(loop, blocks, instructions);
 
-                var nestedBlocks = new HashSet<int>();
-                foreach (var child in loops)
-                    if (ReferenceEquals(child.Parent, loop))
-                        nestedBlocks.UnionWith(child.Blocks);
+                using var pooledNestedBlocks = ConduitUtility.GetPooledSet<int>(out var nestedBlocks);
+                foreach (var child in loop.Children)
+                    nestedBlocks.UnionWith(child.Blocks);
 
                 foreach (var blockIndex in loop.Blocks)
                 {
@@ -315,7 +342,7 @@ namespace Conduit
                     loop.InclusiveInstructionCount - loop.ExclusiveInstructionCount;
             }
 
-            var regionBlocks = new HashSet<int>();
+            using var pooledRegionBlocks = ConduitUtility.GetPooledSet<int>(out var regionBlocks);
             foreach (var loop in loops)
                 regionBlocks.UnionWith(loop.Blocks);
             foreach (var blockIndex in regionBlocks)
@@ -339,15 +366,33 @@ namespace Conduit
                 blocks[target].Predecessors.Add(source);
             }
 
+            static void AddBit(ulong[] bits, int index)
+                => bits[index >> 6] |= 1UL << (index & 63);
+
+            static bool ContainsBit(ulong[] bits, int index)
+                => (bits[index >> 6] & 1UL << (index & 63)) != 0;
+
+            static void IntersectBits(ulong[] target, ulong[] other)
+            {
+                for (var index = 0; index < target.Length; ++index)
+                    target[index] &= other[index];
+            }
+
+            static bool BitsEqual(ulong[] left, ulong[] right)
+            {
+                for (var index = 0; index < left.Length; ++index)
+                    if (left[index] != right[index])
+                        return false;
+
+                return true;
+            }
+
             static int Depth(BurstLoopStats loop) => loop.Parent == null ? 1 : Depth(loop.Parent) + 1;
         }
 
         static bool TryGetBranchTarget(BurstAnalyzedInstruction instruction, out string target)
         {
-            if (!TryGetDirectBranchTarget(instruction.Operands, out target))
-                return false;
-
-            target = CleanTransferTarget(target);
+            target = instruction.BranchTarget;
             return target.Length > 0;
         }
 
@@ -381,17 +426,24 @@ namespace Conduit
                 if (instructions[index].Source.Length > 0)
                     return instructions[index].Source;
 
-            var memberBlocks = new List<int>(loop.Blocks);
-            memberBlocks.Sort((left, right) => blocks[left].Start.CompareTo(blocks[right].Start));
-            foreach (var blockIndex in memberBlocks)
+            var firstSource = string.Empty;
+            var firstSourceBlockStart = int.MaxValue;
+            foreach (var blockIndex in loop.Blocks)
             {
                 var block = blocks[blockIndex];
+                if (blockIndex == loop.HeaderBlock || block.Start >= firstSourceBlockStart)
+                    continue;
+
                 for (var instructionIndex = block.Start; instructionIndex < block.End; ++instructionIndex)
                     if (instructions[instructionIndex].Source.Length > 0)
-                        return instructions[instructionIndex].Source;
+                    {
+                        firstSource = instructions[instructionIndex].Source;
+                        firstSourceBlockStart = block.Start;
+                        break;
+                    }
             }
 
-            return string.Empty;
+            return firstSource;
         }
 
         static void AppendLoopSummary(StringBuilder builder, BurstAsmStats stats)
@@ -421,7 +473,7 @@ namespace Conduit
             if (!stats.LoopAnalysisCompleted || stats.Loops.Count == 0)
                 return;
 
-            var rows = new List<(BurstLoopStats Loop, int Indent)>();
+            using var pooledRows = ConduitUtility.GetPooledList<(BurstLoopStats Loop, int Indent)>(out var rows);
             foreach (var loop in stats.Loops)
                 if (loop.Parent == null)
                     Visit(loop, 0);
@@ -439,16 +491,16 @@ namespace Conduit
                 if (loop.NestedInstructionCount > 0)
                     builder.Append($" + {loop.NestedInstructionCount} nested");
 
-                var details = new List<string>();
+                builder.Append(" (");
+                var appendedDetail = false;
                 Add(loop.LoadCount, "loads");
                 Add(loop.StoreCount, "stores");
                 Add(loop.PackedComputeCount, "packed compute");
                 Add(loop.BranchCount, "branches");
                 Add(loop.DirectCallCount, "direct calls");
                 Add(loop.IndirectCallCount, "indirect calls");
-                builder.Append(" (");
-                if (details.Count > 0)
-                    builder.Append($"{string.Join(", ", details)}; ");
+                if (appendedDetail)
+                    builder.Append("; ");
                 builder.Append($"exits {loop.ExitCount}");
                 if (loop.BackedgeCount > 1)
                     builder.Append($"; backedges {loop.BackedgeCount}");
@@ -456,8 +508,15 @@ namespace Conduit
 
                 void Add(int value, string name)
                 {
-                    if (value > 0)
-                        details.Add($"{name} {value}");
+                    if (value <= 0)
+                        return;
+
+                    if (appendedDetail)
+                        builder.Append(", ");
+                    builder.Append(name)
+                        .Append(' ')
+                        .Append(value);
+                    appendedDetail = true;
                 }
             }
 
@@ -467,9 +526,8 @@ namespace Conduit
             void Visit(BurstLoopStats loop, int indent)
             {
                 rows.Add((loop, indent));
-                foreach (var child in stats.Loops)
-                    if (ReferenceEquals(child.Parent, loop))
-                        Visit(child, indent + 1);
+                foreach (var child in loop.Children)
+                    Visit(child, indent + 1);
             }
         }
     }
@@ -477,7 +535,7 @@ namespace Conduit
     readonly struct BurstAnalyzedInstruction
     {
         public readonly string Mnemonic;
-        public readonly IReadOnlyList<string> Operands;
+        public readonly string BranchTarget;
         public readonly string Source;
         public readonly BurstInstructionFacts Facts;
         public readonly bool IsConditionalBranch;
@@ -485,14 +543,14 @@ namespace Conduit
 
         public BurstAnalyzedInstruction(
             string mnemonic,
-            IReadOnlyList<string> operands,
+            string branchTarget,
             string source,
             BurstInstructionFacts facts,
             bool isConditionalBranch,
             bool isUnconditionalBranch)
         {
             Mnemonic = mnemonic;
-            Operands = operands;
+            BranchTarget = branchTarget;
             Source = source;
             Facts = facts;
             IsConditionalBranch = isConditionalBranch;
@@ -523,6 +581,7 @@ namespace Conduit
         public readonly int HeaderBlock;
         public readonly HashSet<int> Blocks;
         public readonly int BackedgeCount;
+        public readonly List<BurstLoopStats> Children = new();
         public BurstLoopStats? Parent;
         public string Header = string.Empty;
         public string Source = string.Empty;

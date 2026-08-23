@@ -177,13 +177,13 @@ namespace Conduit
             ClientWorkSnapshot snapshot = ClientWorkSnapshot.Empty;
             PendingOperationState? activeOperation;
             PersistedPendingResultState? pendingResult;
+            int pumpRequested;
 
             public CommandScheduler()
             {
                 editorModeTransition = new(CompleteCurrentAsync);
                 assetImportMonitor = new(CompleteCurrentAsync);
                 testRunMonitor = new(logCapture, CompleteCurrentAsync, CheckpointTestCompletion);
-                UpdateSnapshot();
             }
 
             public string? ActiveCommandType => Volatile.Read(ref snapshot).ActiveCommandType;
@@ -201,16 +201,30 @@ namespace Conduit
                 => Volatile.Read(ref snapshot).HasReconnectableWorkForAnyClient();
 
             public void EnqueueConnected()
-                => pendingEvents.Enqueue(SchedulerEvent.Connected());
+            {
+                pendingEvents.Enqueue(SchedulerEvent.Connected());
+                Volatile.Write(ref pumpRequested, 1);
+            }
 
             public void EnqueueIncomingCommand(int clientId, BridgeMessage message)
-                => pendingEvents.Enqueue(SchedulerEvent.Command(clientId, message));
+            {
+                pendingEvents.Enqueue(SchedulerEvent.Command(clientId, message));
+                Volatile.Write(ref pumpRequested, 1);
+            }
 
             public void EnqueueClientDisconnected(int clientId)
-                => pendingEvents.Enqueue(SchedulerEvent.Disconnected(clientId));
+            {
+                pendingEvents.Enqueue(SchedulerEvent.Disconnected(clientId));
+                Volatile.Write(ref pumpRequested, 1);
+            }
 
             public void Pump()
             {
+                if (Volatile.Read(ref pumpRequested) == 0)
+                    return;
+                if (Interlocked.Exchange(ref pumpRequested, 0) == 0)
+                    return;
+
                 while (pendingEvents.TryDequeue(out var schedulerEvent))
                     ProcessEvent(schedulerEvent);
 
@@ -235,7 +249,7 @@ namespace Conduit
                         result,
                         operation.command_type
                     ))
-                    pendingMainThreadActions.Enqueue(
+                    EnqueueMainThreadAction(
                         () => ClearPendingResult(operation.request_id, operation.command_type)
                     );
             }
@@ -473,7 +487,7 @@ namespace Conduit
                 if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
                     return;
 
-                pendingMainThreadActions.Enqueue(
+                EnqueueMainThreadAction(
                     () => _ = ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks)
                 );
             }
@@ -496,9 +510,15 @@ namespace Conduit
                     operation.request_id,
                     operation.command_type
                 );
-                pendingMainThreadActions.Enqueue(
+                EnqueueMainThreadAction(
                     () => CompleteAcknowledgement(operation, acknowledged)
                 );
+            }
+
+            void EnqueueMainThreadAction(Action action)
+            {
+                pendingMainThreadActions.Enqueue(action);
+                Volatile.Write(ref pumpRequested, 1);
             }
 
             void CompleteAcknowledgement(PendingOperationState operation, bool acknowledged)
@@ -511,10 +531,7 @@ namespace Conduit
 
                 // the send crosses async boundaries; the operation may have completed or been dropped
                 if (ReferenceEquals(activeOperation, operation) || queuedOperations.Contains(operation))
-                {
                     operation.is_acknowledged = true;
-                    UpdateSnapshot();
-                }
             }
 
             void PumpQueuedCommands()
@@ -772,6 +789,8 @@ namespace Conduit
             {
                 activeOperation = null;
                 UpdateSnapshot();
+                if (queuedOperations.Count > 0)
+                    Volatile.Write(ref pumpRequested, 1);
 
                 result.diagnostic = ConduitUtility.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
                 var logs = logCapture.Drain(operation.kind, result.outcome, result.diagnostic, out var discardLogs);
@@ -854,16 +873,14 @@ namespace Conduit
                 ClearPendingResult();
             }
 
-            static async Task ReplayPendingResultAsync(int clientId, PersistedPendingResultState pendingResult)
-            {
-                // the protocol has no result-consumed ack; reconnects may need this payload again
-                await ConduitConnection.TrySendResultAsync(
+            // the protocol has no result-consumed ack; reconnects may need this payload again
+            static Task ReplayPendingResultAsync(int clientId, PersistedPendingResultState pendingResult)
+                => ConduitConnection.TrySendResultAsync(
                     clientId,
                     pendingResult.RequestID,
                     pendingResult.Result,
                     pendingResult.CommandType
                 );
-            }
 
             void UpdateSnapshot()
                 => Volatile.Write(ref snapshot, ClientWorkSnapshot.Create(activeOperation, queuedOperations, pendingResult != null));
@@ -902,17 +919,24 @@ namespace Conduit
 
     sealed class ClientWorkSnapshot
     {
-        public static readonly ClientWorkSnapshot Empty = new(null, -1, Array.Empty<int>(), hasPendingResult: false);
+        public static readonly ClientWorkSnapshot Empty = new(null, -1, -1, null, false);
         readonly int activeClientId;
-        readonly int[] queuedClientIds;
-        readonly bool hasPendingResult;
+        readonly int firstQueuedClientId;
+        readonly int[]? additionalQueuedClientIds;
+        readonly bool hasReconnectableWork;
 
-        ClientWorkSnapshot(string? activeCommandType, int activeClientId, int[] queuedClientIds, bool hasPendingResult)
+        ClientWorkSnapshot(
+            string? activeCommandType,
+            int activeClientId,
+            int firstQueuedClientId,
+            int[]? additionalQueuedClientIds,
+            bool hasReconnectableWork)
         {
             ActiveCommandType = activeCommandType;
             this.activeClientId = activeClientId;
-            this.queuedClientIds = queuedClientIds;
-            this.hasPendingResult = hasPendingResult;
+            this.firstQueuedClientId = firstQueuedClientId;
+            this.additionalQueuedClientIds = additionalQueuedClientIds;
+            this.hasReconnectableWork = hasReconnectableWork;
         }
 
         public string? ActiveCommandType { get; }
@@ -922,17 +946,28 @@ namespace Conduit
             List<PendingOperationState> queuedOperations,
             bool hasPendingResult)
         {
-            var queuedClientIds = queuedOperations.Count == 0
-                ? Array.Empty<int>()
-                : new int[queuedOperations.Count];
-            for (var index = 0; index < queuedOperations.Count; index++)
-                queuedClientIds[index] = queuedOperations[index].client_id;
+            var firstQueuedClientId = queuedOperations.Count == 0
+                ? -1
+                : queuedOperations[0].client_id;
+            var additionalQueuedClientIds = queuedOperations.Count <= 1
+                ? null
+                : new int[queuedOperations.Count - 1];
+            var hasReconnectableWork = hasPendingResult
+                                       || activeOperation?.client_id == 0
+                                       || firstQueuedClientId == 0;
+            for (var index = 1; index < queuedOperations.Count; index++)
+            {
+                var clientId = queuedOperations[index].client_id;
+                additionalQueuedClientIds![index - 1] = clientId;
+                hasReconnectableWork |= clientId == 0;
+            }
 
             return new(
                 activeOperation?.command_type,
                 activeOperation?.client_id ?? -1,
-                queuedClientIds,
-                hasPendingResult
+                firstQueuedClientId,
+                additionalQueuedClientIds,
+                hasReconnectableWork
             );
         }
 
@@ -944,23 +979,19 @@ namespace Conduit
             if (activeClientId == clientId)
                 return true;
 
-            foreach (var queuedClientId in queuedClientIds)
+            if (firstQueuedClientId == clientId)
+                return true;
+
+            if (additionalQueuedClientIds == null)
+                return false;
+
+            foreach (var queuedClientId in additionalQueuedClientIds)
                 if (queuedClientId == clientId)
                     return true;
 
             return false;
         }
 
-        public bool HasReconnectableWorkForAnyClient()
-        {
-            if (ActiveCommandType != null && activeClientId == 0)
-                return true;
-
-            foreach (var queuedClientId in queuedClientIds)
-                if (queuedClientId == 0)
-                    return true;
-
-            return hasPendingResult;
-        }
+        public bool HasReconnectableWorkForAnyClient() => hasReconnectableWork;
     }
 }

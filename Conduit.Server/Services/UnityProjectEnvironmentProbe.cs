@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -8,6 +9,7 @@ namespace Conduit;
 
 sealed partial class UnityProjectEnvironmentProbe
 {
+    const int CompilationDiagnosticsCachePruneThreshold = 64;
     internal const string SafeModeDiagnostic = "The Unity Editor is in safe mode.";
     internal const string RefreshAssetDatabaseSafeModeDiagnostic =
         "The Unity Editor is in safe mode. (To recompile scripts in safe mode, use the `restart` tool.)";
@@ -21,6 +23,9 @@ sealed partial class UnityProjectEnvironmentProbe
     [GeneratedRegex("-logFile\\s+(?:\"(?<path>[^\"]*)\"|(?<path>\\S+))", RegexOptions.IgnoreCase, "en-US")]
     private static partial Regex LogFileArgumentRegex();
 
+    readonly ConcurrentDictionary<string, CachedCompilationDiagnostics> compilationDiagnosticsCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
     string LegacyEditorLogPath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Unity",
@@ -33,11 +38,12 @@ sealed partial class UnityProjectEnvironmentProbe
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
         var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(normalizedProjectPath);
         var projectVersionPath = Path.Combine(platformProjectPath, "ProjectSettings", "ProjectVersion.txt");
+        var editorVersion = ConduitUtility.TryReadEditorVersion(projectVersionPath);
         var runningUnityProcesses = QueryUnityProcesses();
         return new(
             normalizedProjectPath,
-            File.Exists(projectVersionPath),
-            ConduitUtility.TryReadEditorVersion(projectVersionPath),
+            editorVersion != null || File.Exists(projectVersionPath),
+            editorVersion,
             InspectLockfile(Path.Combine(platformProjectPath, "Temp", "UnityLockfile")),
             runningUnityProcesses.Count,
             FindMatchingProjectProcess(runningUnityProcesses, normalizedProjectPath)
@@ -95,7 +101,10 @@ sealed partial class UnityProjectEnvironmentProbe
         if (SafeModeWindowProbe.IsSafeModeWindowTitle(mainWindowTitle))
             return SafeModeDiagnostic;
 
-        if (SafeModeWindowProbe.TryReadSafeModeWindowSignal(matchedProcess.ProcessId) is not null)
+        if (SafeModeWindowProbe.TryReadSafeModeWindowSignal(
+                matchedProcess.ProcessId,
+                mainWindowTitle
+            ) is not null)
             return SafeModeDiagnostic;
 
         // if (TryReadUiAutomationSafeModeSignal(matchedProcess.ProcessId) is "Enter Safe Mode?" or "SAFE MODE")
@@ -419,25 +428,77 @@ sealed partial class UnityProjectEnvironmentProbe
 
     CompilationDiagnosticSummary ReadCompilationDiagnostics(string? logPath, long? startOffset)
     {
-        if (string.IsNullOrWhiteSpace(logPath) || !File.Exists(logPath))
+        if (string.IsNullOrWhiteSpace(logPath))
             return CompilationDiagnosticSummary.Empty;
+        if (!File.Exists(logPath))
+        {
+            compilationDiagnosticsCache.TryRemove(logPath, out _);
+            return CompilationDiagnosticSummary.Empty;
+        }
 
         try
         {
-            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (startOffset is > 0 && startOffset.Value < stream.Length)
-                stream.Seek(startOffset.Value, SeekOrigin.Begin);
+            long? cacheableLength = null;
+            DateTime cacheableLastWriteUtc = default;
+            CachedCompilationDiagnostics? exact = null;
+            CachedCompilationDiagnostics? resume = null;
+            if (startOffset is null)
+            {
+                var fileInfo = new FileInfo(logPath);
+                cacheableLength = fileInfo.Length;
+                cacheableLastWriteUtc = fileInfo.LastWriteTimeUtc;
+                if (compilationDiagnosticsCache.TryGetValue(logPath, out var cached))
+                {
+                    if (cached.Length == cacheableLength
+                        && cached.LastWriteUtc == cacheableLastWriteUtc)
+                        exact = cached;
+                    else if (cached.Length < cacheableLength.Value)
+                        resume = cached;
+                }
+            }
 
-            using var reader = new StreamReader(stream);
+            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (exact != null)
+            {
+                if (HasMatchingTail(stream, exact))
+                    return exact.Summary;
+
+                stream.Seek(0, SeekOrigin.Begin);
+            }
+            else if (startOffset is > 0 && startOffset.Value < stream.Length)
+                stream.Seek(startOffset.Value, SeekOrigin.Begin);
+            else if (resume != null)
+            {
+                if (CanResumeFrom(stream, resume))
+                    stream.Seek(resume.Length, SeekOrigin.Begin);
+                else
+                {
+                    resume = null;
+                    stream.Seek(0, SeekOrigin.Begin);
+                }
+            }
+
+            using var reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: stream.Position == 0,
+                bufferSize: 1024
+            );
             var errors = ZString.CreateStringBuilder();
             var warnings = ZString.CreateStringBuilder();
-            var seenErrors = new HashSet<string>(StringComparer.Ordinal);
-            var seenWarnings = new HashSet<string>(StringComparer.Ordinal);
-            var errorCount = 0;
-            var warningCount = 0;
-            var inBlock = false;
-            var sawTundraBlock = false;
-            var burstBlockActive = false;
+            var seenErrors = resume == null
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : new(resume.SeenErrors, StringComparer.Ordinal);
+            var seenWarnings = resume == null
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : new(resume.SeenWarnings, StringComparer.Ordinal);
+            var errorCount = resume?.Summary.ErrorCount ?? 0;
+            var warningCount = resume?.Summary.WarningCount ?? 0;
+            var inBlock = resume?.InBlock ?? false;
+            var sawTundraBlock = resume?.SawTundraBlock ?? false;
+            var burstBlockActive = resume?.BurstBlockActive ?? false;
+            AppendCachedText(ref errors, resume?.Summary.ErrorText);
+            AppendCachedText(ref warnings, resume?.Summary.WarningText);
             try
             {
                 while (reader.ReadLine() is { } line)
@@ -507,15 +568,41 @@ sealed partial class UnityProjectEnvironmentProbe
                     burstBlockActive = AppendUniqueDiagnostic(ref errors, seenErrors, line, ref errorCount);
                 }
 
-                if (!inBlock)
-                    return CompilationDiagnosticSummary.Empty;
+                var summary = !inBlock
+                    ? CompilationDiagnosticSummary.Empty
+                    : new(
+                        errorCount,
+                        warningCount,
+                        errors.Length == 0 ? null : ConduitUtility.FinishText(ref errors),
+                        warnings.Length == 0 ? null : ConduitUtility.FinishText(ref warnings)
+                    );
+                if (cacheableLength is { } length)
+                {
+                    var fileInfo = new FileInfo(logPath);
+                    if (fileInfo.Length == length
+                        && fileInfo.LastWriteTimeUtc == cacheableLastWriteUtc)
+                    {
+                        reader.DiscardBufferedData();
+                        var tail = ReadTail(stream, length);
+                        fileInfo.Refresh();
+                        if (fileInfo.Length == length
+                            && fileInfo.LastWriteTimeUtc == cacheableLastWriteUtc)
+                            compilationDiagnosticsCache[logPath] = new(
+                                length,
+                                cacheableLastWriteUtc,
+                                summary,
+                                inBlock,
+                                sawTundraBlock,
+                                burstBlockActive,
+                                seenErrors,
+                                seenWarnings,
+                                tail
+                            );
+                        PruneMissingCompilationDiagnostics();
+                    }
+                }
 
-                return new(
-                    errorCount,
-                    warningCount,
-                    errors.Length == 0 ? null : ConduitUtility.FinishText(ref errors),
-                    warnings.Length == 0 ? null : ConduitUtility.FinishText(ref warnings)
-                );
+                return summary;
             }
             finally
             {
@@ -527,6 +614,80 @@ sealed partial class UnityProjectEnvironmentProbe
         {
             return CompilationDiagnosticSummary.Empty;
         }
+    }
+
+    void PruneMissingCompilationDiagnostics()
+    {
+        if (compilationDiagnosticsCache.Count <= CompilationDiagnosticsCachePruneThreshold)
+            return;
+
+        foreach (var path in compilationDiagnosticsCache.Keys)
+            if (!File.Exists(path))
+                compilationDiagnosticsCache.TryRemove(path, out _);
+    }
+
+    static void AppendCachedText(ref Utf16ValueStringBuilder builder, string? text)
+    {
+        if (text is not { Length: > 0 })
+            return;
+
+        builder.Append(text);
+        builder.Append('\n');
+    }
+
+    // a trailing fingerprint proves that a larger log is an append rather than a replacement.
+    static bool CanResumeFrom(FileStream stream, CachedCompilationDiagnostics cached)
+    {
+        if (!cached.CanResume || cached.Length > stream.Length)
+            return false;
+
+        if (cached.Tail.Length == 0)
+            return cached.Length == 0;
+
+        stream.Seek(cached.Length - cached.Tail.Length, SeekOrigin.Begin);
+        Span<byte> tail = stackalloc byte[cached.Tail.Length];
+        stream.ReadExactly(tail);
+        return tail.SequenceEqual(cached.Tail);
+    }
+
+    // metadata timestamps can repeat for same-length rewrites on coarse filesystems.
+    static bool HasMatchingTail(FileStream stream, CachedCompilationDiagnostics cached)
+    {
+        if (cached.Length != stream.Length)
+            return false;
+        if (cached.Tail.Length == 0)
+            return cached.Length == 0;
+
+        stream.Seek(cached.Length - cached.Tail.Length, SeekOrigin.Begin);
+        Span<byte> tail = stackalloc byte[cached.Tail.Length];
+        stream.ReadExactly(tail);
+        return tail.SequenceEqual(cached.Tail);
+    }
+
+    static byte[] ReadTail(FileStream stream, long length)
+    {
+        const int maximumLength = 256;
+        var tail = new byte[(int)Math.Min(maximumLength, length)];
+        if (tail.Length == 0)
+            return tail;
+
+        stream.Seek(length - tail.Length, SeekOrigin.Begin);
+        stream.ReadExactly(tail);
+        return tail;
+    }
+
+    sealed record CachedCompilationDiagnostics(
+        long Length,
+        DateTime LastWriteUtc,
+        CompilationDiagnosticSummary Summary,
+        bool InBlock,
+        bool SawTundraBlock,
+        bool BurstBlockActive,
+        HashSet<string> SeenErrors,
+        HashSet<string> SeenWarnings,
+        byte[] Tail)
+    {
+        public bool CanResume => Length == 0 || Tail.Length > 0 && Tail[^1] == (byte)'\n';
     }
 
     static void ResetCurrentBlock(

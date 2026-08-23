@@ -32,18 +32,23 @@ namespace Conduit
         {
             var requestedType = typeof(T);
             var normalizedQuery = query?.Trim() ?? string.Empty;
-            var directMatches = new List<ResolvedObjectMatch>();
             // exact selectors are resolved before adding type filters so paths, IDs, and hierarchy queries
             // keep their precise lookup semantics and can still be adapted to components in memory.
-            var useDirectMatches = normalizedQuery.Length > 0
-                                   && ConduitSearchUtility.TryResolveDirect(
-                                       normalizedQuery,
-                                       includeAllSearchResults ? int.MaxValue : 25,
-                                       out directMatches
-                                   );
-            var matches = useDirectMatches
-                ? directMatches
-                : ResolveTypedSearchQuery(normalizedQuery, requestedType, includeAllSearchResults, out normalizedQuery);
+            List<ResolvedObjectMatch> matches;
+            if (normalizedQuery.Length > 0
+                && ConduitSearchUtility.TryResolveDirect(
+                    normalizedQuery,
+                    includeAllSearchResults ? int.MaxValue : 25,
+                    out var directMatches
+                ))
+                matches = directMatches;
+            else
+                matches = ResolveTypedSearchQuery(
+                    normalizedQuery,
+                    requestedType,
+                    includeAllSearchResults,
+                    out normalizedQuery
+                );
 
             resolvedQuery = normalizedQuery;
             return FilterMatches<T>(matches, requestedType);
@@ -88,8 +93,9 @@ namespace Conduit
 
             using var pooledResults = ConduitUtility.GetPooledList<T>(out var results);
             using var pooledSeen = ConduitUtility.GetPooledSet<ulong>(out var seen);
+            using var pooledComponents = ConduitUtility.GetPooledList<Component>(out var components);
             foreach (var match in matches)
-                CollectTypedTargets(match.Target, requestedType, results, seen);
+                CollectTypedTargets(match.Target, requestedType, results, seen, components);
 
             return results.Count == 0 ? Array.Empty<T>() : results.ToArray();
         }
@@ -98,7 +104,8 @@ namespace Conduit
             Object target,
             Type requestedType,
             List<T> results,
-            HashSet<ulong> seen
+            HashSet<ulong> seen,
+            List<Component> components
         ) where T : Object
         {
             if (target == null)
@@ -121,7 +128,9 @@ namespace Conduit
 
             // Unity Search often reports the owning GameObject for component queries.
             // expanding here lets snippets ask for the component type they actually need.
-            foreach (var component in gameObject.GetComponents(requestedType))
+            components.Clear();
+            gameObject.GetComponents(requestedType, components);
+            foreach (var component in components)
                 if (component is T typedComponent)
                     AddUnique(typedComponent, results, seen);
         }

@@ -1,8 +1,8 @@
 #nullable enable
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using System.Text;
 using UnityEditor;
@@ -39,6 +39,10 @@ namespace Conduit
             "NUnit.Framework.TheoryAttribute",
             "UnityEngine.TestTools.UnityTestAttribute",
         };
+        static readonly ConcurrentDictionary<System.Reflection.Assembly, string[]> testNameCache = new();
+        static readonly object testAssemblyCacheGate = new();
+        // script compilation reloads this assembly, so the cache lifetime matches the loaded test assemblies.
+        static (System.Reflection.Assembly Assembly, TestSearchMode Mode)[]? cachedTestAssemblies;
 
         public static List<ResolvedObjectMatch> Resolve(string query, int maxResults = MaxResults + 1)
             => Resolve(query, maxResults, includeAllSearchResults: false);
@@ -49,7 +53,7 @@ namespace Conduit
         static List<ResolvedObjectMatch> Resolve(string query, int maxResults, bool includeAllSearchResults)
         {
             var normalizedQuery = query?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(normalizedQuery))
+            if (normalizedQuery.Length == 0)
                 return new();
 
             if (TryResolveDirect(normalizedQuery, maxResults, out var directMatches))
@@ -61,8 +65,8 @@ namespace Conduit
         internal static bool TryResolveDirect(string query, int maxResults, out List<ResolvedObjectMatch> matches)
         {
             var normalizedQuery = query?.Trim() ?? string.Empty;
-            matches = new();
-            if (string.IsNullOrWhiteSpace(normalizedQuery))
+            matches = null!;
+            if (normalizedQuery.Length == 0)
                 return false;
 
             // direct selectors bypass Unity Search query parsing, so exact paths and IDs keep stable meaning.
@@ -80,7 +84,10 @@ namespace Conduit
             }
 
             if (isObjectIdQuery)
+            {
+                matches = new();
                 return true;
+            }
 
             if (TryResolveAssetPath(normalizedQuery, out var assetMatch))
             {
@@ -88,11 +95,14 @@ namespace Conduit
                 return true;
             }
 
-            var hierarchyMatches = ResolveHierarchyPath(normalizedQuery, maxResults);
-            if (hierarchyMatches.Count > 0)
+            if (LooksLikeHierarchyPath(normalizedQuery))
             {
-                matches = hierarchyMatches;
-                return true;
+                var hierarchyMatches = ResolveHierarchyPath(normalizedQuery, maxResults);
+                if (hierarchyMatches.Count > 0)
+                {
+                    matches = hierarchyMatches;
+                    return true;
+                }
             }
 
             return false;
@@ -110,23 +120,18 @@ namespace Conduit
                 : FormatMatches(matches, includeHint: false);
         }
 
-        public static List<string> ResolveAssetPaths(string query)
+        public static string[] ResolveAssetPaths(string query)
         {
             var normalizedQuery = query?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(normalizedQuery))
-                return new();
+            if (normalizedQuery.Length == 0)
+                return Array.Empty<string>();
 
             var matches = Resolve(normalizedQuery, int.MaxValue);
             var assetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var match in matches)
                 CollectImportableAssetPaths(match, assetPaths);
 
-            var orderedAssetPaths = new List<string>(assetPaths.Count);
-            foreach (var assetPath in assetPaths)
-                orderedAssetPaths.Add(assetPath);
-
-            orderedAssetPaths.Sort(StringComparer.OrdinalIgnoreCase);
-            return orderedAssetPaths;
+            return ConduitUtility.SortStrings(assetPaths, StringComparer.OrdinalIgnoreCase);
         }
 
         public static string FormatNoMatches(string query)
@@ -146,7 +151,12 @@ namespace Conduit
             for (var index = 0; index < Math.Min(matches.Count, MaxResults); index++)
             {
                 var match = matches[index];
-                builder.AppendLine($"- {match.Name} | {match.Location} | {ConduitUtility.FormatObjectId(match.ObjectId)}");
+                builder.Append("- ")
+                    .Append(match.Name)
+                    .Append(" | ")
+                    .Append(match.Location)
+                    .Append(" | ")
+                    .AppendLine(ConduitUtility.FormatObjectId(match.ObjectId));
             }
 
             AppendTruncationNotice(builder, matches.Count);
@@ -184,7 +194,7 @@ namespace Conduit
             isObjectIdQuery = TryGetObjectIdValue(query, out var candidate);
             if (!isObjectIdQuery
                 || candidate.IsEmpty
-                || !BridgeObjectId.TryParse(candidate.ToString(), out var objectId))
+                || !BridgeObjectId.TryParse(candidate, out var objectId))
                 return false;
 
             var target = ConduitUtility.ResolveObjectId(objectId);
@@ -232,26 +242,54 @@ namespace Conduit
 
         static List<ResolvedObjectMatch> ResolveHierarchyPath(string query, int maxResults)
         {
-            if (!LooksLikeHierarchyPath(query))
-                return new();
-
             var normalizedPath = NormalizeHierarchyPath(query);
-            var matches = new List<ResolvedObjectMatch>();
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            var matches = new List<ResolvedObjectMatch>(Math.Min(maxResults, 4));
+            using var pooledRoots = ConduitUtility.GetPooledList<GameObject>(out var roots);
+            using var pooledPending = ConduitUtility.GetPooledList<(Transform Transform, int PathOffset)>(out var pending);
+            var sceneCount = SceneManager.sceneCount;
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 if (!scene.IsValid() || !scene.isLoaded)
                     continue;
 
-                foreach (var root in scene.GetRootGameObjects())
+                roots.Clear();
+                scene.GetRootGameObjects(roots);
+                foreach (var root in roots)
                 {
-                    foreach (var transform in root.GetComponentsInChildren<Transform>(true))
+                    pending.Clear();
+                    pending.Add((root.transform, 0));
+                    while (pending.Count > 0)
                     {
-                        if (ConduitUtility.BuildHierarchyPath(transform) != normalizedPath)
+                        var lastIndex = pending.Count - 1;
+                        var (transform, pathOffset) = pending[lastIndex];
+                        pending.RemoveAt(lastIndex);
+
+                        // compare raw name prefixes because Unity object names may contain path separators.
+                        var name = transform.name;
+                        if (normalizedPath.Length - pathOffset < name.Length
+                            || string.CompareOrdinal(normalizedPath, pathOffset, name, 0, name.Length) != 0)
                             continue;
 
-                        matches.Add(CreateMatch(transform.gameObject, ResolvedObjectMatchSource.HierarchyPath));
+                        var nextOffset = pathOffset + name.Length;
+                        if (nextOffset == normalizedPath.Length)
+                        {
+                            matches.Add(CreateMatch(transform.gameObject, ResolvedObjectMatchSource.HierarchyPath));
+                            if (matches.Count >= maxResults)
+                                return Deduplicate(matches, maxResults);
+                            continue;
+                        }
+
+                        if (normalizedPath[nextOffset] != '/')
+                            continue;
+
+                        ++nextOffset;
+                        for (var childIndex = transform.childCount - 1; childIndex >= 0; --childIndex)
+                            pending.Add((transform.GetChild(childIndex), nextOffset));
                     }
+
+                    if (matches.Count >= maxResults)
+                        return Deduplicate(matches, maxResults);
                 }
             }
 
@@ -273,7 +311,10 @@ namespace Conduit
                 SearchFlags.Synchronous
             );
 
-            var matches = new List<ResolvedObjectMatch>();
+            var matches = new List<ResolvedObjectMatch>(
+                maxResults == int.MaxValue ? MaxResults : Math.Min(maxResults, MaxResults + 1)
+            );
+            using var pooledObjectIds = ConduitUtility.GetPooledSet<ulong>(out var objectIds);
 
             foreach (var item in items)
             {
@@ -281,10 +322,17 @@ namespace Conduit
                 if (target == null)
                     continue;
 
-                matches.Add(CreateMatch(target, ResolvedObjectMatchSource.SearchQuery));
+                var match = CreateMatch(target, ResolvedObjectMatchSource.SearchQuery);
+                if (!objectIds.Add(match.ObjectId))
+                    continue;
+
+                matches.Add(match);
+                if (matches.Count >= maxResults)
+                    break;
             }
 
-            return Deduplicate(matches, maxResults);
+            SortMatches(matches);
+            return matches;
         }
 
         static string AddNoResultsLimit(string query)
@@ -311,23 +359,28 @@ namespace Conduit
                 return true;
             }
 
-            var tokens = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length == 0)
-                return false;
-
             var hasDirective = false;
             var mode = TestSearchMode.Any;
-            var filterTokens = new List<string>(tokens.Length);
-
-            foreach (var token in tokens)
+            using var pooledTokens = ConduitUtility.GetPooledList<string>(out var filterTokens);
+            var offset = 0;
+            while (offset < query.Length)
             {
-                if (token.Equals("t:test", StringComparison.OrdinalIgnoreCase))
+                while (offset < query.Length && char.IsWhiteSpace(query[offset]))
+                    ++offset;
+                if (offset == query.Length)
+                    break;
+
+                var start = offset;
+                while (offset < query.Length && !char.IsWhiteSpace(query[offset]))
+                    ++offset;
+                var token = query.AsSpan(start, offset - start);
+                if (token.Equals("t:test".AsSpan(), StringComparison.OrdinalIgnoreCase))
                 {
                     hasDirective = true;
                     continue;
                 }
 
-                if (token.Equals("editmode", StringComparison.OrdinalIgnoreCase))
+                if (token.Equals("editmode".AsSpan(), StringComparison.OrdinalIgnoreCase))
                 {
                     mode = mode switch
                     {
@@ -338,7 +391,7 @@ namespace Conduit
                     continue;
                 }
 
-                if (token.Equals("playmode", StringComparison.OrdinalIgnoreCase))
+                if (token.Equals("playmode".AsSpan(), StringComparison.OrdinalIgnoreCase))
                 {
                     mode = mode switch
                     {
@@ -349,13 +402,16 @@ namespace Conduit
                     continue;
                 }
 
-                filterTokens.Add(token);
+                filterTokens.Add(query.Substring(start, offset - start));
             }
 
             if (!hasDirective)
                 return false;
 
-            criteria = new(mode, filterTokens.ToArray());
+            criteria = new(
+                mode,
+                filterTokens.Count == 0 ? Array.Empty<string>() : filterTokens.ToArray()
+            );
             return true;
         }
 
@@ -381,21 +437,23 @@ namespace Conduit
                && ContainsUnsupportedOrSyntax(query);
 
         static bool ContainsUnsupportedOrSyntax(string query)
-			=> query.Contains("||", StringComparison.Ordinal) || query.Contains(" OR ", StringComparison.Ordinal);
+            => query.Contains("||", StringComparison.Ordinal) || query.Contains(" OR ", StringComparison.Ordinal);
 
         static List<DiscoveredTestMatch> DiscoverTests(TestSearchCriteria criteria)
         {
             var matches = new List<DiscoveredTestMatch>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
+            using var pooledSeen = ConduitUtility.GetPooledSet<string>(out var seen);
 
-            foreach (var assembly in CompilationPipeline.GetAssemblies())
+            foreach (var assembly in GetTestAssemblies())
             {
-                if (!TryGetTestAssemblyMode(assembly, out var mode)
-                    || !criteria.MatchesMode(mode)
-                    || !TryFindRuntimeAssembly(assembly.name, out var runtimeAssembly))
+                if (!criteria.MatchesMode(assembly.Mode))
                     continue;
 
-                foreach (var discoveredTest in DiscoverAssemblyTests(runtimeAssembly, mode, criteria))
+                foreach (var discoveredTest in DiscoverAssemblyTests(
+                             assembly.Assembly,
+                             assembly.Mode,
+                             criteria
+                         ))
                 {
                     if (!seen.Add(discoveredTest.Name))
                         continue;
@@ -425,24 +483,23 @@ namespace Conduit
             TestSearchMode mode,
             TestSearchCriteria criteria)
         {
-            foreach (var type in GetLoadableTypes(runtimeAssembly))
+            var testNames = testNameCache.GetOrAdd(runtimeAssembly, static assembly =>
             {
-                foreach (var method in type.GetMethods(
-                             BindingFlags.Instance
-                             | BindingFlags.Static
-                             | BindingFlags.Public
-                             | BindingFlags.NonPublic
-                             | BindingFlags.DeclaredOnly))
-                {
-                    if (!HasTestAttribute(method))
-                        continue;
+                var names = new List<string>();
+                foreach (var type in GetLoadableTypes(assembly))
+                    foreach (var method in reflect.GetMethods(type, includeAccessors: true))
+                        if (HasTestAttribute(method))
+                            names.Add($"{FormatTypeName(type)}.{method.Name}");
 
-                    var displayName = $"{FormatTypeName(type)}.{method.Name}";
-                    if (!criteria.MatchesName(displayName))
-                        continue;
+                return names.ToArray();
+            });
 
-                    yield return new(displayName, mode);
-                }
+            foreach (var displayName in testNames)
+            {
+                if (!criteria.MatchesName(displayName))
+                    continue;
+
+                yield return new(displayName, mode);
             }
         }
 
@@ -450,7 +507,10 @@ namespace Conduit
         {
             using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             foreach (var match in matches)
-                builder.AppendLine($"- {match.Name} | {FormatModeLabel(match.Mode)}");
+                builder.Append("- ")
+                    .Append(match.Name)
+                    .Append(" | ")
+                    .AppendLine(FormatModeLabel(match.Mode));
 
             return builder.TrimEnd().ToString();
         }
@@ -466,10 +526,24 @@ namespace Conduit
         static bool TryGetTestAssemblyMode(UnityEditor.Compilation.Assembly assembly, out TestSearchMode mode)
         {
             mode = default;
-            if (!assembly.assemblyReferences.Any(static reference =>
-                    reference.name is "UnityEngine.TestRunner" or "UnityEditor.TestRunner"
-                )
-                || !assembly.sourceFiles.Any(IsDiscoverableProjectSourceFile))
+            var hasTestReference = false;
+            foreach (var reference in assembly.assemblyReferences)
+                if (reference.name is "UnityEngine.TestRunner" or "UnityEditor.TestRunner")
+                {
+                    hasTestReference = true;
+                    break;
+                }
+            if (!hasTestReference)
+                return false;
+
+            var hasProjectSource = false;
+            foreach (var sourceFile in assembly.sourceFiles)
+                if (IsDiscoverableProjectSourceFile(sourceFile))
+                {
+                    hasProjectSource = true;
+                    break;
+                }
+            if (!hasProjectSource)
                 return false;
 
             mode = (assembly.flags & UnityEditor.Compilation.AssemblyFlags.EditorAssembly) != 0
@@ -493,19 +567,26 @@ namespace Conduit
                        and not UnityEditor.PackageManager.PackageSource.Registry;
         }
 
-        static bool TryFindRuntimeAssembly(string assemblyName, out System.Reflection.Assembly runtimeAssembly)
+        static IReadOnlyList<(System.Reflection.Assembly Assembly, TestSearchMode Mode)> GetTestAssemblies()
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            lock (testAssemblyCacheGate)
             {
-                if (!string.Equals(assembly.GetName().Name, assemblyName, StringComparison.Ordinal))
-                    continue;
+                if (cachedTestAssemblies != null)
+                    return cachedTestAssemblies;
 
-                runtimeAssembly = assembly;
-                return true;
+                var runtimeAssemblies = new Dictionary<string, System.Reflection.Assembly>(StringComparer.Ordinal);
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    if (assembly.GetName().Name is { Length: > 0 } name)
+                        runtimeAssemblies.TryAdd(name, assembly);
+
+                var tests = new List<(System.Reflection.Assembly, TestSearchMode)>();
+                foreach (var assembly in CompilationPipeline.GetAssemblies())
+                    if (TryGetTestAssemblyMode(assembly, out var mode)
+                        && runtimeAssemblies.TryGetValue(assembly.name, out var runtimeAssembly))
+                        tests.Add((runtimeAssembly, mode));
+
+                return cachedTestAssemblies = tests.ToArray();
             }
-
-            runtimeAssembly = null!;
-            return false;
         }
 
         static IEnumerable<Type> GetLoadableTypes(System.Reflection.Assembly assembly)
@@ -564,7 +645,6 @@ namespace Conduit
                     break;
             }
 
-            matches.Sort(static (left, right) => StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name));
             return Deduplicate(matches, maxResults);
         }
 
@@ -654,11 +734,13 @@ namespace Conduit
             for (var index = 0; index < Math.Min(matches.Count, MaxResults); index++)
             {
                 var match = matches[index];
-                builder.AppendLine(
-                    match.ObjectId != 0
-                        ? $"- {match.Name} | {match.Location} | {ConduitUtility.FormatObjectId(match.ObjectId)}"
-                        : $"- {match.Name} | {match.Location}"
-                );
+                builder.Append("- ")
+                    .Append(match.Name)
+                    .Append(" | ")
+                    .Append(match.Location);
+                if (match.ObjectId != 0)
+                    builder.Append(" | ").Append(ConduitUtility.FormatObjectId(match.ObjectId));
+                builder.AppendLine();
             }
 
             AppendTruncationNotice(builder, matches.Count);
@@ -685,10 +767,10 @@ namespace Conduit
 
         static void CollectImportableAssetPaths(ResolvedObjectMatch match, HashSet<string> assetPaths)
         {
-            if (match.Target == null || !EditorUtility.IsPersistent(match.Target))
+            if (match.AssetPath is not { Length: > 0 } assetPath)
                 return;
 
-            CollectImportableAssetPaths(AssetDatabase.GetAssetPath(match.Target), assetPaths);
+            CollectImportableAssetPaths(assetPath, assetPaths);
         }
 
         static void CollectImportableAssetPaths(string assetPath, HashSet<string> assetPaths)
@@ -727,24 +809,30 @@ namespace Conduit
                    || assetPath.Equals("Assets", StringComparison.OrdinalIgnoreCase)
                    || assetPath.Equals("Packages", StringComparison.OrdinalIgnoreCase));
 
-        static List<ResolvedObjectMatch> Deduplicate(IEnumerable<ResolvedObjectMatch> matches, int maxResults)
+        static List<ResolvedObjectMatch> Deduplicate(List<ResolvedObjectMatch> matches, int maxResults)
         {
-            var uniqueMatches = new Dictionary<ulong, ResolvedObjectMatch>();
-            foreach (var match in matches)
+            using var pooledObjectIds = ConduitUtility.GetPooledSet<ulong>(out var objectIds);
+            var uniqueCount = 0;
+            for (var readIndex = 0; readIndex < matches.Count; readIndex++)
             {
-                if (uniqueMatches.ContainsKey(match.ObjectId))
+                var match = matches[readIndex];
+                if (!objectIds.Add(match.ObjectId))
                     continue;
 
-                uniqueMatches.Add(match.ObjectId, match);
-                if (uniqueMatches.Count >= maxResults)
+                matches[uniqueCount++] = match;
+                if (uniqueCount >= maxResults)
                     break;
             }
 
-            var ordered = new List<ResolvedObjectMatch>(uniqueMatches.Count);
-            foreach (var match in uniqueMatches.Values)
-                ordered.Add(match);
+            if (uniqueCount < matches.Count)
+                matches.RemoveRange(uniqueCount, matches.Count - uniqueCount);
 
-            ordered.Sort(static (left, right)
+            SortMatches(matches);
+            return matches;
+        }
+
+        static void SortMatches(List<ResolvedObjectMatch> matches)
+            => matches.Sort(static (left, right)
                     =>
                 {
                     var nameComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
@@ -754,27 +842,26 @@ namespace Conduit
                 }
             );
 
-            return ordered;
-        }
-
         static ResolvedObjectMatch CreateMatch(Object target, ResolvedObjectMatchSource source)
-            => new()
+        {
+            var assetPath = EditorUtility.IsPersistent(target)
+                ? AssetDatabase.GetAssetPath(target)
+                : string.Empty;
+            return new()
             {
                 Target = target,
                 Name = target is EditorWindow window
                     ? GetEditorWindowDisplayName(window)
                     : target.name,
-                Location = GetLocation(target),
+                Location = GetLocation(target, assetPath),
+                AssetPath = assetPath,
                 ObjectId = ConduitUtility.GetObjectId(target),
                 Source = source,
             };
+        }
 
-        static string GetLocation(Object target)
+        static string GetLocation(Object target, string assetPath)
         {
-            var assetPath = EditorUtility.IsPersistent(target)
-                ? AssetDatabase.GetAssetPath(target)
-                : string.Empty;
-
             if (!string.IsNullOrWhiteSpace(assetPath))
                 return assetPath;
 
@@ -797,19 +884,19 @@ namespace Conduit
 
         static string NormalizeHierarchyPath(string query)
         {
-            var trimmed = query.AsSpan().Trim();
-            while (!trimmed.IsEmpty && trimmed[0] == '/')
-                trimmed = trimmed[1..];
+            var start = 0;
+            var end = query.Length;
+            while (start < end && char.IsWhiteSpace(query[start]))
+                start++;
+            while (end > start && char.IsWhiteSpace(query[end - 1]))
+                end--;
+            while (start < end && query[start] == '/')
+                start++;
 
-            return NormalizeSlashes(trimmed);
-        }
-
-        static string NormalizeSlashes(ReadOnlySpan<char> value)
-        {
             var hasBackslashes = false;
-            for (var index = 0; index < value.Length; index++)
+            for (var index = start; index < end; index++)
             {
-                if (value[index] != '\\')
+                if (query[index] != '\\')
                     continue;
 
                 hasBackslashes = true;
@@ -817,14 +904,22 @@ namespace Conduit
             }
 
             if (!hasBackslashes)
-                return value.ToString();
+                return start == 0 && end == query.Length
+                    ? query
+                    : query.Substring(start, end - start);
 
-            var buffer = value.ToArray();
-            for (var index = 0; index < buffer.Length; index++)
-                if (buffer[index] == '\\')
-                    buffer[index] = '/';
-
-            return new(buffer);
+            return string.Create(
+                end - start,
+                (query, start),
+                static (result, state) =>
+                {
+                    for (var index = 0; index < result.Length; index++)
+                    {
+                        var character = state.query[state.start + index];
+                        result[index] = character == '\\' ? '/' : character;
+                    }
+                }
+            );
         }
 
         static bool TryGetObjectIdValue(string query, out ReadOnlySpan<char> value)
@@ -857,6 +952,7 @@ namespace Conduit
         public Object Target;
         public string Name;
         public string Location;
+        public string? AssetPath;
         public ulong ObjectId;
         public ResolvedObjectMatchSource Source;
     }

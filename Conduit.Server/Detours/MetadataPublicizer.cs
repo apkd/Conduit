@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
+using System.Runtime.InteropServices;
 
 namespace Conduit;
 
@@ -11,8 +12,9 @@ static class MetadataPublicizer
     internal static byte[] Publicize(string path)
     {
         var bytes = File.ReadAllBytes(path);
-        using var stream = new MemoryStream(bytes, writable: false);
-        using var pe = new PEReader(stream);
+        using var pe = new PEReader(
+            ImmutableCollectionsMarshal.AsImmutableArray(bytes)
+        );
         if (!pe.HasMetadata)
             throw new BadImageFormatException($"'{path}' has no managed metadata.");
 

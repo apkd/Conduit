@@ -40,7 +40,7 @@ static class SelfUpdater
 
             if (OperatingSystem.IsWindows())
             {
-                StartWindowsReplacement(Process.GetCurrentProcess().Id, stagedPath, executablePath);
+                StartWindowsReplacement(Environment.ProcessId, stagedPath, executablePath);
                 return new(
                     $"Downloaded {asset.Name} from {releaseName}. The executable will be replaced after this process exits."
                 );

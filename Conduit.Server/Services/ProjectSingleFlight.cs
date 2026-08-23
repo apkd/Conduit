@@ -14,6 +14,9 @@ sealed class ProjectSingleFlight<TResult>
     )
     {
         var normalizedProjectPath = ProjectPathNormalizer.Normalize(projectPath);
+        if (inFlightOperations.TryGetValue(normalizedProjectPath, out var existingOperation))
+            return existingOperation.Value.WaitAsync(callerCancellationToken);
+
         var newOperation = new Lazy<Task<TResult>>(
             () => operationFactory(normalizedProjectPath, operationCancellationToken),
             LazyThreadSafetyMode.ExecutionAndPublication

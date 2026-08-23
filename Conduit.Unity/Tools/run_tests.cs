@@ -63,11 +63,7 @@ namespace Conduit
         }
 
         internal static string BuildCompileErrorTestRunDiagnostic(string commandType)
-        {
-            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
-            builder.Append("The project has compilation errors.");
-            return builder.ToString();
-        }
+            => "The project has compilation errors.";
 
         internal static bool TryCreateUserStoppedPlayModeTestRunResult(
             string message,
@@ -298,7 +294,9 @@ namespace Conduit
             if (result.FailCount <= 0 || result.Message is not { Length: > 0 })
                 return false;
 
-            builder.AppendLine($"{result.Name}: {result.Message}");
+            builder.Append(result.Name)
+                .Append(": ")
+                .AppendLine(result.Message);
             if (result.StackTrace is { Length: > 0 })
                 builder.AppendLine(result.StackTrace);
 

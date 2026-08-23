@@ -98,14 +98,28 @@ public static partial class ConduitUtility
     public static string CreateRequestId() => Guid.NewGuid().ToString("N");
 
     /// <summary>
-    /// Materializes the current builder contents and trims trailing line endings.
+    /// Materializes the current builder contents after trimming trailing whitespace.
     /// </summary>
-    public static string FinishText(ref Utf16ValueStringBuilder builder) => builder.ToString().TrimEnd();
+    public static string FinishText(ref Utf16ValueStringBuilder builder)
+    {
+        var text = builder.AsSpan();
+        var length = text.Length;
+        while (length > 0 && char.IsWhiteSpace(text[length - 1]))
+            length--;
+
+        return text[..length].ToString();
+    }
 
     /// <summary>
-    /// Materializes the current builder contents and trims trailing line endings.
+    /// Materializes the current builder contents after trimming trailing whitespace.
     /// </summary>
-    public static string FinishText(StringBuilder builder) => builder.ToString().TrimEnd();
+    public static string FinishText(StringBuilder builder)
+    {
+        while (builder.Length > 0 && char.IsWhiteSpace(builder[^1]))
+            builder.Length--;
+
+        return builder.ToString();
+    }
 
     /// <summary>
     /// Gets a live <see cref="Process"/> instance when the process still exists and is accessible.
@@ -152,19 +166,20 @@ public static partial class ConduitUtility
     /// </summary>
     public static string? TryReadEditorVersion(string projectVersionPath)
     {
-        if (!File.Exists(projectVersionPath))
-            return null;
-
-        foreach (var line in File.ReadLines(projectVersionPath))
+        try
         {
-            const string prefix = "m_EditorVersion:";
-            var lineSpan = line.AsSpan();
-            if (!lineSpan.StartsWith(prefix, StringComparison.Ordinal))
-                continue;
+            foreach (var line in File.ReadLines(projectVersionPath))
+            {
+                const string prefix = "m_EditorVersion:";
+                var lineSpan = line.AsSpan();
+                if (!lineSpan.StartsWith(prefix, StringComparison.Ordinal))
+                    continue;
 
-            var version = lineSpan[prefix.Length..].Trim();
-            return version.IsEmpty ? null : version.ToString();
+                var version = lineSpan[prefix.Length..].Trim();
+                return version.IsEmpty ? null : version.ToString();
+            }
         }
+        catch { }
 
         return null;
     }
@@ -443,7 +458,10 @@ public static partial class ConduitUtility
         if (string.IsNullOrEmpty(filePath))
             return filePath;
 
-        var lastSeparator = filePath.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
+        var lastSeparator = filePath.AsSpan().LastIndexOfAny(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar
+        );
         return lastSeparator >= 0 && lastSeparator + 1 < filePath.Length
             ? filePath[(lastSeparator + 1)..]
             : filePath;

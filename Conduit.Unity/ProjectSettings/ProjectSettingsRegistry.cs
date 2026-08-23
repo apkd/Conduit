@@ -18,9 +18,36 @@ namespace Conduit
     /// <summary>Builds the catalog used by the <c>project_settings</c> tool.</summary>
     public sealed class ProjectSettingsRegistry
     {
-        readonly List<ProjectSetting> settings = new();
+        static readonly object cacheGate = new();
+        static ProjectSettingsRegistry? cachedRegistry;
+        static uint cachedDependencyVersion;
+        readonly List<ProjectSetting> settings = new(2048);
+        List<ProjectSetting>? distinctSettings;
+        Dictionary<string, (ProjectSetting Setting, int Count)>? registrations;
+        string[]? topLevelGroups;
+
+        static ProjectSettingsRegistry()
+            => EditorApplication.projectChanged += Invalidate;
 
         internal IReadOnlyList<ProjectSetting> Settings => settings;
+
+        internal IReadOnlyList<ProjectSetting> DistinctSettings
+        {
+            get
+            {
+                EnsureIndex();
+                return distinctSettings!;
+            }
+        }
+
+        internal IReadOnlyList<string> TopLevelGroups
+        {
+            get
+            {
+                EnsureIndex();
+                return topLevelGroups!;
+            }
+        }
 
         /// <summary>Adds a scalar, enum, Unity object reference, or JSON-serializable project setting.</summary>
         public void Add<T>(string key, Func<T> read, Action<T>? write = null)
@@ -68,48 +95,123 @@ namespace Conduit
                 );
 
             settings.Add(new(canonicalKey, read, set, add, remove));
+            distinctSettings = null;
+            registrations = null;
+            topLevelGroups = null;
+        }
+
+        internal int CountRegistrations(string key)
+        {
+            EnsureIndex();
+            return registrations!.TryGetValue(key, out var registration)
+                ? registration.Count
+                : 0;
+        }
+
+        internal bool TryGetDistinct(string key, out ProjectSetting setting)
+        {
+            EnsureIndex();
+            if (registrations!.TryGetValue(key, out var registration))
+            {
+                setting = registration.Setting;
+                return true;
+            }
+
+            setting = null!;
+            return false;
+        }
+
+        void EnsureIndex()
+        {
+            if (distinctSettings != null)
+                return;
+
+            var indexed = new Dictionary<string, (ProjectSetting Setting, int Count)>(settings.Count, StringComparer.Ordinal);
+            foreach (var setting in settings)
+            {
+                if (indexed.TryGetValue(setting.Key, out var registration))
+                    indexed[setting.Key] = (registration.Setting, registration.Count + 1);
+                else
+                    indexed.Add(setting.Key, (setting, 1));
+            }
+
+            var distinct = new List<ProjectSetting>(indexed.Count);
+            foreach (var registration in indexed.Values)
+                distinct.Add(registration.Setting);
+            distinct.Sort(static (left, right) => string.Compare(
+                left.Key,
+                right.Key,
+                StringComparison.Ordinal
+            ));
+            var groups = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var setting in distinct)
+            {
+                var separator = setting.Key.IndexOf('.');
+                groups.Add(separator < 0 ? setting.Key : setting.Key[..separator]);
+            }
+
+            distinctSettings = distinct;
+            registrations = indexed;
+            topLevelGroups = new string[groups.Count];
+            groups.CopyTo(topLevelGroups);
+            Array.Sort(topLevelGroups, StringComparer.Ordinal);
         }
 
         internal static ProjectSettingsRegistry Build()
         {
-            var registry = new ProjectSettingsRegistry();
-
-            // built-in and package providers share one discovery and failure-isolation path.
-            foreach (var method in TypeCache.GetMethodsWithAttribute<ConduitProjectSettingsProviderAttribute>())
+            var dependencyVersion = AssetDatabase.GlobalArtifactDependencyVersion;
+            lock (cacheGate)
             {
-                string provider = $"{method.DeclaringType?.FullName}.{method.Name}";
-                int initialCount = registry.settings.Count;
-                try
+                if (cachedRegistry != null
+                    && cachedDependencyVersion == dependencyVersion)
+                    return cachedRegistry;
+
+                var registry = new ProjectSettingsRegistry();
+
+                // built-in and package providers share one discovery and failure-isolation path.
+                foreach (var method in TypeCache.GetMethodsWithAttribute<ConduitProjectSettingsProviderAttribute>())
                 {
-                    var parameters = method.GetParameters();
-                    if (!method.IsStatic
-                        || method.ReturnType != typeof(void)
-                        || parameters.Length != 1
-                        || parameters[0].ParameterType != typeof(ProjectSettingsRegistry))
+                    string provider = $"{method.DeclaringType?.FullName}.{method.Name}";
+                    int initialCount = registry.settings.Count;
+                    try
                     {
-                        ConduitDiagnostics.Warn(
-                            $"Ignoring invalid project settings provider '{provider}'. " +
-                            "Providers must be static void methods with one ProjectSettingsRegistry parameter."
-                        );
-                        continue;
+                        var parameters = method.GetParameters();
+                        if (!method.IsStatic
+                            || method.ReturnType != typeof(void)
+                            || parameters.Length != 1
+                            || parameters[0].ParameterType != typeof(ProjectSettingsRegistry))
+                        {
+                            ConduitDiagnostics.Warn(
+                                $"Ignoring invalid project settings provider '{provider}'. " +
+                                "Providers must be static void methods with one ProjectSettingsRegistry parameter."
+                            );
+                            continue;
+                        }
+
+                        method.Invoke(null, new object[] { registry });
                     }
+                    catch (Exception exception)
+                    {
+                        // provider registration is atomic; a failure must not leave a partial catalog behind.
+                        registry.settings.RemoveRange(initialCount, registry.settings.Count - initialCount);
+                        ConduitDiagnostics.Warn(
+                            $"Project settings provider '{provider}' failed: " +
+                            (exception is TargetInvocationException { InnerException: { } inner }
+                                ? inner.Message
+                                : exception.Message)
+                        );
+                    }
+                }
 
-                    method.Invoke(null, new object[] { registry });
-                }
-                catch (Exception exception)
-                {
-                    // provider registration is atomic; a failure must not leave a partial catalog behind.
-                    registry.settings.RemoveRange(initialCount, registry.settings.Count - initialCount);
-                    ConduitDiagnostics.Warn(
-                        $"Project settings provider '{provider}' failed: " +
-                        (exception is TargetInvocationException { InnerException: { } inner }
-                            ? inner.Message
-                            : exception.Message)
-                    );
-                }
+                cachedDependencyVersion = AssetDatabase.GlobalArtifactDependencyVersion;
+                return cachedRegistry = registry;
             }
+        }
 
-            return registry;
+        internal static void Invalidate()
+        {
+            lock (cacheGate)
+                cachedRegistry = null;
         }
     }
 
@@ -123,6 +225,8 @@ namespace Conduit
             Action? remove)
         {
             Key = key;
+            CompactKey = ProjectSettingKey.Compact(key);
+            Tokens = ProjectSettingKey.Tokens(key);
             Read = read;
             SetValue = set;
             AddValue = add;
@@ -130,6 +234,8 @@ namespace Conduit
         }
 
         internal string Key { get; }
+        internal string CompactKey { get; }
+        internal string[] Tokens { get; }
         internal Func<string> Read { get; }
         internal Action<string>? SetValue { get; }
         internal Action<string>? AddValue { get; }
@@ -151,11 +257,22 @@ namespace Conduit
 
     static class ProjectSettingKey
     {
+        static readonly char[] tokenSeparators = { '.', '_' };
+
         internal static string Canonicalize(string value)
         {
-            var builder = new StringBuilder(value.Length + 8);
+            if (IsCanonical(value.AsSpan()))
+                return value;
+
+            return Canonicalize(value.AsSpan());
+        }
+
+        internal static string Canonicalize(ReadOnlySpan<char> value)
+        {
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            builder.EnsureCapacity(value.Length + 8);
             var previous = CharacterKind.Separator;
-            string trimmed = value.Trim();
+            var trimmed = value.Trim();
 
             for (int index = 0, count = trimmed.Length; index < count; ++index)
             {
@@ -193,7 +310,10 @@ namespace Conduit
                 previous = kind;
             }
 
-            return builder.ToString().Trim('.', '_');
+            while (builder.Length > 0 && builder[^1] is '.' or '_')
+                builder.Length--;
+
+            return builder.ToString();
 
             static CharacterKind GetKind(char value)
                 => char.IsUpper(value)
@@ -217,10 +337,61 @@ namespace Conduit
                 if (builder.Length > 0 && builder[^1] is not ('.' or '_'))
                     builder.Append('_');
             }
+
+        }
+
+        static bool IsCanonical(ReadOnlySpan<char> candidate)
+        {
+            if (candidate.Length == 0
+                || candidate[0] is '.' or '_'
+                || candidate[^1] is '.' or '_')
+                return false;
+
+            bool previousWasSeparator = false;
+            foreach (var character in candidate)
+            {
+                if (character is '.' or '_')
+                {
+                    if (previousWasSeparator)
+                        return false;
+
+                    previousWasSeparator = true;
+                    continue;
+                }
+
+                if (!char.IsLower(character) && !char.IsDigit(character))
+                    return false;
+                previousWasSeparator = false;
+            }
+
+            return true;
+        }
+
+        internal static string Compact(string key)
+        {
+            int separatorCount = 0;
+            foreach (var character in key)
+                if (character is '.' or '_')
+                    separatorCount++;
+
+            if (separatorCount == 0)
+                return key;
+
+            return string.Create(
+                key.Length - separatorCount,
+                key,
+                static (result, source) =>
+                {
+                    int index = 0;
+                    foreach (var character in source)
+                        if (character is not ('.' or '_'))
+                            result[index++] = character;
+                }
+            );
         }
 
         internal static string[] Tokens(string key)
-            => key.Split(new[] { '.', '_' }, StringSplitOptions.RemoveEmptyEntries);
+            => key.Split(tokenSeparators, StringSplitOptions.RemoveEmptyEntries);
 
         enum CharacterKind
         {
@@ -309,10 +480,13 @@ namespace Conduit
                 return "null";
             if (value.Length > 0
                 && value != "null"
-                && value == value.Trim()
+                && !char.IsWhiteSpace(value[0])
+                && !char.IsWhiteSpace(value[^1])
                 && value[0] != '"'
                 && value[^1] != '"'
-                && value.IndexOfAny(new[] { '\r', '\n', '\t' }) < 0)
+                && value.IndexOf('\r') < 0
+                && value.IndexOf('\n') < 0
+                && value.IndexOf('\t') < 0)
                 return value;
 
             return ConduitSimpleJson.Quote(value);

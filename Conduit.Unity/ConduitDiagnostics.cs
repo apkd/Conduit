@@ -30,7 +30,7 @@ namespace Conduit
                 if (Path.GetDirectoryName(LogPath) is { Length: > 0 } directoryPath)
                     Directory.CreateDirectory(directoryPath);
 
-                var builder = new StringBuilder();
+                using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
                 builder.Append(DateTime.UtcNow.ToString("O"));
                 builder.Append(" [");
                 builder.Append(level);

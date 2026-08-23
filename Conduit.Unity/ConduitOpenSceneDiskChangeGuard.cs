@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -19,6 +20,7 @@ namespace Conduit
         static readonly BindingFlags StaticNonPublic = BindingFlags.Static | BindingFlags.NonPublic;
         static readonly Dictionary<string, SceneFileStamp> knownSceneStamps = new(StringComparer.OrdinalIgnoreCase);
         static readonly Dictionary<string, PendingSceneFileChange> pendingSceneFileChanges = new(StringComparer.OrdinalIgnoreCase);
+        static int pendingSceneFileChangeCount;
 
         // unity keeps the prompt decision behind native editor bindings.
         // using them before refresh avoids entering the modal loop where conduit cannot pump commands.
@@ -47,9 +49,13 @@ namespace Conduit
             if (AssetDatabase.IsAssetImportWorkerProcess())
                 return;
 
-            projectRootPath = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var assetsPath = Application.dataPath;
+            var rootPath = Path.GetFullPath(Path.Combine(assetsPath, ".."));
+            projectRootPath = rootPath[^1] is '/' or '\\'
+                ? rootPath
+                : rootPath + Path.DirectorySeparatorChar;
             SnapshotOpenSceneStamps();
-            TryStartSceneFileWatcher();
+            TryStartSceneFileWatcher(assetsPath);
 
             EditorApplication.update += OnEditorUpdate;
             EditorSceneManager.sceneOpened += OnSceneOpened;
@@ -62,7 +68,12 @@ namespace Conduit
         {
             Initialize();
 
-            if (ReloadChangedOpenScenes(scanAllOpenScenes: true, respectSettleDelay: false, out var blockedScenes) is { Length: > 0 } report)
+            using var pooledBlockedScenes = ConduitUtility.GetPooledList<string>(out var blockedScenes);
+            if (ReloadChangedOpenScenes(
+                    scanAllOpenScenes: true,
+                    respectSettleDelay: false,
+                    blockedScenes: blockedScenes
+                ) is { Length: > 0 } report)
                 ConduitDiagnostics.Info(report);
 
             return blockedScenes.Count == 0 ? null : BuildBlockedDirtySceneDiagnostic(commandType, blockedScenes);
@@ -80,6 +91,7 @@ namespace Conduit
             {
                 pendingSceneFileChanges.Clear();
                 knownSceneStamps.Clear();
+                UpdatePendingChangeCount();
             }
 
             try
@@ -94,9 +106,17 @@ namespace Conduit
 
         static void OnEditorUpdate()
         {
+            if (Volatile.Read(ref pendingSceneFileChangeCount) == 0)
+                return;
+
             try
             {
-                if (ReloadChangedOpenScenes(scanAllOpenScenes: false, respectSettleDelay: true, out var blockedScenes) is { Length: > 0 } report)
+                using var pooledBlockedScenes = ConduitUtility.GetPooledList<string>(out var blockedScenes);
+                if (ReloadChangedOpenScenes(
+                        scanAllOpenScenes: false,
+                        respectSettleDelay: true,
+                        blockedScenes: blockedScenes
+                    ) is { Length: > 0 } report)
                     ConduitDiagnostics.Info(report);
 
                 if (blockedScenes.Count > 0)
@@ -112,26 +132,28 @@ namespace Conduit
 
         static void OnSceneClosed(Scene scene)
         {
-            if (string.IsNullOrWhiteSpace(scene.path))
+            var scenePath = scene.path;
+            if (string.IsNullOrWhiteSpace(scenePath))
                 return;
 
             lock (gate)
             {
-                knownSceneStamps.Remove(scene.path);
-                pendingSceneFileChanges.Remove(scene.path);
+                knownSceneStamps.Remove(scenePath);
+                pendingSceneFileChanges.Remove(scenePath);
+                UpdatePendingChangeCount();
             }
         }
 
         static void OnSceneSaved(Scene scene) => RememberSceneStamp(scene);
 
-        static void TryStartSceneFileWatcher()
+        static void TryStartSceneFileWatcher(string assetsPath)
         {
-            if (string.IsNullOrWhiteSpace(Application.dataPath) || !Directory.Exists(Application.dataPath))
+            if (string.IsNullOrWhiteSpace(assetsPath) || !Directory.Exists(assetsPath))
                 return;
 
             try
             {
-                var watcher = new FileSystemWatcher(Application.dataPath, "*.unity")
+                var watcher = new FileSystemWatcher(assetsPath, "*.unity")
                 {
                     IncludeSubdirectories = true,
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
@@ -156,41 +178,46 @@ namespace Conduit
         static void OnSceneFileWatcherEvent(object sender, FileSystemEventArgs args)
         {
             if (TryConvertAbsoluteScenePathToAssetPath(args.FullPath, out var sceneAssetPath))
-                QueueSceneFileChange(sceneAssetPath);
+                QueueSceneFileChange(sceneAssetPath, args.FullPath);
         }
 
         static void OnSceneFileRenamed(object sender, RenamedEventArgs args)
         {
             if (TryConvertAbsoluteScenePathToAssetPath(args.OldFullPath, out var oldSceneAssetPath))
-                QueueSceneFileChange(oldSceneAssetPath);
+                QueueSceneFileChange(oldSceneAssetPath, args.OldFullPath);
 
             if (TryConvertAbsoluteScenePathToAssetPath(args.FullPath, out var newSceneAssetPath))
-                QueueSceneFileChange(newSceneAssetPath);
+                QueueSceneFileChange(newSceneAssetPath, args.FullPath);
         }
 
         static void OnSceneFileWatcherError(object sender, ErrorEventArgs args)
         {
             ConduitDiagnostics.Error("Open-scene disk change watcher reported an error.", args.GetException());
             lock (gate)
+            {
                 pendingSceneFileChanges.Clear();
+                UpdatePendingChangeCount();
+            }
         }
 
-        static void QueueSceneFileChange(string sceneAssetPath)
+        static void QueueSceneFileChange(string sceneAssetPath, string absolutePath)
         {
             lock (gate)
             {
                 pendingSceneFileChanges[sceneAssetPath] = new()
                 {
-                    observed_stamp = TryReadSceneFileStamp(sceneAssetPath),
+                    observed_stamp = TryReadSceneFileStampFromAbsolutePath(absolutePath),
                     last_changed_at = 0d,
                 };
+                UpdatePendingChangeCount();
             }
         }
 
-        static string ReloadChangedOpenScenes(bool scanAllOpenScenes, bool respectSettleDelay, out List<string> blockedScenes)
+        static string ReloadChangedOpenScenes(
+            bool scanAllOpenScenes,
+            bool respectSettleDelay,
+            List<string> blockedScenes)
         {
-            blockedScenes = new();
-
             using var pooledChangedScenePaths = ConduitUtility.GetPooledList<string>(out var changedScenePaths);
             CollectChangedOpenScenePaths(scanAllOpenScenes, respectSettleDelay, changedScenePaths);
             if (changedScenePaths.Count == 0)
@@ -212,19 +239,19 @@ namespace Conduit
                 {
                     // reloading here would choose disk over unsaved editor memory without user intent.
                     allChangedScenesHandled = false;
-                    blockedScenes.Add(scene.path);
+                    blockedScenes.Add(scenePath);
                     continue;
                 }
 
                 if (!ReloadSceneFromDisk(scene))
                 {
                     allChangedScenesHandled = false;
-                    blockedScenes.Add(scene.path);
+                    blockedScenes.Add(scenePath);
                     continue;
                 }
 
-                reloadedScenes.Add(scene.path);
-                RememberSceneStamp(scene.path);
+                reloadedScenes.Add(scenePath);
+                RememberSceneStamp(scenePath);
             }
 
             if (allChangedScenesHandled)
@@ -242,11 +269,13 @@ namespace Conduit
             {
                 if (scanAllOpenScenes)
                 {
-                    for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+                    var sceneCount = SceneManager.sceneCount;
+                    for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
                     {
                         var scene = SceneManager.GetSceneAt(sceneIndex);
-                        if (!string.IsNullOrWhiteSpace(scene.path))
-                            pendingPaths.Add(scene.path);
+                        var scenePath = scene.path;
+                        if (!string.IsNullOrWhiteSpace(scenePath))
+                            pendingPaths.Add(scenePath);
                     }
                 }
                 else
@@ -295,6 +324,7 @@ namespace Conduit
                         observed_stamp = null,
                         last_changed_at = now,
                     };
+                    UpdatePendingChangeCount();
 
                     return false;
                 }
@@ -307,6 +337,7 @@ namespace Conduit
                         observed_stamp = currentStamp,
                         last_changed_at = now,
                     };
+                    UpdatePendingChangeCount();
 
                     return false;
                 }
@@ -318,6 +349,7 @@ namespace Conduit
                         observed_stamp = currentStamp,
                         last_changed_at = now,
                     };
+                    UpdatePendingChangeCount();
 
                     return false;
                 }
@@ -383,7 +415,8 @@ namespace Conduit
 
         static bool TryReloadSceneWithPublicFallback(Scene scene)
         {
-            if (string.IsNullOrWhiteSpace(scene.path))
+            var scenePath = scene.path;
+            if (string.IsNullOrWhiteSpace(scenePath))
                 return false;
 
             // the public fallback restores the whole scene setup, so mixed dirty scenes are unsafe.
@@ -394,7 +427,7 @@ namespace Conduit
             {
                 if (SceneManager.sceneCount == 1 && SceneManager.GetActiveScene() == scene)
                 {
-                    EditorSceneManager.OpenScene(scene.path, OpenSceneMode.Single);
+                    EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
                     return true;
                 }
 
@@ -407,7 +440,7 @@ namespace Conduit
             }
             catch (Exception exception)
             {
-                ConduitDiagnostics.Error($"Unity public scene reload fallback failed for '{scene.path}'.", exception);
+                ConduitDiagnostics.Error($"Unity public scene reload fallback failed for '{scenePath}'.", exception);
                 return false;
             }
         }
@@ -429,7 +462,8 @@ namespace Conduit
 
         static bool AnyOpenSceneIsDirty()
         {
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            var sceneCount = SceneManager.sceneCount;
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
                 if (SceneManager.GetSceneAt(sceneIndex).isDirty)
                     return true;
 
@@ -438,7 +472,8 @@ namespace Conduit
 
         static Scene FindOpenScene(string scenePath)
         {
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            var sceneCount = SceneManager.sceneCount;
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 if (string.Equals(scene.path, scenePath, StringComparison.OrdinalIgnoreCase))
@@ -452,14 +487,16 @@ namespace Conduit
 
         static void SnapshotOpenSceneStamps()
         {
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            var sceneCount = SceneManager.sceneCount;
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
                 RememberSceneStamp(SceneManager.GetSceneAt(sceneIndex));
         }
 
         static void RememberSceneStamp(Scene scene)
         {
-            if (!string.IsNullOrWhiteSpace(scene.path))
-                RememberSceneStamp(scene.path);
+            var scenePath = scene.path;
+            if (!string.IsNullOrWhiteSpace(scenePath))
+                RememberSceneStamp(scenePath);
         }
 
         static void RememberSceneStamp(string scenePath)
@@ -473,6 +510,7 @@ namespace Conduit
                     knownSceneStamps[scenePath] = stamp.Value;
 
                 pendingSceneFileChanges.Remove(scenePath);
+                UpdatePendingChangeCount();
             }
         }
 
@@ -482,27 +520,39 @@ namespace Conduit
             {
                 knownSceneStamps.Remove(scenePath);
                 pendingSceneFileChanges.Remove(scenePath);
+                UpdatePendingChangeCount();
             }
         }
 
         static void RemovePendingSceneFileChange(string scenePath)
         {
             lock (gate)
+            {
                 pendingSceneFileChanges.Remove(scenePath);
+                UpdatePendingChangeCount();
+            }
         }
+
+        // callers hold gate while publishing the collection's lock-free idle state.
+        static void UpdatePendingChangeCount()
+            => Volatile.Write(ref pendingSceneFileChangeCount, pendingSceneFileChanges.Count);
 
         static SceneFileStamp? TryReadSceneFileStamp(string scenePath)
         {
             if (!TryConvertAssetPathToAbsolutePath(scenePath, out var absolutePath))
                 return null;
 
+            return TryReadSceneFileStampFromAbsolutePath(absolutePath);
+        }
+
+        static SceneFileStamp? TryReadSceneFileStampFromAbsolutePath(string absolutePath)
+        {
             try
             {
-                if (!File.Exists(absolutePath))
-                    return null;
-
                 var fileInfo = new FileInfo(absolutePath);
-                return new(fileInfo.Length, fileInfo.LastWriteTimeUtc);
+                return fileInfo.Exists
+                    ? new(fileInfo.Length, fileInfo.LastWriteTimeUtc)
+                    : null;
             }
             catch
             {
@@ -520,10 +570,6 @@ namespace Conduit
             {
                 var fullPath = Path.GetFullPath(absolutePath);
                 var rootPath = projectRootPath!;
-                if (!rootPath.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                    && !rootPath.EndsWith(Path.AltDirectorySeparatorChar.ToString(), StringComparison.Ordinal))
-                    rootPath += Path.DirectorySeparatorChar;
-
                 if (!fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
                     return false;
 

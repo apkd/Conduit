@@ -378,7 +378,7 @@ namespace Conduit
         bool TryPrepareReimportAssets(PendingOperationState operation)
         {
             var assetPaths = ConduitSearchUtility.ResolveAssetPaths(operation.target ?? string.Empty);
-            if (assetPaths.Count == 0)
+            if (assetPaths.Length == 0)
             {
                 _ = complete(
                     new()
@@ -408,7 +408,7 @@ namespace Conduit
                 return false;
             }
 
-            operation.reimport_asset_paths = assetPaths.ToArray();
+            operation.reimport_asset_paths = assetPaths;
             // resolved paths survive reloads and avoid rescanning a query against changed project state
             OperationPersistence.SaveActiveOperation(operation, BridgeCommandKind.ReimportAssets);
             return true;
@@ -467,21 +467,22 @@ namespace Conduit
             if (ShouldWaitForIdle(refreshReturned, isCompiling, isUpdating, idleUpdateCount))
                 return;
 
-            var compilerMessages = compilerMessageBuffer.ToString().Trim();
+            var compilerMessages = compilerMessageBuffer.Trim().ToString();
+            bool hasCompilerMessages = compilerMessages.Length > 0;
             // restored refreshes miss compilation callbacks that fired before domain reload
             var hasRestoredCompileFailure = operation.is_restored
-                                            && string.IsNullOrWhiteSpace(compilerMessages)
+                                            && !hasCompilerMessages
                                             && EditorUtility.scriptCompilationFailed;
             _ = complete(
                 new()
                 {
-                    outcome = string.IsNullOrWhiteSpace(compilerMessages) && !hasRestoredCompileFailure
+                    outcome = !hasCompilerMessages && !hasRestoredCompileFailure
                         ? ToolOutcome.Success
                         : ToolOutcome.CompileError,
                     return_value = commandKind == BridgeCommandKind.ReimportAssets
                         ? FormatReimportedAssetFilenames(operation.reimport_asset_paths)
                         : null,
-                    diagnostic = string.IsNullOrWhiteSpace(compilerMessages)
+                    diagnostic = !hasCompilerMessages
                         ? hasRestoredCompileFailure ? BuildRestoredCompileErrorDiagnostic() : null
                         : compilerMessages,
                 }

@@ -16,7 +16,8 @@ namespace Conduit
         {
             using var pooled = ConduitUtility.GetPooledList<string>(out var dirtyScenes);
 
-            for (int i = 0; i < SceneManager.sceneCount; i++)
+            var sceneCount = SceneManager.sceneCount;
+            for (int i = 0; i < sceneCount; i++)
                 if (SceneManager.GetSceneAt(i) is { isDirty: true } scene)
                     dirtyScenes.Add(GetSceneDisplayName(scene));
 
@@ -32,13 +33,14 @@ namespace Conduit
             if (!scene.IsValid())
                 throw new InvalidOperationException($"Open scene '{targetScenePath}' was not found.");
 
+            var scenePath = scene.path;
             if (!scene.isDirty)
-                return $"Scene already clean: {scene.path}";
+                return $"Scene already clean: {scenePath}";
 
             if (!EditorSceneManager.SaveScene(scene))
-                throw new InvalidOperationException($"Failed to save scene '{scene.path}'.");
+                throw new InvalidOperationException($"Failed to save scene '{scenePath}'.");
 
-            return $"Saved scene: {scene.path}";
+            return $"Saved scene: {scenePath}";
         }
 
         public static string DiscardScenes(string? targetScenePath)
@@ -50,10 +52,10 @@ namespace Conduit
             if (!scene.IsValid())
                 throw new InvalidOperationException($"Open scene '{targetScenePath}' was not found.");
 
-            if (!scene.isDirty)
-                return $"Scene already clean: {scene.path}";
-
             var scenePath = scene.path;
+            if (!scene.isDirty)
+                return $"Scene already clean: {scenePath}";
+
             DiscardSingleScene(scene);
             return $"Discarded scene changes: {scenePath}";
         }
@@ -86,12 +88,14 @@ namespace Conduit
         {
             using var pooledSaved = ConduitUtility.GetPooledList<string>(out var savedScenes);
             using var pooledCreated = ConduitUtility.GetPooledList<string>(out var createdScenes);
-            for (int i = 0; i < SceneManager.sceneCount; i++)
+            var sceneCount = SceneManager.sceneCount;
+            for (int i = 0; i < sceneCount; i++)
             {
                 if (SceneManager.GetSceneAt(i) is not { isDirty: true } scene)
                     continue;
 
-                if (string.IsNullOrWhiteSpace(scene.path))
+                var scenePath = scene.path;
+                if (string.IsNullOrWhiteSpace(scenePath))
                 {
                     var tempPath = CreateTempScenePath();
                     if (!EditorSceneManager.SaveScene(scene, tempPath))
@@ -103,9 +107,9 @@ namespace Conduit
                 }
 
                 if (!EditorSceneManager.SaveScene(scene))
-                    throw new InvalidOperationException($"Failed to save scene '{scene.path}'.");
+                    throw new InvalidOperationException($"Failed to save scene '{scenePath}'.");
 
-                savedScenes.Add(scene.path);
+                savedScenes.Add(scenePath);
             }
 
             return BuildSaveSummary(savedScenes, createdScenes);
@@ -140,7 +144,8 @@ namespace Conduit
 
         static void DiscardSingleScene(Scene scene)
         {
-            if (string.IsNullOrWhiteSpace(scene.path))
+            var scenePath = scene.path;
+            if (string.IsNullOrWhiteSpace(scenePath))
             {
                 if (SceneManager.sceneCount == 1)
                 {
@@ -156,7 +161,7 @@ namespace Conduit
 
             if (SceneManager.sceneCount == 1 && SceneManager.GetActiveScene() == scene)
             {
-                EditorSceneManager.OpenScene(scene.path, OpenSceneMode.Single);
+                EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
                 return;
             }
 
@@ -166,23 +171,24 @@ namespace Conduit
             for (var index = 0; index < currentSetup.Length; index++)
             {
                 updatedSetup[index] = currentSetup[index];
-                if (!string.Equals(currentSetup[index].path, scene.path, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(currentSetup[index].path, scenePath, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                updatedSetup[index].path = scene.path;
+                updatedSetup[index].path = scenePath;
                 updatedSetup[index].isLoaded = true;
                 replacementFound = true;
             }
 
             if (!replacementFound)
-                throw new InvalidOperationException($"Failed to rebuild scene setup for '{scene.path}'.");
+                throw new InvalidOperationException($"Failed to rebuild scene setup for '{scenePath}'.");
 
             EditorSceneManager.RestoreSceneManagerSetup(updatedSetup);
         }
 
         static Scene FindOpenSceneByPath(string? targetScenePath)
         {
-            for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            var sceneCount = SceneManager.sceneCount;
+            for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 if (string.Equals(scene.path, targetScenePath, StringComparison.OrdinalIgnoreCase))

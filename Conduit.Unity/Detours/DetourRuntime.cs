@@ -12,6 +12,7 @@ namespace Conduit
     {
         static readonly object gate = new();
         static readonly Dictionary<(Guid ModuleVersionId, int MetadataToken), ActiveDetour> active = new();
+        static string[] activeMethodNames = Array.Empty<string>();
 
         internal static int ActiveCount
         {
@@ -27,7 +28,7 @@ namespace Conduit
             get
             {
                 lock (gate)
-                    return active.Values.Select(static detour => detour.CanonicalName).OrderBy(static name => name).ToArray();
+                    return activeMethodNames;
             }
         }
 
@@ -81,7 +82,13 @@ namespace Conduit
         internal static DetourSnapshot[] GetSnapshots()
         {
             lock (gate)
-                return active.Values.Select(static detour => detour.ToSnapshot()).ToArray();
+            {
+                var snapshots = new DetourSnapshot[active.Count];
+                var index = 0;
+                foreach (var detour in active.Values)
+                    snapshots[index++] = detour.ToSnapshot();
+                return snapshots;
+            }
         }
 
         internal static void Reapply(DetourSnapshot snapshot)
@@ -119,6 +126,8 @@ namespace Conduit
                         (failures ??= new()).Add(exception);
                     }
                 }
+
+                RebuildActiveMethodNames();
 
                 if (failures is { Count: > 0 })
                     throw new AggregateException("One or more method detours could not be restored.", failures);
@@ -187,6 +196,7 @@ namespace Conduit
                     generatedTypeName,
                     displayName
                 );
+                RebuildActiveMethodNames();
                 var result = existing == null
                     ? $"Detoured {canonicalName} with {displayName}."
                     : $"Updated detour for {canonicalName} with {displayName}.";
@@ -218,8 +228,26 @@ namespace Conduit
                     return $"No detour is applied to {canonicalName} in the current domain lifetime.";
                 NativePatch.Restore(detour.Patch);
                 active.Remove(key);
+                RebuildActiveMethodNames();
                 return $"Restored the original implementation of {canonicalName}.";
             }
+        }
+
+        static void RebuildActiveMethodNames()
+        {
+            if (active.Count == 0)
+            {
+                activeMethodNames = Array.Empty<string>();
+                return;
+            }
+
+            var names = new string[active.Count];
+            var index = 0;
+            foreach (var detour in active.Values)
+                names[index++] = detour.CanonicalName;
+
+            Array.Sort(names, StringComparer.Ordinal);
+            activeMethodNames = names;
         }
 
         static MethodInfo LoadReplacement(

@@ -383,6 +383,16 @@ namespace Conduit
                 relative_path = relativePath.Replace(Path.DirectorySeparatorChar, '/'),
             };
 
+        internal BridgeArtifact AsProjectFile(string relativePath)
+            => new()
+            {
+                name = name,
+                media_type = media_type,
+                sha256 = sha256,
+                length = length,
+                relative_path = relativePath.Replace(Path.DirectorySeparatorChar, '/'),
+            };
+
         internal void MaterializeInEndpoint(string endpointDirectory)
         {
             if (Content is not { } bytes)
@@ -536,15 +546,15 @@ namespace Conduit
 
         static string FormatSha256(byte[] hash)
         {
-            var characters = new char[hash.Length * 2];
-            const string alphabet = "0123456789abcdef";
-            for (var index = 0; index < hash.Length; index++)
+            return string.Create(hash.Length * 2, hash, static (characters, bytes) =>
             {
-                characters[index * 2] = alphabet[hash[index] >> 4];
-                characters[index * 2 + 1] = alphabet[hash[index] & 0xf];
-            }
-
-            return new string(characters);
+                const string alphabet = "0123456789abcdef";
+                for (var index = 0; index < bytes.Length; index++)
+                {
+                    characters[index * 2] = alphabet[bytes[index] >> 4];
+                    characters[index * 2 + 1] = alphabet[bytes[index] & 0xf];
+                }
+            });
         }
     }
 

@@ -21,18 +21,17 @@ namespace Conduit
             for (var index = 0; index < result.artifacts.Length; index++)
             {
                 var artifact = result.artifacts[index];
-                var bytes = artifact.ReadVerified();
+                var bytes = artifact.Content
+                            ?? throw new InvalidDataException(
+                                $"Assembly reference '{artifact.name}' had no in-memory content."
+                            );
                 var relativePath = Path.Combine(
                     relativeDirectory,
                     artifact.sha256 + ".dll"
                 );
                 File.WriteAllBytes(Path.Combine(projectRoot, relativePath), bytes);
-                result.artifacts[index] = BridgeArtifact.FromProjectFile(
-                    artifact.name,
-                    artifact.media_type,
-                    relativePath,
-                    bytes
-                );
+                // reuse the hash computed while reading; the receiving server verifies the file.
+                result.artifacts[index] = artifact.AsProjectFile(relativePath);
             }
 
             return result;

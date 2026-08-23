@@ -6,7 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -16,10 +16,7 @@ namespace Conduit
     // serialized access keeps built-in and package settings version-tolerant without compiling against optional APIs.
     static class SerializedProjectSettingsProvider
     {
-        static readonly Regex arrayElementPattern = new(
-            @"^(?<array>.+)\.Array\.data\[(?<index>\d+)\]$",
-            RegexOptions.CultureInvariant
-        );
+        const string ArrayElementMarker = ".Array.data[";
         static readonly int guidPropertyType = Enum.TryParse(
             "GUID",
             out SerializedPropertyType parsedGuidPropertyType
@@ -138,7 +135,7 @@ namespace Conduit
                     continue;
 
                 string capturedPath = propertyPath;
-                bool isCollectionElement = arrayElementPattern.IsMatch(propertyPath);
+                bool isCollectionElement = IsArrayElementPath(propertyPath);
                 var writer = write == null || IsReadOnly(iterator)
                     ? null
                     : new Action<string>(value => write(capturedPath, value));
@@ -225,10 +222,9 @@ namespace Conduit
             if (serializedObject.FindProperty(path) is { } property)
                 return ReadValue(property);
 
-            var match = arrayElementPattern.Match(path);
-            if (match.Success
-                && serializedObject.FindProperty(match.Groups["array"].Value) is { isArray: true } array
-                && int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture) == array.arraySize)
+            if (TryParseArrayElementPath(path, out var arrayPath, out var index)
+                && serializedObject.FindProperty(arrayPath) is { isArray: true } array
+                && index == array.arraySize)
                 return "<append>";
 
             throw new InvalidOperationException(
@@ -245,12 +241,10 @@ namespace Conduit
             if (serializedObject.FindProperty(path) is { } existing)
                 return existing;
 
-            var match = arrayElementPattern.Match(path);
-            if (!match.Success)
+            if (!TryParseArrayElementPath(path, out var arrayPath, out var index))
                 return Find(serializedObject, path);
 
-            var array = Find(serializedObject, match.Groups["array"].Value);
-            int index = int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture);
+            var array = Find(serializedObject, arrayPath);
             if (!array.isArray || index != array.arraySize)
                 throw new InvalidOperationException(
                     $"Append at index {index} is invalid; "
@@ -440,52 +434,88 @@ namespace Conduit
 
         static string SerializeCompound(SerializedProperty property)
         {
-            if (property.isArray)
-            {
-                var values = new string[property.arraySize];
-                for (int index = 0, count = values.Length; index < count; ++index)
-                    values[index] = SerializeJson(property.GetArrayElementAtIndex(index));
-                return "[" + string.Join(",", values) + "]";
-            }
-
-            var fields = new List<string>();
-            foreach (var child in GetDirectChildren(property))
-                fields.Add(
-                    ConduitSimpleJson.Quote(ToKey(child.name))
-                    + ":"
-                    + SerializeJson(child)
-                );
-            return "{" + string.Join(",", fields) + "}";
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            AppendCompound(builder, property);
+            return builder.ToString();
         }
 
-        static string SerializeJson(SerializedProperty property)
+        static void AppendCompound(StringBuilder builder, SerializedProperty property)
+        {
+            if (property.isArray)
+            {
+                builder.Append('[');
+                for (int index = 0, count = property.arraySize; index < count; ++index)
+                {
+                    if (index > 0)
+                        builder.Append(',');
+                    AppendJson(builder, property.GetArrayElementAtIndex(index));
+                }
+                builder.Append(']');
+                return;
+            }
+
+            builder.Append('{');
+            var fieldCount = 0;
+            foreach (var child in GetDirectChildren(property))
+            {
+                if (fieldCount++ > 0)
+                    builder.Append(',');
+                ConduitSimpleJson.AppendQuoted(builder, ToKey(child.name));
+                builder.Append(':');
+                AppendJson(builder, child);
+            }
+            builder.Append('}');
+        }
+
+        static void AppendJson(StringBuilder builder, SerializedProperty property)
         {
             if (!IsSupportedLeaf(property))
-                return SerializeCompound(property);
+            {
+                AppendCompound(builder, property);
+                return;
+            }
             if (IsGuid(property))
-                return ConduitSimpleJson.Quote(ReadProperty(property));
-
-            return property.propertyType switch
             {
-                SerializedPropertyType.String => ConduitSimpleJson.Quote(property.stringValue),
-                SerializedPropertyType.Character => ConduitSimpleJson.Quote(((char)property.intValue).ToString()),
-                SerializedPropertyType.Enum => ConduitSimpleJson.Quote(ReadProperty(property)),
-                SerializedPropertyType.ObjectReference => property.objectReferenceValue == null
-                    ? "null"
-                    : FormatReferenceJson(property.objectReferenceValue),
-                SerializedPropertyType.ExposedReference => property.exposedReferenceValue == null
-                    ? "null"
-                    : FormatReferenceJson(property.exposedReferenceValue),
-                SerializedPropertyType.Hash128 => ConduitSimpleJson.Quote(ReadProperty(property)),
-                _ => ReadProperty(property),
-            };
+                ConduitSimpleJson.AppendQuoted(builder, ReadProperty(property));
+                return;
+            }
 
-            static string FormatReferenceJson(Object value)
+            switch (property.propertyType)
             {
+                case SerializedPropertyType.String:
+                    ConduitSimpleJson.AppendQuoted(builder, property.stringValue);
+                    return;
+                case SerializedPropertyType.Character:
+                    ConduitSimpleJson.AppendQuoted(builder, ((char)property.intValue).ToString());
+                    return;
+                case SerializedPropertyType.Enum:
+                case SerializedPropertyType.Hash128:
+                    ConduitSimpleJson.AppendQuoted(builder, ReadProperty(property));
+                    return;
+                case SerializedPropertyType.ObjectReference:
+                    AppendReference(property.objectReferenceValue);
+                    return;
+                case SerializedPropertyType.ExposedReference:
+                    AppendReference(property.exposedReferenceValue);
+                    return;
+                default:
+                    builder.Append(ReadProperty(property));
+                    return;
+            }
+
+            void AppendReference(Object? value)
+            {
+                if (value == null)
+                {
+                    builder.Append("null");
+                    return;
+                }
+
                 string formatted = ProjectSettingValueCodec.FormatObjectReference(value);
-                return formatted.StartsWith("{", StringComparison.Ordinal)
-                    ? formatted
-                    : ConduitSimpleJson.Quote(formatted);
+                if (formatted.StartsWith("{", StringComparison.Ordinal))
+                    builder.Append(formatted);
+                else
+                    ConduitSimpleJson.AppendQuoted(builder, formatted);
             }
         }
 
@@ -652,19 +682,17 @@ namespace Conduit
 
         static void RemoveProperty(SerializedProperty property)
         {
-            var match = arrayElementPattern.Match(property.propertyPath);
-            if (!match.Success)
+            if (!TryParseArrayElementPath(property.propertyPath, out var arrayPath, out var index))
                 throw new InvalidOperationException(
                     $"Serialized setting '{property.propertyPath}' is not a collection element."
                 );
 
-            var parent = property.serializedObject.FindProperty(match.Groups["array"].Value);
+            var parent = property.serializedObject.FindProperty(arrayPath);
             if (parent == null || !parent.isArray)
                 throw new InvalidOperationException(
                     $"Serialized setting '{property.propertyPath}' has no collection parent."
                 );
 
-            int index = int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture);
             parent.DeleteArrayElementAtIndex(index);
             if (index < parent.arraySize
                 && parent.GetArrayElementAtIndex(index).propertyType == SerializedPropertyType.ObjectReference)
@@ -758,7 +786,50 @@ namespace Conduit
 
         static bool IsCompoundArrayElement(SerializedProperty property)
             => property.propertyType == SerializedPropertyType.Generic
-               && arrayElementPattern.IsMatch(property.propertyPath);
+               && IsArrayElementPath(property.propertyPath);
+
+        static bool IsArrayElementPath(string path)
+            => TryGetArrayElementParts(path, out _, out _);
+
+        static bool TryParseArrayElementPath(string path, out string arrayPath, out int index)
+        {
+            if (TryGetArrayElementParts(path, out var marker, out var indexText)
+                && int.TryParse(
+                    indexText,
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out index
+                ))
+            {
+                arrayPath = path[..marker];
+                return true;
+            }
+
+            arrayPath = string.Empty;
+            index = 0;
+            return false;
+        }
+
+        static bool TryGetArrayElementParts(
+            string path,
+            out int marker,
+            out ReadOnlySpan<char> indexText)
+        {
+            marker = path.LastIndexOf(ArrayElementMarker, StringComparison.Ordinal);
+            int indexStart = marker + ArrayElementMarker.Length;
+            if (marker <= 0 || indexStart >= path.Length || path[^1] != ']')
+            {
+                indexText = default;
+                return false;
+            }
+
+            indexText = path.AsSpan(indexStart, path.Length - indexStart - 1);
+            foreach (var character in indexText)
+                if (character is < '0' or > '9')
+                    return false;
+
+            return indexText.Length > 0;
+        }
 
         static IEnumerable<SerializedProperty> GetDirectChildren(SerializedProperty property)
         {
@@ -779,12 +850,12 @@ namespace Conduit
         static bool ShouldSkip(string path)
         {
             string key = ProjectSettingKey.Canonicalize(path);
-            var segments = ProjectSettingKey.Tokens(key);
+            var keySpan = key.AsSpan();
             // implementation metadata, obsolete systems, telemetry, and credentials are outside this tool's ownership.
             return key is "m_object_hide_flags" or "m_script"
-                   || Array.IndexOf(segments, "serialized") >= 0 && Array.IndexOf(segments, "version") >= 0
-                   || segments.Any(static segment => segment.StartsWith("obsolete", StringComparison.Ordinal)
-                                                      || segment.StartsWith("deprecated", StringComparison.Ordinal))
+                   || ContainsToken(keySpan, "serialized") && ContainsToken(keySpan, "version")
+                   || ContainsToken(keySpan, "obsolete", matchPrefix: true)
+                   || ContainsToken(keySpan, "deprecated", matchPrefix: true)
                    || key is "m_asset_version" or "m_last_material_version"
                    || key.Contains("vr_settings", StringComparison.Ordinal)
                    || key.Contains("virtual_reality", StringComparison.Ordinal)
@@ -795,6 +866,28 @@ namespace Conduit
                    || key.Contains("credential", StringComparison.Ordinal)
                    || key.Contains("access_token", StringComparison.Ordinal)
                    || key.Contains("auth_token", StringComparison.Ordinal);
+
+            static bool ContainsToken(
+                ReadOnlySpan<char> value,
+                ReadOnlySpan<char> token,
+                bool matchPrefix = false)
+            {
+                int segmentStart = 0;
+                for (int index = 0; index <= value.Length; ++index)
+                {
+                    if (index < value.Length && value[index] is not ('.' or '_'))
+                        continue;
+
+                    var segment = value[segmentStart..index];
+                    if (matchPrefix
+                            ? segment.StartsWith(token, StringComparison.Ordinal)
+                            : segment.Equals(token, StringComparison.Ordinal))
+                        return true;
+                    segmentStart = index + 1;
+                }
+
+                return false;
+            }
         }
 
         static bool IsReadOnly(SerializedProperty property)
@@ -813,15 +906,37 @@ namespace Conduit
 
         internal static string ToKey(string propertyPath)
         {
-            string path = propertyPath
-                .Replace(".Array.data[", ".", StringComparison.Ordinal)
-                .Replace("]", string.Empty, StringComparison.Ordinal);
-            var segments = path.Split('.');
-            for (int index = 0, count = segments.Length; index < count; ++index)
-                if (segments[index].StartsWith("m_", StringComparison.Ordinal))
-                    segments[index] = segments[index][2..];
+            Span<char> normalized = propertyPath.Length <= 512
+                ? stackalloc char[propertyPath.Length]
+                : new char[propertyPath.Length];
+            int outputLength = 0;
+            int inputIndex = 0;
+            while (inputIndex < propertyPath.Length)
+            {
+                if (propertyPath.AsSpan(inputIndex).StartsWith(ArrayElementMarker, StringComparison.Ordinal))
+                {
+                    normalized[outputLength++] = '.';
+                    inputIndex += ArrayElementMarker.Length;
+                    continue;
+                }
 
-            return ProjectSettingKey.Canonicalize(string.Join(".", segments));
+                if (propertyPath[inputIndex] == ']')
+                {
+                    inputIndex++;
+                    continue;
+                }
+
+                if ((outputLength == 0 || normalized[outputLength - 1] == '.')
+                    && propertyPath.AsSpan(inputIndex).StartsWith("m_", StringComparison.Ordinal))
+                {
+                    inputIndex += 2;
+                    continue;
+                }
+
+                normalized[outputLength++] = propertyPath[inputIndex++];
+            }
+
+            return ProjectSettingKey.Canonicalize(normalized[..outputLength]);
         }
 
         // json utility needs serializable field wrappers for engine-native curve and gradient values.

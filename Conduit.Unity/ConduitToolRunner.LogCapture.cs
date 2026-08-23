@@ -54,6 +54,7 @@ namespace Conduit
             ?.GetField("executionSettings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         static readonly FieldInfo? executionSettingsHasTargetPlatformField = typeof(ExecutionSettings)
             .GetField("m_HasTargetPlatform", BindingFlags.Instance | BindingFlags.NonPublic);
+        [ThreadStatic] static object?[]? reusableInvokeArguments;
 
         public UnityTestRunMonitor(
             ToolLogCapture logCapture,
@@ -467,15 +468,29 @@ namespace Conduit
         static bool HasTargetPlatform(ExecutionSettings settings)
             => executionSettingsHasTargetPlatformField?.GetValue(settings) is true;
 
-        static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value, params object?[] args)
+        static bool TryInvokeTestRunnerBoolMethod(MethodInfo? method, out bool value)
+            => TryInvokeTestRunnerBoolMethod(method, out value, null);
+
+        static bool TryInvokeTestRunnerBoolMethod(
+            MethodInfo? method,
+            out bool value,
+            object? argument)
         {
             value = false;
             if (method == null)
                 return false;
 
+            object?[]? arguments = null;
             try
             {
-                if (method.Invoke(null, args) is bool result)
+                if (argument != null)
+                {
+                    arguments = reusableInvokeArguments ?? new object?[1];
+                    reusableInvokeArguments = null;
+                    arguments[0] = argument;
+                }
+
+                if (method.Invoke(null, arguments) is bool result)
                 {
                     value = result;
                     return true;
@@ -484,6 +499,14 @@ namespace Conduit
             catch (Exception)
             {
                 // reflection failures are treated as unavailable test runner state
+            }
+            finally
+            {
+                if (arguments != null)
+                {
+                    arguments[0] = null;
+                    reusableInvokeArguments ??= arguments;
+                }
             }
 
             return false;
@@ -556,6 +579,11 @@ namespace Conduit
         readonly List<string> activeTestScopes = new();
         readonly Dictionary<LogSignature, int> capturedLogEntryIndexes = new(LogSignatureComparer.Instance);
         readonly List<CapturedLogEntry> capturedLogEntries = new();
+        string? lastRawMessage;
+        string? lastRawStackTrace;
+        int lastRawEntryIndex;
+        LogType lastRawLogType;
+        bool hasLastRawEntry;
         BridgeCommandKind activeCommandKind;
         bool hooked;
         bool discardOnCompletion;
@@ -648,7 +676,7 @@ namespace Conduit
 
         public static string FormatCapturedLogEntryForTest(string message, string? stackTrace, int repeatCount = 1)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             var entry = new CapturedLogEntry(message, stackTrace ?? string.Empty, LogType.Log)
             {
                 RepeatCount = repeatCount,
@@ -694,16 +722,44 @@ namespace Conduit
 
         void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
         {
-            if (ShouldSuppressCapturedLogEntry(condition, activeCommandKind))
-                return;
-
-            // burst diagnostics can embed assembly-qualified signatures longer than the useful error text
-            condition = NormalizeCapturedLogMessage(condition);
             lock (gate)
             {
+                // repeated logs bypass the comparatively expensive stack normalization path.
+                if (hasLastRawEntry
+                    && logType == lastRawLogType
+                    && condition == lastRawMessage
+                    && stackTrace == lastRawStackTrace)
+                {
+                    if (lastRawEntryIndex < 0)
+                        return;
+
+                    capturedLogEntries[lastRawEntryIndex].RepeatCount++;
+                    ResolveLogTargetUnderLock().AddEntryIndex(lastRawEntryIndex);
+                    return;
+                }
+
+                var rawCondition = condition;
+                var rawStackTrace = stackTrace;
+                if (ShouldSuppressCapturedLogEntry(condition, activeCommandKind))
+                {
+                    RememberRawEntry(-1);
+                    return;
+                }
+
+                // burst diagnostics can embed assembly-qualified signatures longer than the useful error text
+                condition = NormalizeCapturedLogMessage(condition);
                 var target = ResolveLogTargetUnderLock();
                 var simplifiedStackTrace = CleanCapturedStackTrace(activeCommandKind, stackTrace, logType);
-                CaptureLogEntry(target, condition, simplifiedStackTrace, logType);
+                RememberRawEntry(CaptureLogEntry(target, condition, simplifiedStackTrace, logType));
+
+                void RememberRawEntry(int entryIndex)
+                {
+                    lastRawMessage = rawCondition;
+                    lastRawStackTrace = rawStackTrace;
+                    lastRawLogType = logType;
+                    lastRawEntryIndex = entryIndex;
+                    hasLastRawEntry = true;
+                }
             }
         }
 
@@ -724,35 +780,27 @@ namespace Conduit
             return target;
         }
 
-        void CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace, LogType logType)
+        int CaptureLogEntry(CapturedLogTarget target, string condition, string? simplifiedStackTrace, LogType logType)
         {
             var message = condition ?? string.Empty;
             var stack = simplifiedStackTrace ?? string.Empty;
             if (message.Length == 0 && stack.Length == 0)
-                return;
+                return -1;
 
             var signature = new LogSignature(message, stack, logType);
             if (capturedLogEntryIndexes.TryGetValue(signature, out var entryIndex))
             {
                 capturedLogEntries[entryIndex].RepeatCount++;
                 // entries are deduped globally while each target keeps its own first reference
-                AddTargetEntryIndex(target, entryIndex);
-                return;
+                target.AddEntryIndex(entryIndex);
+                return entryIndex;
             }
 
             entryIndex = capturedLogEntries.Count;
             capturedLogEntryIndexes.Add(signature, entryIndex);
             capturedLogEntries.Add(new(message, stack, logType));
-            target.EntryIndexes.Add(entryIndex);
-        }
-
-        static void AddTargetEntryIndex(CapturedLogTarget target, int entryIndex)
-        {
-            foreach (var existingEntryIndex in target.EntryIndexes)
-                if (existingEntryIndex == entryIndex)
-                    return;
-
-            target.EntryIndexes.Add(entryIndex);
+            target.AddEntryIndex(entryIndex);
+            return entryIndex;
         }
 
         string BuildCapturedLogs(CapturedLogTarget target, string? diagnostic)
@@ -760,15 +808,15 @@ namespace Conduit
             if (target.EntryIndexes.Count == 0)
                 return string.Empty;
 
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             AppendCapturedLogEntries(target, builder, diagnostic);
-            return builder.ToString().Trim();
+            return builder.Trim().ToString();
         }
 
         string BuildTestLogs()
         {
             var includeAllLogs = run_tests.ShouldIncludeAllTestLogs();
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             if (!includeAllLogs && HasAnyTestLogEntries())
             {
                 builder.Append(run_tests.LargeTestRunLogNote);
@@ -792,7 +840,7 @@ namespace Conduit
                 AppendCapturedLogEntries(testRunLogTarget, builder, includeAllLogs: includeAllLogs);
             }
 
-            return builder.ToString().Trim();
+            return builder.Trim().ToString();
         }
 
         bool HasAnyTestLogEntries()
@@ -944,6 +992,10 @@ namespace Conduit
             completedTestLogTargets.Clear();
             capturedLogEntryIndexes.Clear();
             capturedLogEntries.Clear();
+            lastRawMessage = null;
+            lastRawStackTrace = null;
+            lastRawEntryIndex = 0;
+            hasLastRawEntry = false;
             discardOnCompletion = false;
             run_tests.ResetState();
         }
@@ -1002,10 +1054,13 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(stackTrace))
                 return false;
 
-            string value = stackTrace!;
-            int lineEnd = value.IndexOf('\n');
-            string firstFrame = lineEnd < 0 ? value : value[..lineEnd];
-            return firstFrame.TrimEnd() == frameName;
+            var value = stackTrace.AsSpan();
+            var lineEnd = value.IndexOf('\n');
+            var firstFrame = lineEnd < 0 ? value : value[..lineEnd];
+            while (!firstFrame.IsEmpty && char.IsWhiteSpace(firstFrame[^1]))
+                firstFrame = firstFrame[..^1];
+
+            return firstFrame.SequenceEqual(frameName.AsSpan());
         }
 
         static bool FrameNameEquals(string frame, string frameName)
@@ -1049,11 +1104,18 @@ namespace Conduit
                 Message = message;
                 StackTrace = stackTrace;
                 LogType = logType;
+                unchecked
+                {
+                    var hashCode = StringComparer.Ordinal.GetHashCode(message);
+                    hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(stackTrace);
+                    HashCode = (hashCode * 397) ^ (int)logType;
+                }
             }
 
             public string Message { get; }
             public string StackTrace { get; }
             public LogType LogType { get; }
+            public int HashCode { get; }
         }
 
         sealed class LogSignatureComparer : IEqualityComparer<LogSignature>
@@ -1063,19 +1125,14 @@ namespace Conduit
             public bool Equals(LogSignature x, LogSignature y)
                 => x.Message == y.Message && x.StackTrace == y.StackTrace && x.LogType == y.LogType;
 
-            public int GetHashCode(LogSignature obj)
-            {
-                unchecked
-                {
-                    var hashCode = StringComparer.Ordinal.GetHashCode(obj.Message);
-                    hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(obj.StackTrace);
-                    return (hashCode * 397) ^ (int)obj.LogType;
-                }
-            }
+            public int GetHashCode(LogSignature obj) => obj.HashCode;
         }
 
         sealed class CapturedLogTarget
         {
+            readonly HashSet<int> entryIndexSet = new();
+            int lastEntryIndex = -1;
+
             public CapturedLogTarget() { }
 
             public CapturedLogTarget(string label)
@@ -1085,11 +1142,22 @@ namespace Conduit
             public bool Failed { get; set; }
             public List<int> EntryIndexes { get; } = new();
 
+            internal void AddEntryIndex(int entryIndex)
+            {
+                if (entryIndex == lastEntryIndex || !entryIndexSet.Add(entryIndex))
+                    return;
+
+                EntryIndexes.Add(entryIndex);
+                lastEntryIndex = entryIndex;
+            }
+
             public void Reset(string label = "")
             {
                 Label = label;
                 Failed = false;
                 EntryIndexes.Clear();
+                entryIndexSet.Clear();
+                lastEntryIndex = -1;
             }
         }
     }

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -58,7 +59,7 @@ namespace Conduit
         public static async Task<string> CaptureAsync(string? target)
         {
             var normalizedTarget = target?.Trim() ?? "";
-            if (string.IsNullOrWhiteSpace(normalizedTarget))
+            if (normalizedTarget.Length == 0)
                 throw new InvalidOperationException("Screenshot target was empty.");
 
             if (string.Equals(normalizedTarget, "editor", StringComparison.OrdinalIgnoreCase))
@@ -114,8 +115,12 @@ namespace Conduit
         {
             EnsureCanRenderScreenshot("editor");
             var sources = await EditorCaptureSource.CreateEditorSourcesAsync();
-            var outputs = new List<ScreenshotOutputPath>(sources.Length);
-            var results = new List<string>(sources.Length);
+            using var pooledOutputs = ConduitUtility.GetPooledList<ScreenshotOutputPath>(out var outputs);
+            using var pooledResults = ConduitUtility.GetPooledList<string>(out var results);
+            if (outputs.Capacity < sources.Length)
+                outputs.Capacity = sources.Length;
+            if (results.Capacity < sources.Length)
+                results.Capacity = sources.Length;
             try
             {
                 foreach (var source in sources)
@@ -219,7 +224,7 @@ namespace Conduit
             if (width <= 1 || height <= 1)
                 (width, height) = GetDefaultCaptureSize(sourceCamera.aspect);
 
-            var renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
+            var renderTexture = GpuCapture.CreateStagingTexture(width, height, 24);
             var previousTargetTexture = sourceCamera.targetTexture;
             var previousActive = RenderTexture.active;
             try
@@ -297,7 +302,7 @@ namespace Conduit
         {
             EnsureCanRenderScreenshot(prefix);
             var (width, height) = GetDefaultCaptureSize(16f / 9f);
-            var renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
+            var renderTexture = GpuCapture.CreateStagingTexture(width, height, 24);
             GameObject? cameraObject = null;
             GameObject? keyLightObject = null;
             GameObject? fillLightObject = null;
@@ -583,11 +588,37 @@ namespace Conduit
                    && squaredSize > BoundsSizeEpsilon * BoundsSizeEpsilon;
         }
 
-        static Task<string> SaveRenderTextureAsync(
+        static async Task<string> SaveRenderTextureAsync(
             RenderTexture renderTexture,
             string prefix,
             bool flipVertically = false)
-            => SaveTextureAsync(renderTexture, prefix, flipVertically);
+        {
+            if (flipVertically)
+                return await SaveTextureAsync(renderTexture, prefix, flipVertically: true);
+
+#if MODULE_IMAGECONVERSION
+            var outputPath = AllocateOutputPath(
+                ConduitAssetPathUtility.GetProjectRootPath(),
+                prefix
+            );
+            try
+            {
+                await GpuCapture.SavePreparedJpegAsync(
+                    renderTexture,
+                    outputPath.absolute_path
+                );
+                return $"{outputPath.prefix} image captured: {outputPath.relative_path}";
+            }
+            catch
+            {
+                File.Delete(outputPath.absolute_path);
+                throw;
+            }
+#else
+            await Task.Yield();
+            throw new InvalidOperationException(ModuleUnavailableDiagnostic);
+#endif
+        }
 
         static async Task<string> SaveTextureAsync(Texture texture, string prefix, bool flipVertically = false)
         {
@@ -619,7 +650,9 @@ namespace Conduit
             var outputDirectoryPath = Path.Combine(projectPath, "Temp", OutputDirectoryName);
             Directory.CreateDirectory(outputDirectoryPath);
 
-            for (int index = 1; index < int.MaxValue; ++index)
+            for (var index = FindNextOutputIndex(outputDirectoryPath, sanitizedPrefix);
+                 index < int.MaxValue;
+                 ++index)
             {
                 var fileName = $"{sanitizedPrefix}_{index}.jpg";
                 var absolutePath = Path.Combine(outputDirectoryPath, fileName);
@@ -635,6 +668,38 @@ namespace Conduit
             }
 
             throw new InvalidOperationException($"Could not allocate a screenshot output path for '{sanitizedPrefix}'.");
+        }
+
+        static int FindNextOutputIndex(string directory, string prefix)
+        {
+            var nextIndex = 1;
+            foreach (var path in Directory.EnumerateFiles(directory, prefix + "_*.jpg"))
+            {
+                var fileName = Path.GetFileName(path);
+                var numberOffset = prefix.Length + 1;
+                if (fileName.Length <= numberOffset + ".jpg".Length
+                    || !fileName.AsSpan(0, prefix.Length).Equals(
+                        prefix.AsSpan(),
+                        StringComparison.Ordinal
+                    )
+                    || fileName[prefix.Length] != '_'
+                    || !fileName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                    || !int.TryParse(
+                        fileName.AsSpan(numberOffset, fileName.Length - numberOffset - ".jpg".Length),
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out var index
+                    )
+                    || index < nextIndex)
+                    continue;
+
+                if (index == int.MaxValue)
+                    return 1;
+
+                nextIndex = index + 1;
+            }
+
+            return nextIndex;
         }
 
         static string SanitizePrefix(string prefix)
@@ -666,8 +731,16 @@ namespace Conduit
                 builder.Append(mappedCharacter);
             }
 
-            var sanitized = builder.ToString().Trim('_');
-            return string.IsNullOrWhiteSpace(sanitized) ? "capture" : sanitized;
+            while (builder.Length > 0 && builder[^1] == '_')
+                --builder.Length;
+            var leadingUnderscores = 0;
+            while (leadingUnderscores < builder.Length && builder[leadingUnderscores] == '_')
+                ++leadingUnderscores;
+            if (leadingUnderscores > 0)
+                builder.Remove(0, leadingUnderscores);
+
+            var sanitized = builder.ToString();
+            return sanitized.Length == 0 ? "capture" : sanitized;
         }
 
         static (int Width, int Height) GetDefaultCaptureSize(float aspect)

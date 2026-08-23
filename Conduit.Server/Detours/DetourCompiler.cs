@@ -1,5 +1,7 @@
-using System.Collections.Immutable;
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.CodeAnalysis;
 
@@ -9,6 +11,7 @@ namespace Conduit;
 public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
 {
     const string GeneratedNamespace = "ConduitGenerated.Detour";
+    readonly ConcurrentDictionary<string, DetourSessionCache> sessionCaches = new(StringComparer.Ordinal);
 
     internal async Task<PreparedDetour> PrepareAsync(
         string target,
@@ -25,7 +28,13 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         if (references.Failure is { } referenceFailure)
             return PreparedDetour.Failed(referenceFailure);
 
-        var resolution = MethodCatalog.Create(references.Paths!).Resolve(selector);
+        var sessionCache = GetSessionCache(
+            target,
+            references.SessionInstanceId,
+            references.References!,
+            references.Paths!
+        );
+        var resolution = sessionCache.GetMethodCatalog().Resolve(selector);
         if (resolution.Target is not { } method)
             return PreparedDetour.Failed(
                 new()
@@ -80,12 +89,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         MetadataReference[] compilationReferences;
         try
         {
-            compilationReferences = references.Paths!
-                .Select(path => MetadataReference.CreateFromImage(
-                    ImmutableArray.Create(MetadataPublicizer.Publicize(path)),
-                    filePath: path
-                ))
-                .ToArray();
+            compilationReferences = sessionCache.GetCompilationReferences(method.AssemblyPath);
         }
         catch (Exception exception) when (exception is IOException or BadImageFormatException)
         {
@@ -98,52 +102,34 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         var defaultUsings = SnippetCompiler.GetDefaultUsingDirectives(target);
         var inferredNamespaces = new List<string>();
         bool asyncMode = false;
-        var output = Compile(
-            method,
-            typeName,
-            artifact.FileName,
-            parsed,
-            compilationReferences,
-            defaultUsings,
-            inferredNamespaces,
-            asyncMode
-        );
-        if (SnippetCompiler.HasAnyError(output.Diagnostics, "CS4032", "CS4033"))
+        var output = CompileWithReferences(compilationReferences);
+        if (SnippetCompiler.HasErrors(output.Diagnostics))
         {
-            asyncMode = true;
-            output = Compile(
-                method,
-                typeName,
-                artifact.FileName,
-                parsed,
-                compilationReferences,
-                defaultUsings,
-                inferredNamespaces,
-                asyncMode
-            );
-        }
+            MetadataReference[] fullyPublicizedReferences;
+            try
+            {
+                fullyPublicizedReferences = sessionCache.GetFullyPublicizedReferences();
+            }
+            catch (Exception exception) when (exception is IOException or BadImageFormatException)
+            {
+                return PreparedDetour.Failed(
+                    ToolExecutionResult.FromException(
+                        exception,
+                        string.Empty,
+                        "A compilation reference could not be publicized for detouring."
+                    )
+                );
+            }
 
-        for (int attempt = 0; attempt < 2 && SnippetCompiler.HasErrors(output.Diagnostics); ++attempt)
-        {
-            var inferred = SnippetCompiler.InferNamespaces(
-                output.Diagnostics,
-                references.Paths!,
-                inferredNamespaces
-            );
-            if (inferred.Count == 0)
-                break;
-
-            inferredNamespaces.AddRange(inferred);
-            output = Compile(
-                method,
-                typeName,
-                artifact.FileName,
-                parsed,
-                compilationReferences,
-                defaultUsings,
-                inferredNamespaces,
-                asyncMode
-            );
+            // retrying the former all-public reference set preserves cross-assembly private access.
+            if (!ReferenceEquals(fullyPublicizedReferences, compilationReferences))
+            {
+                output = CompileWithReferences(fullyPublicizedReferences);
+                sessionCache.CompleteFullPublicization(
+                    fullyPublicizedReferences,
+                    !SnippetCompiler.HasErrors(output.Diagnostics)
+                );
+            }
         }
 
         var errors = SnippetCompiler.FormatDiagnostics(output.Diagnostics, DiagnosticSeverity.Error);
@@ -181,6 +167,209 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             ),
         ];
         return PreparedDetour.Succeeded(command, warnings.Length == 0 ? null : warnings);
+
+        SnippetCompiler.CompilationOutput CompileWithReferences(
+            MetadataReference[] activeReferences)
+        {
+            var compilation = Compile(
+                method,
+                typeName,
+                artifact.FileName,
+                parsed,
+                activeReferences,
+                defaultUsings,
+                inferredNamespaces,
+                asyncMode
+            );
+            if (SnippetCompiler.HasAnyError(compilation.Diagnostics, "CS4032", "CS4033"))
+            {
+                asyncMode = true;
+                compilation = Compile(
+                    method,
+                    typeName,
+                    artifact.FileName,
+                    parsed,
+                    activeReferences,
+                    defaultUsings,
+                    inferredNamespaces,
+                    asyncMode
+                );
+            }
+
+            for (var attempt = 0;
+                 attempt < 2 && SnippetCompiler.HasErrors(compilation.Diagnostics);
+                 ++attempt)
+            {
+                var inferred = SnippetCompiler.InferNamespaces(
+                    compilation.Diagnostics,
+                    references.Paths!,
+                    inferredNamespaces,
+                    sessionCache.NamespaceCandidates
+                );
+                if (inferred.Count == 0)
+                    break;
+
+                inferredNamespaces.AddRange(inferred);
+                compilation = Compile(
+                    method,
+                    typeName,
+                    artifact.FileName,
+                    parsed,
+                    activeReferences,
+                    defaultUsings,
+                    inferredNamespaces,
+                    asyncMode
+                );
+            }
+
+            return compilation;
+        }
+    }
+
+    sealed class DetourSessionCache(
+        string sessionInstanceId,
+        MetadataReference[] standardReferences,
+        string[] referencePaths)
+    {
+        readonly object catalogGate = new();
+        readonly object referencesGate = new();
+        readonly Dictionary<string, MetadataReference[]> targetedReferences =
+            new(StringComparer.OrdinalIgnoreCase);
+        MethodCatalog? methodCatalog;
+        MetadataReference[]? fullyPublicizedReferences;
+
+        internal string SessionInstanceId { get; } = sessionInstanceId;
+        internal ConcurrentDictionary<string, string[]> NamespaceCandidates { get; } = new(StringComparer.Ordinal);
+
+        internal MethodCatalog GetMethodCatalog()
+        {
+            lock (catalogGate)
+                return methodCatalog ??= MethodCatalog.Create(referencePaths);
+        }
+
+        internal MetadataReference[] GetCompilationReferences(string targetAssemblyPath)
+        {
+            lock (referencesGate)
+            {
+                if (fullyPublicizedReferences != null)
+                    return fullyPublicizedReferences;
+                if (targetedReferences.TryGetValue(targetAssemblyPath, out var cached))
+                    return cached;
+
+                var references = (MetadataReference[])standardReferences.Clone();
+                for (var index = 0; index < referencePaths.Length; ++index)
+                {
+                    if (!string.Equals(
+                            referencePaths[index],
+                            targetAssemblyPath,
+                            StringComparison.OrdinalIgnoreCase
+                        ))
+                        continue;
+
+                    references[index] = CreatePublicReference(targetAssemblyPath);
+                    targetedReferences.Add(targetAssemblyPath, references);
+                    return references;
+                }
+
+                throw new FileNotFoundException(
+                    "The detour target assembly was not present in the compiler reference set.",
+                    targetAssemblyPath
+                );
+            }
+        }
+
+        internal MetadataReference[] GetFullyPublicizedReferences()
+        {
+            lock (referencesGate)
+            {
+                if (fullyPublicizedReferences != null)
+                    return fullyPublicizedReferences;
+
+                var references = new MetadataReference[referencePaths.Length];
+                for (var index = 0; index < referencePaths.Length; ++index)
+                    if (targetedReferences.TryGetValue(referencePaths[index], out var targeted)
+                        && !ReferenceEquals(targeted[index], standardReferences[index]))
+                        references[index] = targeted[index];
+
+                if (referencePaths.Length == 1 && references[0] == null)
+                    references[0] = CreatePublicReference(referencePaths[0]);
+                else if (referencePaths.Length > 1)
+                {
+                    var errors = new ExceptionDispatchInfo?[referencePaths.Length];
+                    Parallel.For(0, referencePaths.Length, index =>
+                    {
+                        if (references[index] != null)
+                            return;
+
+                        try
+                        {
+                            references[index] = CreatePublicReference(referencePaths[index]);
+                        }
+                        catch (Exception exception)
+                        {
+                            errors[index] = ExceptionDispatchInfo.Capture(exception);
+                        }
+                    });
+
+                    foreach (var error in errors)
+                        error?.Throw();
+                }
+
+                return fullyPublicizedReferences = references;
+            }
+        }
+
+        internal void CompleteFullPublicization(MetadataReference[] references, bool succeeded)
+        {
+            lock (referencesGate)
+                if (ReferenceEquals(fullyPublicizedReferences, references))
+                {
+                    if (succeeded)
+                        targetedReferences.Clear();
+                    else
+                        fullyPublicizedReferences = null; // invalid snippets must not pin every publicized assembly
+                }
+        }
+
+        static MetadataReference CreatePublicReference(string path)
+            => MetadataReference.CreateFromImage(
+                ImmutableCollectionsMarshal.AsImmutableArray(
+                    MetadataPublicizer.Publicize(path)
+                ),
+                filePath: path
+            );
+    }
+
+    DetourSessionCache GetSessionCache(
+        string target,
+        string sessionInstanceId,
+        MetadataReference[] standardReferences,
+        string[] referencePaths)
+    {
+        if (sessionCaches.TryGetValue(target, out var cached)
+            && cached.SessionInstanceId == sessionInstanceId)
+            return cached;
+
+        return sessionCaches.AddOrUpdate(
+            target,
+            static (_, state) => new(
+                state.SessionInstanceId,
+                state.StandardReferences,
+                state.ReferencePaths
+            ),
+            static (_, current, state) => current.SessionInstanceId == state.SessionInstanceId
+                ? current
+                : new(
+                    state.SessionInstanceId,
+                    state.StandardReferences,
+                    state.ReferencePaths
+                ),
+            (
+                SessionInstanceId: sessionInstanceId,
+                StandardReferences: standardReferences,
+                ReferencePaths: referencePaths
+            )
+        );
     }
 
     static BridgeCommand BuildCommand(MethodTarget method, string mode) =>
@@ -240,7 +429,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         IReadOnlyCollection<string> inferredNamespaces,
         bool async)
     {
-        var builder = new StringBuilder();
+        var builder = new StringBuilder(parsed.Body.Text.Length + 1024);
         SnippetCompiler.AppendUsingDirectives(
             builder,
             defaultUsings,
@@ -264,12 +453,22 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             builder.Append("async ");
         builder.Append(method.ReturnType.ReturnDeclaration)
             .Append(" Replace(");
-        var parameters = new List<string>();
+        var hasParameter = false;
         if (!method.IsStatic)
-            parameters.Add((method.DeclaringType.IsValueType ? "ref " : string.Empty) + method.DeclaringType.Source + " @this");
+        {
+            if (method.DeclaringType.IsValueType)
+                builder.Append("ref ");
+            builder.Append(method.DeclaringType.Source).Append(" @this");
+            hasParameter = true;
+        }
         for (int index = 0; index < method.Parameters.Length; ++index)
-            parameters.Add(method.Parameters[index].Declaration("arg" + index));
-        builder.Append(string.Join(", ", parameters)).AppendLine(")");
+        {
+            if (hasParameter)
+                builder.Append(", ");
+            builder.Append(method.Parameters[index].Declaration("arg" + index));
+            hasParameter = true;
+        }
+        builder.AppendLine(")");
         builder.AppendLine("{");
         SnippetCompiler.AppendChunk(builder, parsed.Body, sourceFileName);
         builder.AppendLine("}");

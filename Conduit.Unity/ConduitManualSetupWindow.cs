@@ -471,7 +471,7 @@ namespace Conduit
         void DrawMarkdown(string[] markdownLines)
         {
             // client sections use a small stable subset; keeping the renderer local avoids a package dependency
-            var codeLines = new List<string>();
+            using var pooledCodeLines = ConduitUtility.GetPooledList<string>(out var codeLines);
             bool inCodeBlock = false;
             foreach (string rawLine in markdownLines)
             {

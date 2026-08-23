@@ -12,12 +12,12 @@ namespace Conduit;
 
 public sealed class UnityBridgeClient
 {
+    const int MaximumPooledPayloadBufferLength = 1024 * 1024;
     static readonly TimeSpan connectAttemptTimeout = TimeSpan.FromMilliseconds(750);
     static readonly TimeSpan initialConnectWindow = TimeSpan.FromSeconds(15);
     static readonly TimeSpan connectRetryDelay = TimeSpan.FromMilliseconds(250);
     static readonly TimeSpan commandCancellationSendTimeout = TimeSpan.FromSeconds(2);
     static readonly UTF8Encoding utf8NoBom = new(false);
-    static readonly byte[] newline = [(byte)'\n'];
     readonly ConcurrentDictionary<string, CachedConnectionEntry> connectionCache = new(StringComparer.OrdinalIgnoreCase);
     readonly UnityPlayerDiscovery playerDiscovery;
     readonly ILogger<UnityBridgeClient> logger;
@@ -31,8 +31,8 @@ public sealed class UnityBridgeClient
         this.logger = logger;
     }
 
-    internal async Task<BridgeClientResult> ProbeAsync(string projectPath, int? processIdHint, CancellationToken ct)
-        => await ProbeAsync(projectPath, processIdHint, initialConnectWindow, ct);
+    internal Task<BridgeClientResult> ProbeAsync(string projectPath, int? processIdHint, CancellationToken ct)
+        => ProbeAsync(projectPath, processIdHint, initialConnectWindow, ct);
 
     internal async Task<BridgeClientResult> ProbeAsync(string projectPath, int? processIdHint, TimeSpan timeout, CancellationToken ct)
     {
@@ -228,10 +228,13 @@ public sealed class UnityBridgeClient
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
-        using var cancellationMonitorCts = new CancellationTokenSource();
+        using var cancellationMonitorCts = commandCancellation.CanBeCanceled
+            ? new CancellationTokenSource()
+            : null;
         var effectiveToken = timeoutCts.Token;
         var commandSent = false;
         var cancellationTask = Task.CompletedTask;
+        Task<BridgeClientResult?>? processExitTask = null;
         var pending = connection.RegisterRequest(requestId, commandType);
 
         try
@@ -241,19 +244,26 @@ public sealed class UnityBridgeClient
 
             commandSent = true;
             pending.MarkSent();
-            cancellationTask = SendCancellationWhenRequestedAsync(
-                connection,
-                requestId,
+            if (cancellationMonitorCts is not null)
+                cancellationTask = SendCancellationWhenRequestedAsync(
+                    connection,
+                    requestId,
+                    commandType,
+                    commandCancellation,
+                    cancellationMonitorCts.Token
+                );
+            processExitTask = CreateProcessExitTask(
+                handshake,
                 commandType,
-                commandCancellation,
-                cancellationMonitorCts.Token
+                commandSent,
+                effectiveToken
             );
 
             var startWaitTask = connection.WaitForCommandStartedAsync(pending, effectiveToken, ct);
-            if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitStartTask)
+            if (processExitTask is not null)
             {
-                var completedStartTask = await Task.WhenAny(startWaitTask, processExitStartTask);
-                if (ReferenceEquals(completedStartTask, processExitStartTask) && await processExitStartTask is { } processFailure)
+                var completedStartTask = await Task.WhenAny(startWaitTask, processExitTask);
+                if (ReferenceEquals(completedStartTask, processExitTask) && await processExitTask is { } processFailure)
                     return processFailure;
             }
 
@@ -265,10 +275,10 @@ public sealed class UnityBridgeClient
                 return earlyResult;
 
             var waitForResultTask = connection.WaitForResultAsync(pending, timeout, effectiveToken, ct);
-            if (CreateProcessExitTask(handshake, commandType, commandSent, effectiveToken) is { } processExitResultTask)
+            if (processExitTask is not null)
             {
-                var completedTask = await Task.WhenAny((Task)waitForResultTask, processExitResultTask);
-                if (ReferenceEquals(completedTask, processExitResultTask) && await processExitResultTask is { } processFailure)
+                var completedTask = await Task.WhenAny((Task)waitForResultTask, processExitTask);
+                if (ReferenceEquals(completedTask, processExitTask) && await processExitTask is { } processFailure)
                     return processFailure;
             }
 
@@ -293,9 +303,13 @@ public sealed class UnityBridgeClient
         finally
         {
             connection.RemoveRequest(requestId, pending);
-            if (!commandCancellation.IsCancellationRequested)
+            timeoutCts.Cancel();
+            if (cancellationMonitorCts is not null
+                && !commandCancellation.IsCancellationRequested)
                 cancellationMonitorCts.Cancel();
 
+            if (processExitTask is not null)
+                await processExitTask;
             await cancellationTask;
         }
 
@@ -340,12 +354,21 @@ public sealed class UnityBridgeClient
     )
     {
         BridgeClientResult? lastFailure = null;
+        var playerSelector = PlayerSelector.TryParse(projectPath, out var parsedSelector)
+            ? parsedSelector
+            : (PlayerSelector?)null;
+        var pipeName = playerSelector is null ? ConduitUtility.GetPipeName(projectPath) : null;
 
         try
         {
             while (!timeoutToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
             {
-                var connectResult = await TryConnectAsync(projectPath, timeoutToken);
+                var connectResult = await TryConnectAsync(
+                    projectPath,
+                    playerSelector,
+                    pipeName,
+                    timeoutToken
+                );
                 if (connectResult.Connection is not null)
                     return connectResult;
 
@@ -371,17 +394,20 @@ public sealed class UnityBridgeClient
         ));
     }
 
-    async Task<(BridgeClientConnection? Connection, BridgeClientResult Result)> TryConnectAsync(string projectPath, CancellationToken ct)
+    async Task<(BridgeClientConnection? Connection, BridgeClientResult Result)> TryConnectAsync(
+        string normalizedProjectPath,
+        PlayerSelector? playerSelector,
+        string? pipeName,
+        CancellationToken ct)
     {
-        var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         BridgeTransport? transport = null;
 
         try
         {
             BridgeEndpointDescriptor? endpoint = null;
-            if (PlayerSelector.TryParse(normalizedProjectPath, out var playerSelector))
+            if (playerSelector is { } selector)
             {
-                var resolution = await playerDiscovery.ResolveAsync(playerSelector, ct);
+                var resolution = await playerDiscovery.ResolveAsync(selector, ct);
                 if (resolution.Endpoint is null)
                     return (null, BridgeClientResult.Failure(
                         handshake: null,
@@ -396,10 +422,7 @@ public sealed class UnityBridgeClient
                 transport = await BridgeTransport.ConnectAsync(endpoint, connectAttemptTimeout, ct);
             }
             else
-            {
-                var pipeName = ConduitUtility.GetPipeName(normalizedProjectPath);
-                transport = await BridgeTransport.ConnectAsync(pipeName, connectAttemptTimeout, ct);
-            }
+                transport = await BridgeTransport.ConnectAsync(pipeName!, connectAttemptTimeout, ct);
 
             try
             {
@@ -635,18 +658,22 @@ public sealed class UnityBridgeClient
     static async Task WriteStreamPayloadAsync(Stream stream, string payload, CancellationToken ct)
     {
         var byteCount = utf8NoBom.GetByteCount(payload);
-        var buffer = ArrayPool<byte>.Shared.Rent(byteCount);
+        var bufferLength = checked(byteCount + 1);
+        var buffer = bufferLength <= MaximumPooledPayloadBufferLength
+            ? ArrayPool<byte>.Shared.Rent(bufferLength)
+            : new byte[bufferLength];
         try
         {
             var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+            buffer[written++] = (byte)'\n';
             await stream.WriteAsync(buffer.AsMemory(0, written), ct);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer.Length <= MaximumPooledPayloadBufferLength)
+                ArrayPool<byte>.Shared.Return(buffer);
         }
 
-        await stream.WriteAsync(newline, ct);
         await stream.FlushAsync(ct);
     }
 
@@ -659,6 +686,8 @@ public sealed class UnityBridgeClient
         const string DotNetUnixPipePrefix = "CoreFxPipe_";
         const int ErrorAgain = 11;
         const int ErrorInterrupted = 4;
+        const int InitialLineBufferLength = 8192;
+        const int MaximumRetainedLineBufferLength = 1024 * 1024;
         int disposed;
 
         public bool IsConnected => Volatile.Read(ref disposed) == 0 && isConnected();
@@ -917,8 +946,11 @@ public sealed class UnityBridgeClient
         {
             const int RetryDelayMilliseconds = 10;
             readonly byte[] readBuffer = new byte[4096];
-            readonly MemoryStream lineBuffer = new();
+            readonly MemoryStream lineBuffer = new(InitialLineBufferLength);
             readonly Queue<string> lines = new();
+            readonly PeriodicTimer retryTimer = new(
+                TimeSpan.FromMilliseconds(RetryDelayMilliseconds)
+            );
             int descriptor = descriptor;
             bool endOfStream;
 
@@ -967,7 +999,7 @@ public sealed class UnityBridgeClient
                     if (error != ErrorAgain)
                         throw new IOException($"Could not read the Unity FIFO response (errno {error}).");
 
-                    await Task.Delay(RetryDelayMilliseconds, ct);
+                    await retryTimer.WaitForNextTickAsync(ct);
                 }
             }
 
@@ -996,6 +1028,8 @@ public sealed class UnityBridgeClient
                     bytes = bytes[..^1];
                 var line = utf8NoBom.GetString(bytes);
                 lineBuffer.SetLength(0);
+                if (lineBuffer.Capacity > MaximumRetainedLineBufferLength)
+                    lineBuffer.Capacity = InitialLineBufferLength;
                 return line;
             }
 
@@ -1004,6 +1038,7 @@ public sealed class UnityBridgeClient
                 var current = Interlocked.Exchange(ref descriptor, -1);
                 if (current >= 0)
                     close(current);
+                retryTimer.Dispose();
                 lineBuffer.Dispose();
             }
         }
@@ -1043,15 +1078,19 @@ public sealed class UnityBridgeClient
 
         static async Task ConnectSocketAsync(Socket socket, string path, TimeSpan timeout, CancellationToken ct)
         {
-            var connectTask = socket.ConnectAsync(new UnixDomainSocketEndPoint(path));
-            var completedTask = await Task.WhenAny(connectTask, Task.Delay(timeout, ct));
-            if (!ReferenceEquals(completedTask, connectTask))
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(timeout);
+            try
             {
-                ct.ThrowIfCancellationRequested();
+                await socket.ConnectAsync(
+                    new UnixDomainSocketEndPoint(path),
+                    timeoutCts.Token
+                );
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
                 throw new TimeoutException();
             }
-
-            await connectTask;
         }
 
         static ValueTask DisposeSocketAsync(Socket socket)
@@ -1063,16 +1102,20 @@ public sealed class UnityBridgeClient
         static async Task WriteSocketPayloadAsync(Socket socket, string payload, CancellationToken ct)
         {
             var byteCount = utf8NoBom.GetByteCount(payload);
-            var buffer = ArrayPool<byte>.Shared.Rent(byteCount + newline.Length);
+            var bufferLength = checked(byteCount + 1);
+            var buffer = bufferLength <= MaximumPooledPayloadBufferLength
+                ? ArrayPool<byte>.Shared.Rent(bufferLength)
+                : new byte[bufferLength];
             try
             {
                 var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
-                newline.AsSpan().CopyTo(buffer.AsSpan(written));
-                await SendAllAsync(socket, buffer.AsMemory(0, written + newline.Length), ct);
+                buffer[written++] = (byte)'\n';
+                await SendAllAsync(socket, buffer.AsMemory(0, written), ct);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (buffer.Length <= MaximumPooledPayloadBufferLength)
+                    ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 
@@ -1147,8 +1190,8 @@ public sealed class UnityBridgeClient
 
         sealed class UnixSocketLineReader(Socket socket)
         {
-            readonly byte[] receiveBuffer = new byte[8192];
-            byte[] pending = new byte[8192];
+            readonly byte[] receiveBuffer = new byte[InitialLineBufferLength];
+            byte[] pending = new byte[InitialLineBufferLength];
             int pendingCount;
 
             public async ValueTask<string?> ReadLineAsync(CancellationToken ct)
@@ -1188,6 +1231,7 @@ public sealed class UnityBridgeClient
                     pending.AsSpan(newlineIndex + 1, remaining).CopyTo(pending);
 
                 pendingCount = remaining;
+                CompactOversizedBuffer();
                 return true;
             }
 
@@ -1198,6 +1242,7 @@ public sealed class UnityBridgeClient
 
                 var line = DecodeLine(pendingCount);
                 pendingCount = 0;
+                CompactOversizedBuffer();
                 return line;
             }
 
@@ -1223,6 +1268,18 @@ public sealed class UnityBridgeClient
 
                 var size = pending.Length;
                 while (size < required)
+                    size *= 2;
+
+                Array.Resize(ref pending, size);
+            }
+
+            void CompactOversizedBuffer()
+            {
+                if (pending.Length <= MaximumRetainedLineBufferLength)
+                    return;
+
+                var size = InitialLineBufferLength;
+                while (size < pendingCount)
                     size *= 2;
 
                 Array.Resize(ref pending, size);

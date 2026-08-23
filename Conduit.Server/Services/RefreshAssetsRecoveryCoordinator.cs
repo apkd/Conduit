@@ -252,7 +252,7 @@ sealed class RefreshAssetDatabaseRecoveryCoordinator(
         || BridgeCommandKinds.IsAssetImport(BridgeCommandKinds.Parse(pingSnapshot.ActiveCommandType));
 
     internal static string DescribeRefreshRecoveryState(UnityPingSnapshot pingSnapshot) =>
-        $"is_compiling={pingSnapshot.IsCompiling.ToString().ToLowerInvariant()}, is_updating={pingSnapshot.IsUpdating.ToString().ToLowerInvariant()}, active_command_type='{pingSnapshot.ActiveCommandType ?? "<none>"}'";
+        $"is_compiling={(pingSnapshot.IsCompiling ? "true" : "false")}, is_updating={(pingSnapshot.IsUpdating ? "true" : "false")}, active_command_type='{pingSnapshot.ActiveCommandType ?? "<none>"}'";
 
     internal static string BuildTimeoutDiagnostic(
         BridgeClientResult initialExecution,

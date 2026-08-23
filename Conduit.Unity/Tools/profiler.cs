@@ -6,7 +6,6 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.Profiling;
@@ -26,10 +25,7 @@ namespace Conduit
         const int OverviewRowLimit = 10;
         const int MaxBrowseLimit = 200;
         const string CaptureDirectory = "Temp/profiler";
-        static readonly Regex jobWorkerThreadNamePattern = new(
-            @"^(?:Worker|Job Worker) (?<index>\d+)$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant
-        );
+        static readonly string?[] jobWorkerLabels = new string[256];
         static readonly MethodInfo? setMaxFrameHistoryLengthMethod = typeof(ProfilerDriver).GetMethod(
             "SetMaxFrameHistoryLength",
             BindingFlags.Static | BindingFlags.NonPublic
@@ -37,6 +33,14 @@ namespace Conduit
         static readonly PropertyInfo? configuredFrameHistoryLengthProperty = Type
             .GetType("UnityEditor.Profiling.ProfilerUserSettings,UnityEditor.CoreModule")
             ?.GetProperty("frameCount", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly Comparison<HierarchyRow> totalRowComparison = static (left, right) =>
+            CompareRowValues(left.TotalMs, right.TotalMs, left, right);
+        static readonly Comparison<HierarchyRow> selfRowComparison = static (left, right) =>
+            CompareRowValues(left.SelfMs, right.SelfMs, left, right);
+        static readonly Comparison<HierarchyRow> gcRowComparison = static (left, right) =>
+            CompareRowValues(left.GcBytes, right.GcBytes, left, right);
+        static readonly Comparison<HierarchyRow> callsRowComparison = static (left, right) =>
+            CompareRowValues(left.Calls, right.Calls, left, right);
 
         public static string BuildStatusLine()
         {
@@ -45,17 +49,18 @@ namespace Conduit
                 if (!ProfilerDriver.enabled)
                     return "Profiler: not recording";
 
-                var frames = GetAvailableFrames();
-                var selected = TryGetSelectedFrame(frames, out var selectedFrame)
+                var firstFrame = ProfilerDriver.firstFrameIndex;
+                var lastFrame = ProfilerDriver.lastFrameIndex;
+                var hasFrames = firstFrame >= 0 && lastFrame >= firstFrame;
+                var selected = hasFrames && TryGetSelectedFrame(firstFrame, lastFrame, out var selectedFrame)
                     ? selectedFrame.ToString(CultureInfo.InvariantCulture)
                     : "none";
 
-                if (frames.Count == 0)
+                if (!hasFrames)
                     return $"Profiler: recording; frames=none; selected={selected}; latest=none; total_allocated={FormatMb(Profiler.GetTotalAllocatedMemoryLong())}MB; gc_reserved={FormatMb(Profiler.GetMonoHeapSizeLong())}MB; system_used={FormatMb(Profiler.GetTotalReservedMemoryLong())}MB";
 
-                var latest = frames[^1];
-                var stats = ReadFrameStats(latest);
-                return $"Profiler: recording; frames={frames[0]}..{frames[^1]}; selected={selected}; latest={latest}; cpu={FormatNumber(stats.CpuMs)}ms; gpu={FormatOptionalNumber(stats.GpuMs)}ms; fps={FormatNumber(stats.Fps)}; total_allocated={FormatMb(Profiler.GetTotalAllocatedMemoryLong())}MB; gc_reserved={FormatMb(Profiler.GetMonoHeapSizeLong())}MB; system_used={FormatMb(Profiler.GetTotalReservedMemoryLong())}MB";
+                var timing = ReadFrameTiming(lastFrame);
+                return $"Profiler: recording; frames={firstFrame}..{lastFrame}; selected={selected}; latest={lastFrame}; cpu={FormatNumber(timing.CpuMs)}ms; gpu={FormatOptionalNumber(timing.GpuMs)}ms; fps={FormatNumber(timing.Fps)}; total_allocated={FormatMb(Profiler.GetTotalAllocatedMemoryLong())}MB; gc_reserved={FormatMb(Profiler.GetMonoHeapSizeLong())}MB; system_used={FormatMb(Profiler.GetTotalReservedMemoryLong())}MB";
             }
             catch (Exception exception)
             {
@@ -84,29 +89,31 @@ namespace Conduit
                 var options = ParseArgs(args);
                 var mode = GetOption(options, "mode", "cpu_ms");
                 var frameRange = GetOption(options, "frame_range", "0..^1");
-                var frames = ResolveFrameRange(frameRange, out var warnings);
+                var frames = ResolveFrameRange(frameRange, out var warnings, out var firstFrameOrdinal);
                 if (frames.Count == 0)
                     return Success("No profiler frames available. Use profiler_record action=capture first.");
 
-                var availableFrames = GetAvailableFrames();
-                var ordinalByFrame = BuildFrameOrdinalMap(availableFrames);
-                var frameStats = new List<FrameStats>(frames.Count);
-                var threadLabels = new HashSet<string>(StringComparer.Ordinal);
+                using var pooledFrameStats = ConduitUtility.GetPooledList<FrameStats>(out var frameStats);
+                if (frameStats.Capacity < frames.Count)
+                    frameStats.Capacity = frames.Count;
+                using var pooledThreadLabels = ConduitUtility.GetPooledSet<string>(out var threadLabels);
                 long sampleCount = 0;
-                foreach (var frame in frames)
+                for (var frameOffset = 0; frameOffset < frames.Count; ++frameOffset)
                 {
-                    var stats = ReadFrameStats(frame, ordinalByFrame.GetValueOrDefault(frame, -1));
+                    var stats = ReadFrameStats(
+                        frames[frameOffset],
+                        firstFrameOrdinal + frameOffset,
+                        threadLabels
+                    );
                     frameStats.Add(stats);
                     sampleCount += stats.SampleCount;
-                    foreach (var thread in stats.Threads)
-                        threadLabels.Add(thread);
                 }
 
-                var builder = new StringBuilder();
+                using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
                 builder.Append("Threads: ");
                 builder.AppendLine(FormatThreadLabels(threadLabels));
                 builder.Append("Sample count: ");
-                builder.AppendLine(sampleCount.ToString(CultureInfo.InvariantCulture));
+                builder.AppendInvariant(sampleCount).AppendLine();
                 builder.AppendLine();
 
                 if (mode == "gc_kb")
@@ -114,7 +121,7 @@ namespace Conduit
                 else
                     AppendCpuOverview(builder, frameStats, warnings);
 
-                return Success(builder.ToString().TrimEnd());
+                return Success(builder.TrimEnd().ToString());
             }
             catch (Exception exception)
             {
@@ -142,13 +149,16 @@ namespace Conduit
                 if (!TryBuildBrowseHierarchy(frame, threadSelector, sort, out var root, out var frameTimeMs, out var aggregateWorkerCount, out var threadSummary, out var threadDiagnostic))
                     return Failure("Unable to browse profiler hierarchy.", threadDiagnostic, null);
 
-                AssignPublicIds(root);
-                var selectedRoot = ResolveRoot(root, rootSelector, warnings);
+                using var pooledRows = ConduitUtility.GetPooledList<HierarchyRow>(out var rows);
+                Flatten(root, rows);
+                AssignPublicIds(rows);
+                var selectedRoot = ResolveRoot(root, rows, rootSelector, warnings);
                 if (selectedRoot == null)
                     return Failure("Unable to browse profiler hierarchy.", $"Root '{rootSelector}' was not found.", null);
 
-                var visibleRows = SelectVisibleRows(selectedRoot, depth, sort, onlyNonTrivial, frameTimeMs);
-                var builder = new StringBuilder();
+                using var pooledVisibleRows = ConduitUtility.GetPooledSet<HierarchyRow>(out var visibleRows);
+                SelectVisibleRows(selectedRoot, depth, sort, onlyNonTrivial, frameTimeMs, visibleRows);
+                using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
                 if (!string.IsNullOrEmpty(threadSummary))
                 {
                     builder.AppendLine(threadSummary);
@@ -162,8 +172,17 @@ namespace Conduit
                 );
 
                 var printed = 0;
-                foreach (var row in EnumerateForOutput(selectedRoot, visibleRows, sort))
+                var rowComparison = GetRowComparison(sort);
+                using var pooledPendingRows = ConduitUtility.GetPooledList<HierarchyRow>(out var pendingRows);
+                pendingRows.Add(selectedRoot);
+                while (pendingRows.Count > 0)
                 {
+                    var lastIndex = pendingRows.Count - 1;
+                    var row = pendingRows[lastIndex];
+                    pendingRows.RemoveAt(lastIndex);
+                    if (!visibleRows.Contains(row))
+                        continue;
+
                     if (printed >= limit)
                     {
                         warnings.Add("row_limit_reached");
@@ -172,10 +191,16 @@ namespace Conduit
 
                     AppendBrowseRow(builder, row, selectedRoot.Depth, frameTimeMs, aggregateWorkerCount);
                     printed++;
+
+                    if (aggregateWorkerCount > 0)
+                        row.Children.Sort(rowComparison);
+                    for (var index = row.Children.Count - 1; index >= 0; --index)
+                        if (visibleRows.Contains(row.Children[index]))
+                            pendingRows.Add(row.Children[index]);
                 }
 
                 AppendWarnings(builder, warnings);
-                return Success(builder.ToString().TrimEnd());
+                return Success(builder.TrimEnd().ToString());
             }
             catch (Exception exception)
             {
@@ -188,12 +213,29 @@ namespace Conduit
             if (string.IsNullOrWhiteSpace(markerName))
                 return false;
 
-            var frames = GetAvailableFrames();
-            for (var frameOrdinal = frames.Count - 1;
-                 frameOrdinal >= 0 && frameOrdinal >= frames.Count - 10;
-                 frameOrdinal--)
+            var firstFrame = ProfilerDriver.firstFrameIndex;
+            var lastFrame = ProfilerDriver.lastFrameIndex;
+            if (firstFrame < 0 || lastFrame < firstFrame)
+                return false;
+
+            Span<int> recentFrames = stackalloc int[10];
+            var frameCount = 0;
+            for (var frame = firstFrame; ;)
             {
-                var frame = frames[frameOrdinal];
+                recentFrames[frameCount++ % recentFrames.Length] = frame;
+                if (frame == lastFrame)
+                    break;
+
+                var nextFrame = ProfilerDriver.GetNextFrameIndex(frame);
+                if (nextFrame <= frame)
+                    break;
+                frame = nextFrame;
+            }
+
+            var recentFrameCount = Math.Min(frameCount, recentFrames.Length);
+            for (var offset = 0; offset < recentFrameCount; offset++)
+            {
+                var frame = recentFrames[(frameCount - offset - 1) % recentFrames.Length];
                 for (var threadIndex = 0; ; threadIndex++)
                 {
                     using var raw = ProfilerDriver.GetRawFrameDataView(
@@ -345,40 +387,49 @@ namespace Conduit
             if (files.Length == 0)
                 return Success($"No profile captures found.\nDirectory: {CaptureDirectory}");
 
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.AppendLine("Profile captures:");
             foreach (var file in files)
                 builder.AppendLine(ToDisplayPath(file));
 
-            return Success(builder.ToString().TrimEnd());
+            return Success(builder.TrimEnd().ToString());
         }
 
         static void AppendCpuOverview(StringBuilder builder, List<FrameStats> frameStats, List<string> warnings)
         {
             builder.AppendLine("Worst frames, sorted by cpu_ms:");
-            AppendFrameTable(builder, TopFrames(frameStats, stats => stats.CpuMs));
+            AppendFrameTable(builder, TopFrames(frameStats, static stats => stats.CpuMs));
             builder.AppendLine();
 
-            var samples = CollectMainThreadSamples(frameStats);
+            var samples = CollectMainThreadSamples(frameStats, "cpu_ms");
             builder.AppendLine("Interesting samples, sorted by actionable_cpu_ms:");
-            AppendSampleTable(builder, TopInterestingSamples(samples, "cpu_ms"), includeRank: true);
+            AppendSampleTable(builder, samples, includeRank: true);
             AppendWarnings(builder, warnings);
         }
 
         static void AppendGcOverview(StringBuilder builder, List<FrameStats> frameStats, List<string> warnings)
         {
             builder.AppendLine("Worst frames, sorted by gc_kb:");
-            AppendFrameTable(builder, TopFrames(frameStats, stats => stats.GcBytes));
+            AppendFrameTable(builder, TopFrames(frameStats, static stats => stats.GcBytes));
             builder.AppendLine();
 
             builder.AppendLine("Interesting samples, sorted by gc_kb:");
-            AppendSampleTable(builder, TopInterestingSamples(CollectMainThreadSamples(frameStats), "gc_kb"), includeRank: true);
+            AppendSampleTable(builder, CollectMainThreadSamples(frameStats, "gc_kb"), includeRank: true);
             AppendWarnings(builder, warnings);
         }
 
-        static List<SampleRow> CollectMainThreadSamples(List<FrameStats> frames)
+        static List<SampleRow> CollectMainThreadSamples(List<FrameStats> frames, string mode)
         {
-            var samples = new List<SampleRow>();
+            using var pooledBestByPath = ConduitUtility.GetPooledDictionary<string, SampleRow>(out var bestByPath);
+            // profiler hierarchies repeat across frames; share their path strings instead of rebuilding each copy.
+            using var pooledIdentityPaths = ConduitUtility.GetPooledDictionary<
+                (string Parent, string Segment, int Occurrence),
+                string
+            >(out var identityPaths);
+            using var pooledDisplayPaths = ConduitUtility.GetPooledDictionary<
+                (string Parent, string Name),
+                string
+            >(out var displayPaths);
             foreach (var frame in frames)
             {
                 if (!TryResolveThread(frame.FrameIndex, "main", out var thread, out _))
@@ -395,10 +446,25 @@ namespace Conduit
                 if (!hierarchy.valid)
                     continue;
 
-                CollectSampleChildren(hierarchy, hierarchy.GetRootItemID(), frame.FrameIndex, frame.FrameOrdinal, hierarchy.frameTimeMs, samples, identityPath: "", displayPath: "", depth: 0);
+                CollectSampleChildren(
+                    hierarchy,
+                    hierarchy.GetRootItemID(),
+                    frame.FrameIndex,
+                    frame.FrameOrdinal,
+                    hierarchy.frameTimeMs,
+                    bestByPath,
+                    mode,
+                    identityPaths,
+                    displayPaths,
+                    identityPath: "",
+                    displayPath: "",
+                    depth: 0
+                );
             }
 
-            return samples;
+            var rows = new List<SampleRow>(bestByPath.Values);
+            rows.Sort((left, right) => CompareOverviewSamples(left, right, mode));
+            return rows;
         }
 
         static void CollectSampleChildren(
@@ -407,7 +473,10 @@ namespace Conduit
             int frameIndex,
             int frameOrdinal,
             float frameTimeMs,
-            List<SampleRow> samples,
+            Dictionary<string, SampleRow> bestByPath,
+            string mode,
+            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
+            Dictionary<(string Parent, string Name), string> displayPaths,
             string identityPath,
             string displayPath,
             int depth
@@ -415,7 +484,7 @@ namespace Conduit
         {
             using var pooledChildren = ConduitUtility.GetPooledList<int>(out var children);
             hierarchy.GetItemChildren(itemId, children);
-            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+            using var pooledOccurrences = ConduitUtility.GetPooledDictionary<string, int>(out var occurrences);
             foreach (var child in children)
             {
                 var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
@@ -423,11 +492,32 @@ namespace Conduit
                 occurrences.TryGetValue(segment, out var occurrence);
                 occurrences[segment] = ++occurrence;
 
-                var childIdentityPath = string.IsNullOrEmpty(identityPath)
-                    ? $"{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]"
-                    : $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]";
-                var childDisplayPath = string.IsNullOrEmpty(displayPath) ? childName : $"{displayPath}/{childName}";
-                CollectSampleTree(hierarchy, child, frameIndex, frameOrdinal, frameTimeMs, samples, childIdentityPath, childDisplayPath, depth);
+                GetSamplePaths(
+                    identityPaths,
+                    displayPaths,
+                    identityPath,
+                    displayPath,
+                    childName,
+                    segment,
+                    occurrence,
+                    out var childIdentityPath,
+                    out var childDisplayPath
+                );
+
+                CollectSampleTree(
+                    hierarchy,
+                    child,
+                    frameIndex,
+                    frameOrdinal,
+                    frameTimeMs,
+                    bestByPath,
+                    mode,
+                    identityPaths,
+                    displayPaths,
+                    childIdentityPath,
+                    childDisplayPath,
+                    depth
+                );
             }
         }
 
@@ -437,7 +527,10 @@ namespace Conduit
             int frameIndex,
             int frameOrdinal,
             float frameTimeMs,
-            List<SampleRow> samples,
+            Dictionary<string, SampleRow> bestByPath,
+            string mode,
+            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
+            Dictionary<(string Parent, string Name), string> displayPaths,
             string identityPath,
             string displayPath,
             int depth
@@ -445,9 +538,24 @@ namespace Conduit
         {
             using var pooledChildren = ConduitUtility.GetPooledList<int>(out var children);
             hierarchy.GetItemChildren(itemId, children);
-            samples.Add(ReadSampleRow(hierarchy, itemId, frameIndex, frameOrdinal, frameTimeMs, identityPath, displayPath, depth, children.Count));
+            var sample = ReadSampleRow(
+                hierarchy,
+                itemId,
+                frameIndex,
+                frameOrdinal,
+                frameTimeMs,
+                displayPath,
+                depth,
+                children.Count
+            );
+            if (ShouldIncludeOverviewSample(sample, mode)
+                && (!bestByPath.TryGetValue(identityPath, out var existing)
+                    || CompareOverviewSamples(sample, existing, mode) < 0))
+                bestByPath[identityPath] = sample;
+            if (children.Count == 0)
+                return;
 
-            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+            using var pooledOccurrences = ConduitUtility.GetPooledDictionary<string, int>(out var occurrences);
             foreach (var child in children)
             {
                 var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
@@ -455,21 +563,69 @@ namespace Conduit
                 occurrences.TryGetValue(segment, out var occurrence);
                 occurrences[segment] = ++occurrence;
 
+                GetSamplePaths(
+                    identityPaths,
+                    displayPaths,
+                    identityPath,
+                    displayPath,
+                    childName,
+                    segment,
+                    occurrence,
+                    out var childIdentityPath,
+                    out var childDisplayPath
+                );
+
                 CollectSampleTree(
                     hierarchy,
                     child,
                     frameIndex,
                     frameOrdinal,
                     frameTimeMs,
-                    samples,
-                    $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]",
-                    $"{displayPath}/{childName}",
+                    bestByPath,
+                    mode,
+                    identityPaths,
+                    displayPaths,
+                    childIdentityPath,
+                    childDisplayPath,
                     depth + 1
                 );
             }
         }
 
-        static FrameStats ReadFrameStats(int frameIndex, int frameOrdinal = -1)
+        static void GetSamplePaths(
+            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
+            Dictionary<(string Parent, string Name), string> displayPaths,
+            string identityPath,
+            string displayPath,
+            string childName,
+            string segment,
+            int occurrence,
+            out string childIdentityPath,
+            out string childDisplayPath)
+        {
+            var identityKey = (identityPath, segment, occurrence);
+            if (!identityPaths.TryGetValue(identityKey, out childIdentityPath))
+            {
+                childIdentityPath = string.IsNullOrEmpty(identityPath)
+                    ? $"{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]"
+                    : $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]";
+                identityPaths.Add(identityKey, childIdentityPath);
+            }
+
+            var displayKey = (displayPath, childName);
+            if (!displayPaths.TryGetValue(displayKey, out childDisplayPath))
+            {
+                childDisplayPath = string.IsNullOrEmpty(displayPath)
+                    ? childName
+                    : $"{displayPath}/{childName}";
+                displayPaths.Add(displayKey, childDisplayPath);
+            }
+        }
+
+        static FrameStats ReadFrameStats(
+            int frameIndex,
+            int frameOrdinal,
+            HashSet<string> threadLabels)
         {
             var stats = new FrameStats { FrameIndex = frameIndex, FrameOrdinal = frameOrdinal };
             for (var threadIndex = 0; ; threadIndex++)
@@ -478,21 +634,28 @@ namespace Conduit
                 if (!raw.valid)
                     break;
 
-                if (stats.ThreadCount == 0)
+                if (threadIndex == 0)
                 {
                     stats.CpuMs = raw.frameTimeMs;
                     stats.GpuMs = raw.frameGpuTimeMs;
                     stats.Fps = raw.frameFps;
                 }
 
-                stats.ThreadCount++;
                 stats.SampleCount += raw.sampleCount;
                 stats.GcBytes += ReadGcAllocBytes(raw);
                 if (ClassifyThread(raw.threadName, raw.threadGroupName) is { } label)
-                    stats.Threads.Add(label);
+                    threadLabels.Add(label);
             }
 
             return stats;
+        }
+
+        static (double CpuMs, double GpuMs, double Fps) ReadFrameTiming(int frameIndex)
+        {
+            using var raw = ProfilerDriver.GetRawFrameDataView(frameIndex, 0);
+            return raw.valid
+                ? (raw.frameTimeMs, raw.frameGpuTimeMs, raw.frameFps)
+                : default;
         }
 
         static long ReadGcAllocBytes(RawFrameDataView raw)
@@ -568,9 +731,23 @@ namespace Conduit
             frameTimeMs = 0;
             aggregateWorkerCount = 0;
             threadSummary = string.Empty;
-            var labels = new List<string>();
-            foreach (var thread in ListThreads(frameIndex))
+            using var pooledLabels = ConduitUtility.GetPooledList<string>(out var labels);
+            for (var threadIndex = 0; ; ++threadIndex)
             {
+                ThreadInfo thread;
+                using (var raw = ProfilerDriver.GetRawFrameDataView(frameIndex, threadIndex))
+                {
+                    if (!raw.valid)
+                        break;
+
+                    thread = new()
+                    {
+                        Index = threadIndex,
+                        Name = raw.threadName ?? $"Thread {threadIndex.ToString(CultureInfo.InvariantCulture)}",
+                        GroupName = raw.threadGroupName ?? string.Empty,
+                    };
+                }
+
                 if (!TryParseJobWorkerIndex(thread, out var workerIndex))
                     continue;
 
@@ -589,7 +766,7 @@ namespace Conduit
                     frameTimeMs = hierarchy.frameTimeMs;
 
                 MergeWorkerHierarchy(root, BuildHierarchy(hierarchy, sort));
-                labels.Add($"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}");
+                labels.Add(FormatWorkerLabel(workerIndex));
             }
 
             if (labels.Count == 0)
@@ -610,8 +787,7 @@ namespace Conduit
             new()
             {
                 Name = "Job Workers",
-                IdentityPath = "Job Workers[1]",
-                DisplayPath = "Job Workers",
+                IdentityHash = StableHash("Job Workers[1]"),
             };
 
         static void MergeWorkerHierarchy(HierarchyRow aggregate, HierarchyRow workerRoot)
@@ -625,18 +801,24 @@ namespace Conduit
 
         static void MergeHierarchyRow(HierarchyRow parent, HierarchyRow source)
         {
-            var target = parent.Children.Find(child => string.Equals(child.Name, source.Name, StringComparison.Ordinal));
-            if (target == null)
+            // all worker trees share this index so merging stays linear in the number of samples.
+            var childrenByName = parent.MergedChildren ??= new(StringComparer.Ordinal);
+            if (!childrenByName.TryGetValue(source.Name, out var target))
             {
                 target = new()
                 {
                     Parent = parent,
                     Name = source.Name,
                     Depth = parent.Depth + 1,
-                    IdentityPath = $"{parent.IdentityPath}/{NormalizeIdentitySegment(source.Name)}[1]",
-                    DisplayPath = $"{parent.DisplayPath}/{source.Name}",
+                    IdentityHash = AppendIdentitySegment(
+                        parent.IdentityHash,
+                        NormalizeIdentitySegment(source.Name),
+                        1,
+                        includeSeparator: true
+                    ),
                 };
                 parent.Children.Add(target);
+                childrenByName.Add(source.Name, target);
             }
 
             AddWorkerMetrics(target, source);
@@ -658,28 +840,42 @@ namespace Conduit
         }
 
         static HierarchyRow BuildHierarchy(HierarchyFrameDataView hierarchy, string sort)
-            => BuildHierarchyRow(hierarchy, hierarchy.GetRootItemID(), parent: null, depth: 0, identityPath: "", displayPath: "", sort);
+            => BuildHierarchyRow(
+                hierarchy,
+                hierarchy.GetRootItemID(),
+                parent: null,
+                depth: 0,
+                identityHash: 0,
+                GetRowComparison(sort),
+                knownName: null
+            );
 
         static HierarchyRow BuildHierarchyRow(
             HierarchyFrameDataView hierarchy,
             int itemId,
             HierarchyRow? parent,
             int depth,
-            string identityPath,
-            string displayPath,
-            string sort
+            uint identityHash,
+            Comparison<HierarchyRow> rowComparison,
+            string? knownName
         )
         {
-            var name = hierarchy.GetItemName(itemId) ?? "<unnamed>";
-            var currentDisplayPath = string.IsNullOrEmpty(displayPath) ? name : $"{displayPath}/{name}";
+            var name = knownName ?? hierarchy.GetItemName(itemId) ?? "<unnamed>";
+            if (parent == null)
+                identityHash = AppendIdentitySegment(
+                    2166136261,
+                    NormalizeIdentitySegment(name),
+                    1,
+                    includeSeparator: false
+                );
+
             var row = new HierarchyRow
             {
                 ItemId = itemId,
                 Parent = parent,
                 Name = name,
                 Depth = depth,
-                IdentityPath = string.IsNullOrEmpty(identityPath) ? $"{NormalizeIdentitySegment(name)}[1]" : identityPath,
-                DisplayPath = currentDisplayPath,
+                IdentityHash = identityHash,
                 TotalMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnTotalTime),
                 SelfMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnSelfTime),
                 GcBytes = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnGcMemory),
@@ -688,58 +884,70 @@ namespace Conduit
 
             using var pooledChildren = ConduitUtility.GetPooledList<int>(out var children);
             hierarchy.GetItemChildren(itemId, children);
-            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var childId in children)
+            if (children.Count > 0)
             {
-                var childName = hierarchy.GetItemName(childId) ?? "<unnamed>";
-                var segment = NormalizeIdentitySegment(childName);
-                occurrences.TryGetValue(segment, out var occurrence);
-                occurrences[segment] = ++occurrence;
+                using var pooledOccurrences = ConduitUtility.GetPooledDictionary<string, int>(out var occurrences);
+                foreach (var childId in children)
+                {
+                    var childName = hierarchy.GetItemName(childId) ?? "<unnamed>";
+                    var segment = NormalizeIdentitySegment(childName);
+                    occurrences.TryGetValue(segment, out var occurrence);
+                    occurrences[segment] = ++occurrence;
 
-                row.Children.Add(
-                    BuildHierarchyRow(
-                        hierarchy,
-                        childId,
-                        row,
-                        depth + 1,
-                        $"{row.IdentityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]",
-                        currentDisplayPath,
-                        sort
-                    )
-                );
+                    row.Children.Add(
+                        BuildHierarchyRow(
+                            hierarchy,
+                            childId,
+                            row,
+                            depth + 1,
+                            AppendIdentitySegment(
+                                row.IdentityHash,
+                                segment,
+                                occurrence,
+                                includeSeparator: true
+                            ),
+                            rowComparison,
+                            childName
+                        )
+                    );
+                }
             }
 
-            row.Children.Sort((left, right) => CompareRows(left, right, sort));
+            row.Children.Sort(rowComparison);
             return row;
         }
 
-        static void AssignPublicIds(HierarchyRow root)
+        static void AssignPublicIds(IReadOnlyList<HierarchyRow> rows)
         {
-            var used = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var row in Flatten(root))
+            using var pooledUsed = ConduitUtility.GetPooledDictionary<string, int>(out var used);
+            foreach (var row in rows)
             {
-                var baseId = StableId(row.IdentityPath);
+                var baseId = StableId(row.IdentityHash);
                 used.TryGetValue(baseId, out var count);
                 used[baseId] = ++count;
                 row.PublicId = count == 1 ? baseId : $"{baseId}-{count.ToString(CultureInfo.InvariantCulture)}";
             }
         }
 
-        static HierarchyRow? ResolveRoot(HierarchyRow root, string selector, List<string> warnings)
+        static HierarchyRow? ResolveRoot(
+            HierarchyRow root,
+            IReadOnlyList<HierarchyRow> rows,
+            string selector,
+            List<string> warnings)
         {
             if (string.IsNullOrWhiteSpace(selector))
                 return root;
 
-            var rows = Flatten(root);
             foreach (var row in rows)
                 if (string.Equals(row.PublicId, selector, StringComparison.Ordinal))
                     return row;
 
-            foreach (var row in rows)
-                if (string.Equals(row.DisplayPath, selector, StringComparison.OrdinalIgnoreCase))
-                    return row;
+            if (selector.IndexOf('/') >= 0)
+                foreach (var row in rows)
+                    if (string.Equals(BuildDisplayPath(row), selector, StringComparison.OrdinalIgnoreCase))
+                        return row;
 
-            var exactMatches = new List<HierarchyRow>();
+            using var pooledExactMatches = ConduitUtility.GetPooledList<HierarchyRow>(out var exactMatches);
             foreach (var row in rows)
                 if (string.Equals(row.Name, selector, StringComparison.Ordinal))
                     exactMatches.Add(row);
@@ -759,11 +967,15 @@ namespace Conduit
             return exactMatches[0];
         }
 
-        static HashSet<HierarchyRow> SelectVisibleRows(HierarchyRow root, int depth, string sort, bool onlyNonTrivial, float frameTimeMs)
+        static void SelectVisibleRows(
+            HierarchyRow root,
+            int depth,
+            string sort,
+            bool onlyNonTrivial,
+            float frameTimeMs,
+            HashSet<HierarchyRow> visibleRows)
         {
-            var visibleRows = new HashSet<HierarchyRow>();
             Mark(root, 0);
-            return visibleRows;
 
             bool Mark(HierarchyRow row, int relativeDepth)
             {
@@ -780,30 +992,6 @@ namespace Conduit
 
                 visibleRows.Add(row);
                 return true;
-            }
-        }
-
-        static IEnumerable<HierarchyRow> EnumerateForOutput(HierarchyRow root, HashSet<HierarchyRow> visibleRows, string sort)
-        {
-            if (!visibleRows.Contains(root))
-                yield break;
-
-            yield return root;
-            foreach (var row in EnumerateChildren(root))
-                yield return row;
-
-            IEnumerable<HierarchyRow> EnumerateChildren(HierarchyRow parent)
-            {
-                parent.Children.Sort((left, right) => CompareRows(left, right, sort));
-                foreach (var child in parent.Children)
-                {
-                    if (!visibleRows.Contains(child))
-                        continue;
-
-                    yield return child;
-                    foreach (var descendant in EnumerateChildren(child))
-                        yield return descendant;
-                }
             }
         }
 
@@ -846,18 +1034,13 @@ namespace Conduit
             throw new InvalidOperationException($"Frame selector '{selector}' did not match an available profiler frame.");
         }
 
-        static Dictionary<int, int> BuildFrameOrdinalMap(List<int> frames)
-        {
-            var ordinals = new Dictionary<int, int>();
-            for (var i = 0; i < frames.Count; i++)
-                ordinals[frames[i]] = i;
-
-            return ordinals;
-        }
-
-        static List<int> ResolveFrameRange(string frameRange, out List<string> warnings)
+        static List<int> ResolveFrameRange(
+            string frameRange,
+            out List<string> warnings,
+            out int firstFrameOrdinal)
         {
             warnings = new();
+            firstFrameOrdinal = 0;
             var frames = GetAvailableFrames();
             if (frames.Count == 0)
                 return frames;
@@ -866,7 +1049,17 @@ namespace Conduit
             if (separatorIndex < 0)
             {
                 var single = ResolveFrameEndpoint(frameRange, frames.Count);
-                return single >= 0 && single < frames.Count ? new() { frames[single] } : new();
+                firstFrameOrdinal = single;
+                if (single < 0 || single >= frames.Count)
+                {
+                    frames.Clear();
+                    return frames;
+                }
+
+                var selectedFrame = frames[single];
+                frames.Clear();
+                frames.Add(selectedFrame);
+                return frames;
             }
 
             var start = ResolveFrameEndpoint(frameRange[..separatorIndex], frames.Count);
@@ -884,7 +1077,12 @@ namespace Conduit
                 count = MaxScanFrameCount;
             }
 
-            return frames.GetRange(start, count);
+            firstFrameOrdinal = start;
+            if (start + count < frames.Count)
+                frames.RemoveRange(start + count, frames.Count - start - count);
+            if (start > 0)
+                frames.RemoveRange(0, start);
+            return frames;
         }
 
         static int ResolveFrameEndpoint(string endpoint, int frameCount)
@@ -935,67 +1133,85 @@ namespace Conduit
             return false;
         }
 
+        static bool TryGetSelectedFrame(int firstFrame, int lastFrame, out int selectedFrame)
+        {
+            foreach (var window in Resources.FindObjectsOfTypeAll<ProfilerWindow>())
+            {
+                var candidate = window.selectedFrameIndex;
+                if (candidate < firstFrame || candidate > lastFrame)
+                    continue;
+
+                var frame = firstFrame;
+                while (frame >= 0 && frame <= candidate)
+                {
+                    if (frame == candidate)
+                    {
+                        selectedFrame = (int)candidate;
+                        return true;
+                    }
+
+                    var next = ProfilerDriver.GetNextFrameIndex(frame);
+                    if (next <= frame)
+                        break;
+
+                    frame = next;
+                }
+            }
+
+            selectedFrame = -1;
+            return false;
+        }
+
         static bool TryResolveThread(int frameIndex, string selector, out ThreadInfo thread, out string diagnostic)
         {
-            var threads = ListThreads(frameIndex);
-            if (threads.Count == 0)
+            var matchMain = string.Equals(selector, "main", StringComparison.OrdinalIgnoreCase);
+            var matchRender = string.Equals(selector, "render", StringComparison.OrdinalIgnoreCase);
+            var requestedWorkerIndex = 0;
+            var matchWorker = selector.StartsWith("worker", StringComparison.OrdinalIgnoreCase)
+                              && int.TryParse(
+                                  selector.AsSpan("worker".Length),
+                                  NumberStyles.Integer,
+                                  CultureInfo.InvariantCulture,
+                                  out requestedWorkerIndex
+                              );
+            if (!matchMain && !matchRender && !matchWorker)
             {
                 thread = default;
-                diagnostic = $"No profiler threads are available for frame {frameIndex}.";
+                diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, all_workers, or worker<N>.";
                 return false;
             }
 
-            if (string.Equals(selector, "main", StringComparison.OrdinalIgnoreCase))
-                return TryFindThread(threads, IsMainThread, out thread, out diagnostic);
-
-            if (string.Equals(selector, "render", StringComparison.OrdinalIgnoreCase))
-                return TryFindThread(threads, IsRenderThread, out thread, out diagnostic);
-
-            if (selector.StartsWith("worker", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(selector["worker".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var workerIndex))
-                return TryFindThread(threads, info => TryParseJobWorkerIndex(info, out var index) && index == workerIndex, out thread, out diagnostic);
-
-            diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, all_workers, or worker<N>.";
-            thread = default;
-            return false;
-        }
-
-        static bool TryFindThread(List<ThreadInfo> threads, Predicate<ThreadInfo> predicate, out ThreadInfo thread, out string diagnostic)
-        {
-            foreach (var candidate in threads)
-                if (predicate(candidate))
-                    return UseThread(candidate, out thread, out diagnostic);
-
-            diagnostic = "Profiler thread was not found.";
-            thread = default;
-            return false;
-        }
-
-        static bool UseThread(ThreadInfo selectedThread, out ThreadInfo thread, out string diagnostic)
-        {
-            thread = selectedThread;
-            diagnostic = string.Empty;
-            return true;
-        }
-
-        static List<ThreadInfo> ListThreads(int frameIndex)
-        {
-            var threads = new List<ThreadInfo>();
-            for (var threadIndex = 0; ; threadIndex++)
+            var hasThreads = false;
+            for (var threadIndex = 0; ; ++threadIndex)
             {
                 using var raw = ProfilerDriver.GetRawFrameDataView(frameIndex, threadIndex);
                 if (!raw.valid)
                     break;
 
-                threads.Add(new()
+                hasThreads = true;
+                var candidate = new ThreadInfo
                 {
                     Index = threadIndex,
                     Name = raw.threadName ?? $"Thread {threadIndex.ToString(CultureInfo.InvariantCulture)}",
                     GroupName = raw.threadGroupName ?? string.Empty,
-                });
+                };
+                if (matchMain && IsMainThread(candidate)
+                    || matchRender && IsRenderThread(candidate)
+                    || matchWorker
+                    && TryParseJobWorkerIndex(candidate, out var workerIndex)
+                    && workerIndex == requestedWorkerIndex)
+                {
+                    thread = candidate;
+                    diagnostic = string.Empty;
+                    return true;
+                }
             }
 
-            return threads;
+            thread = default;
+            diagnostic = hasThreads
+                ? "Profiler thread was not found."
+                : $"No profiler threads are available for frame {frameIndex}.";
+            return false;
         }
 
         static List<int> GetAvailableFrames()
@@ -1023,7 +1239,30 @@ namespace Conduit
             return frames;
         }
 
-        static int CountAvailableFrames() => GetAvailableFrames().Count;
+        static int CountAvailableFrames()
+        {
+            var first = ProfilerDriver.firstFrameIndex;
+            var last = ProfilerDriver.lastFrameIndex;
+            if (first < 0 || last < 0 || first > last)
+                return 0;
+
+            var count = 0;
+            var frame = first;
+            while (frame >= 0 && frame <= last)
+            {
+                count++;
+                if (frame == last)
+                    break;
+
+                var next = ProfilerDriver.GetNextFrameIndex(frame);
+                if (next <= frame)
+                    break;
+
+                frame = next;
+            }
+
+            return count;
+        }
 
         static void SaveProfile(string path)
         {
@@ -1049,7 +1288,7 @@ namespace Conduit
                 value += ".data";
 
             if (!Path.IsPathRooted(value)
-                && Array.IndexOf(value.Split('/', '\\'), "..") >= 0)
+                && ContainsParentTraversal(value.AsSpan()))
                 throw new InvalidOperationException(
                     $"Relative profiler capture path '{value}' contains parent traversal."
                 );
@@ -1057,7 +1296,7 @@ namespace Conduit
             string absolutePath;
             if (Path.IsPathRooted(value))
                 absolutePath = Path.GetFullPath(value);
-            else if (value.IndexOfAny(new[] { '/', '\\' }) < 0)
+            else if (value.IndexOf('/') < 0 && value.IndexOf('\\') < 0)
                 absolutePath = Path.GetFullPath(Path.Combine(projectRoot, CaptureDirectory, value));
             else
                 absolutePath = Path.GetFullPath(Path.Combine(projectRoot, value));
@@ -1067,6 +1306,23 @@ namespace Conduit
                 AbsolutePath = absolutePath,
                 DisplayPath = ToDisplayPath(absolutePath),
             };
+
+            static bool ContainsParentTraversal(ReadOnlySpan<char> path)
+            {
+                var segmentStart = 0;
+                for (var index = 0; index <= path.Length; index++)
+                {
+                    if (index < path.Length && path[index] is not ('/' or '\\'))
+                        continue;
+
+                    if (path[segmentStart..index].SequenceEqual("..".AsSpan()))
+                        return true;
+
+                    segmentStart = index + 1;
+                }
+
+                return false;
+            }
         }
 
         static string ToDisplayPath(string absolutePath)
@@ -1156,7 +1412,6 @@ namespace Conduit
             int frameIndex,
             int frameOrdinal,
             float frameTimeMs,
-            string identityPath,
             string displayPath,
             int depth,
             int childCount
@@ -1166,7 +1421,6 @@ namespace Conduit
                 FrameIndex = frameIndex,
                 FrameOrdinal = frameOrdinal,
                 Name = hierarchy.GetItemName(itemId) ?? "<unnamed>",
-                IdentityPath = identityPath,
                 DisplayPath = displayPath,
                 Depth = depth,
                 ChildCount = childCount,
@@ -1177,34 +1431,10 @@ namespace Conduit
                 FrameTimeMs = frameTimeMs,
             };
 
-        static IEnumerable<FrameStats> TopFrames(List<FrameStats> frames, Func<FrameStats, double> selector)
+        static List<FrameStats> TopFrames(List<FrameStats> frames, Func<FrameStats, double> selector)
         {
             frames.Sort((left, right) => selector(right).CompareTo(selector(left)));
-            return frames.GetRange(0, Math.Min(OverviewRowLimit, frames.Count));
-        }
-
-        static IEnumerable<SampleRow> TopSamples(List<SampleRow> samples, Func<SampleRow, double> selector)
-        {
-            samples.Sort((left, right) => selector(right).CompareTo(selector(left)));
-            return samples.GetRange(0, Math.Min(OverviewRowLimit, samples.Count));
-        }
-
-        static IEnumerable<SampleRow> TopInterestingSamples(List<SampleRow> samples, string mode)
-        {
-            var bestByPath = new Dictionary<string, SampleRow>(StringComparer.Ordinal);
-            foreach (var sample in samples)
-            {
-                if (!ShouldIncludeOverviewSample(sample, mode))
-                    continue;
-
-                var key = string.IsNullOrEmpty(sample.IdentityPath) ? sample.DisplayPath : sample.IdentityPath;
-                if (!bestByPath.TryGetValue(key, out var existing) || CompareOverviewSamples(sample, existing, mode) < 0)
-                    bestByPath[key] = sample;
-            }
-
-            var rows = new List<SampleRow>(bestByPath.Values);
-            rows.Sort((left, right) => CompareOverviewSamples(left, right, mode));
-            return rows.GetRange(0, Math.Min(OverviewRowLimit, rows.Count));
+            return frames;
         }
 
         static int CompareOverviewSamples(SampleRow left, SampleRow right, string mode)
@@ -1278,37 +1508,41 @@ namespace Conduit
         static double GetOverviewThresholdMs(float frameTimeMs)
             => Math.Max(0.001, frameTimeMs * 0.01);
 
-        static void AppendFrameTable(StringBuilder builder, IEnumerable<FrameStats> rows)
+        static void AppendFrameTable(StringBuilder builder, IReadOnlyList<FrameStats> rows)
         {
             builder.AppendLine("frame    cpu_ms    gpu_ms    fps       gc_kb    samples");
-            foreach (var row in rows)
+            var count = Math.Min(OverviewRowLimit, rows.Count);
+            for (var index = 0; index < count; ++index)
             {
-                builder.Append(FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex).PadRight(9));
-                builder.Append(FormatNumber(row.CpuMs).PadRight(10));
-                builder.Append(FormatOptionalNumber(row.GpuMs).PadRight(10));
-                builder.Append(FormatNumber(row.Fps).PadRight(10));
-                builder.Append(FormatKb(row.GcBytes).PadRight(9));
-                builder.AppendLine(row.SampleCount.ToString(CultureInfo.InvariantCulture));
+                var row = rows[index];
+                AppendPadded(builder, FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex), 9);
+                AppendPadded(builder, FormatNumber(row.CpuMs), 10);
+                AppendPadded(builder, FormatOptionalNumber(row.GpuMs), 10);
+                AppendPadded(builder, FormatNumber(row.Fps), 10);
+                AppendPadded(builder, FormatKb(row.GcBytes), 9);
+                builder.AppendInvariant(row.SampleCount).AppendLine();
             }
         }
 
-        static void AppendSampleTable(StringBuilder builder, IEnumerable<SampleRow> rows, bool includeRank = false)
+        static void AppendSampleTable(StringBuilder builder, IReadOnlyList<SampleRow> rows, bool includeRank = false)
         {
             builder.AppendLine(includeRank
                 ? "rank  frame  total_ms  self_ms  gc_kb  calls  frame_%  sample"
                 : "frame  total_ms  self_ms  gc_kb  calls  frame_%  name");
             var rank = 1;
-            foreach (var row in rows)
+            var count = Math.Min(OverviewRowLimit, rows.Count);
+            for (var index = 0; index < count; ++index)
             {
+                var row = rows[index];
                 if (includeRank)
-                    builder.Append((rank++).ToString(CultureInfo.InvariantCulture).PadRight(6));
+                    AppendPadded(builder, rank++, 6);
 
-                builder.Append(FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex).PadRight(7));
-                builder.Append(FormatNumber(row.TotalMs).PadRight(10));
-                builder.Append(FormatNumber(row.SelfMs).PadRight(9));
-                builder.Append(FormatKb(row.GcBytes).PadRight(7));
-                builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
-                builder.Append(FormatPercent(row.TotalMs, row.FrameTimeMs).PadRight(9));
+                AppendPadded(builder, FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex), 7);
+                AppendPadded(builder, FormatNumber(row.TotalMs), 10);
+                AppendPadded(builder, FormatNumber(row.SelfMs), 9);
+                AppendPadded(builder, FormatKb(row.GcBytes), 7);
+                AppendPadded(builder, (int)Math.Round(row.Calls), 7);
+                AppendPadded(builder, FormatPercent(row.TotalMs, row.FrameTimeMs), 9);
                 builder.AppendLine(includeRank ? FormatSamplePath(row.DisplayPath) : FormatSampleName(row.Name));
             }
         }
@@ -1317,23 +1551,39 @@ namespace Conduit
         {
             var relativeDepth = row.Depth - rootDepth;
             var normalizedMs = aggregateWorkerCount > 0 ? GetNormalizedWorkerMs(row, aggregateWorkerCount) : row.TotalMs;
-            builder.Append((row.PublicId ?? "").PadRight(10));
-            builder.Append(relativeDepth.ToString(CultureInfo.InvariantCulture).PadRight(7));
-            builder.Append(FormatNumber(row.TotalMs).PadRight(10));
+            AppendPadded(builder, row.PublicId ?? "", 10);
+            AppendPadded(builder, relativeDepth, 7);
+            AppendPadded(builder, FormatNumber(row.TotalMs), 10);
             if (aggregateWorkerCount > 0)
             {
-                builder.Append(FormatNumber(GetWorkerMeanMs(row)).PadRight(9));
-                builder.Append(FormatNumber(row.MinTotalMs).PadRight(8));
-                builder.Append(FormatNumber(row.MaxTotalMs).PadRight(8));
-                builder.Append(row.ContributingWorkerCount.ToString(CultureInfo.InvariantCulture).PadRight(9));
+                AppendPadded(builder, FormatNumber(GetWorkerMeanMs(row)), 9);
+                AppendPadded(builder, FormatNumber(row.MinTotalMs), 8);
+                AppendPadded(builder, FormatNumber(row.MaxTotalMs), 8);
+                AppendPadded(builder, row.ContributingWorkerCount, 9);
             }
 
-            builder.Append(FormatNumber(row.SelfMs).PadRight(9));
-            builder.Append(FormatKb(row.GcBytes).PadRight(7));
-            builder.Append(((int)Math.Round(row.Calls)).ToString(CultureInfo.InvariantCulture).PadRight(7));
-            builder.Append(FormatPercent(normalizedMs, frameTimeMs).PadRight(9));
-            builder.Append(new string(' ', Math.Max(0, relativeDepth * 2)));
+            AppendPadded(builder, FormatNumber(row.SelfMs), 9);
+            AppendPadded(builder, FormatKb(row.GcBytes), 7);
+            AppendPadded(builder, (int)Math.Round(row.Calls), 7);
+            AppendPadded(builder, FormatPercent(normalizedMs, frameTimeMs), 9);
+            builder.Append(' ', Math.Max(0, relativeDepth * 2));
             builder.AppendLine(FormatSampleName(row.Name));
+        }
+
+        static void AppendPadded(StringBuilder builder, string value, int width)
+        {
+            builder.Append(value);
+            if (value.Length < width)
+                builder.Append(' ', width - value.Length);
+        }
+
+        static void AppendPadded(StringBuilder builder, int value, int width)
+        {
+            var start = builder.Length;
+            builder.AppendInvariant(value);
+            var length = builder.Length - start;
+            if (length < width)
+                builder.Append(' ', width - length);
         }
 
         static double GetWorkerMeanMs(HierarchyRow row) => row.TotalMs / row.ContributingWorkerCount;
@@ -1350,44 +1600,120 @@ namespace Conduit
             builder.AppendLine(string.Join(", ", warnings));
         }
 
-        static int CompareRows(HierarchyRow left, HierarchyRow right, string sort)
-        {
-            var result = sort switch
+        static Comparison<HierarchyRow> GetRowComparison(string sort)
+            => sort switch
             {
-                "self_ms"  => right.SelfMs.CompareTo(left.SelfMs),
-                "gc_bytes" => right.GcBytes.CompareTo(left.GcBytes),
-                "calls"    => right.Calls.CompareTo(left.Calls),
-                _          => right.TotalMs.CompareTo(left.TotalMs),
+                "self_ms"  => selfRowComparison,
+                "gc_bytes" => gcRowComparison,
+                "calls"    => callsRowComparison,
+                _          => totalRowComparison,
             };
+
+        static int CompareRowValues(
+            double leftValue,
+            double rightValue,
+            HierarchyRow left,
+            HierarchyRow right)
+        {
+            var result = rightValue.CompareTo(leftValue);
 
             return result != 0 ? result : string.Compare(left.Name, right.Name, StringComparison.Ordinal);
         }
 
-        static IEnumerable<HierarchyRow> Flatten(HierarchyRow root)
+        static void Flatten(HierarchyRow root, List<HierarchyRow> rows)
         {
-            yield return root;
-            foreach (var child in root.Children)
-            foreach (var row in Flatten(child))
-                yield return row;
+            using var pooledPending = ConduitUtility.GetPooledList<HierarchyRow>(out var pending);
+            pending.Add(root);
+            while (pending.Count > 0)
+            {
+                var lastIndex = pending.Count - 1;
+                var row = pending[lastIndex];
+                pending.RemoveAt(lastIndex);
+                rows.Add(row);
+                for (var index = row.Children.Count - 1; index >= 0; --index)
+                    pending.Add(row.Children[index]);
+            }
         }
 
         static string NormalizeIdentitySegment(string name)
             => name.Replace('/', '∕').Trim();
 
-        static string StableId(string value)
+        static string BuildDisplayPath(HierarchyRow row)
+        {
+            using var pooledAncestors = ConduitUtility.GetPooledList<HierarchyRow>(out var ancestors);
+            for (var current = row; current != null; current = current.Parent)
+                ancestors.Add(current);
+
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
+            for (var index = ancestors.Count - 1; index >= 0; --index)
+            {
+                if (index < ancestors.Count - 1)
+                    builder.Append('/');
+
+                builder.Append(ancestors[index].Name);
+            }
+
+            return builder.ToString();
+        }
+
+        static uint AppendIdentitySegment(
+            uint hash,
+            string segment,
+            int occurrence,
+            bool includeSeparator)
         {
             unchecked
             {
-                uint hash = 2166136261;
-                foreach (var character in value)
-                {
-                    hash ^= character;
-                    hash *= 16777619;
-                }
+                if (includeSeparator)
+                    hash = AppendStableHash(hash, '/');
 
-                return hash.ToString("x8", CultureInfo.InvariantCulture);
+                hash = AppendStableHash(hash, segment);
+                hash = AppendStableHash(hash, '[');
+                hash = AppendPositiveIntegerHash(hash, occurrence);
+                return AppendStableHash(hash, ']');
             }
         }
+
+        static uint AppendPositiveIntegerHash(uint hash, int value)
+        {
+            Span<char> digits = stackalloc char[10];
+            var offset = digits.Length;
+            do
+            {
+                digits[--offset] = (char)('0' + value % 10);
+                value /= 10;
+            }
+            while (value > 0);
+
+            foreach (var digit in digits[offset..])
+                hash = AppendStableHash(hash, digit);
+
+            return hash;
+        }
+
+        static uint StableHash(string value)
+            => AppendStableHash(2166136261, value);
+
+        static uint AppendStableHash(uint hash, string value)
+        {
+            foreach (var character in value)
+                hash = AppendStableHash(hash, character);
+
+            return hash;
+        }
+
+        static uint AppendStableHash(uint hash, char value)
+        {
+            unchecked
+            {
+                hash ^= value;
+                return hash * 16777619;
+            }
+        }
+
+        static string StableId(string value) => StableId(StableHash(value));
+
+        static string StableId(uint hash) => hash.ToString("x8", CultureInfo.InvariantCulture);
 
         static string? ClassifyThread(string? threadName, string? threadGroupName)
         {
@@ -1400,7 +1726,7 @@ namespace Conduit
                 return "render";
 
             if (TryParseJobWorkerIndex(threadName, threadGroupName, out var workerIndex))
-                return $"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}";
+                return FormatWorkerLabel(workerIndex);
 
             return null;
         }
@@ -1421,14 +1747,43 @@ namespace Conduit
             if (!string.Equals((threadGroupName ?? string.Empty).Trim(), "Job", StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            var match = jobWorkerThreadNamePattern.Match((threadName ?? string.Empty).Trim());
-            return match.Success
-                   && int.TryParse(match.Groups["index"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out workerIndex);
+            var name = (threadName ?? string.Empty).Trim();
+            const string workerPrefix = "Worker ";
+            const string jobWorkerPrefix = "Job Worker ";
+            var digits = name.StartsWith(workerPrefix, StringComparison.Ordinal)
+                ? name.AsSpan(workerPrefix.Length)
+                : name.StartsWith(jobWorkerPrefix, StringComparison.Ordinal)
+                    ? name.AsSpan(jobWorkerPrefix.Length)
+                    : default;
+            if (digits.IsEmpty)
+                return false;
+
+            foreach (var character in digits)
+                if (character is < '0' or > '9')
+                    return false;
+
+            return int.TryParse(
+                digits,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out workerIndex
+            );
+        }
+
+        static string FormatWorkerLabel(int workerIndex)
+        {
+            if ((uint)workerIndex < jobWorkerLabels.Length)
+                return jobWorkerLabels[workerIndex] ??=
+                    $"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}";
+
+            return $"worker{workerIndex.ToString(CultureInfo.InvariantCulture)}";
         }
 
         static string FormatThreadLabels(IEnumerable<string> labels)
         {
-            var sorted = new List<string>(labels);
+            using var pooledSorted = ConduitUtility.GetPooledList<string>(out var sorted);
+            foreach (var label in labels)
+                sorted.Add(label);
             sorted.Sort(CompareThreadLabels);
             return sorted.Count == 0 ? "none" : string.Join(", ", sorted);
         }
@@ -1539,7 +1894,7 @@ namespace Conduit
 
         static BridgeCommandResult Failure(string title, string error, string? file)
         {
-            var builder = new StringBuilder();
+            using var pooledBuilder = ConduitUtility.GetStringBuilder(out var builder);
             builder.AppendLine(title);
             builder.Append("Error: ");
             builder.AppendLine(error);
@@ -1552,7 +1907,7 @@ namespace Conduit
             return new()
             {
                 outcome = ToolOutcome.Exception,
-                return_value = builder.ToString().TrimEnd(),
+                return_value = builder.TrimEnd().ToString(),
             };
         }
 
@@ -1671,7 +2026,7 @@ namespace Conduit
             public string GroupName;
         }
 
-        sealed class FrameStats
+        struct FrameStats
         {
             public int FrameIndex;
             public int FrameOrdinal;
@@ -1680,17 +2035,14 @@ namespace Conduit
             public double Fps;
             public long SampleCount;
             public double GcBytes;
-            public int ThreadCount;
-            public List<string> Threads { get; } = new();
         }
 
-        sealed class SampleRow
+        struct SampleRow
         {
             public int FrameIndex;
             public int FrameOrdinal;
-            public string Name = string.Empty;
-            public string IdentityPath = string.Empty;
-            public string DisplayPath = string.Empty;
+            public string Name;
+            public string DisplayPath;
             public int Depth;
             public int ChildCount;
             public double TotalMs;
@@ -1706,8 +2058,7 @@ namespace Conduit
             public HierarchyRow? Parent;
             public string? PublicId;
             public string Name = string.Empty;
-            public string IdentityPath = string.Empty;
-            public string DisplayPath = string.Empty;
+            public uint IdentityHash;
             public int Depth;
             public double TotalMs;
             public double SelfMs;
@@ -1717,6 +2068,7 @@ namespace Conduit
             public double MinTotalMs;
             public double MaxTotalMs;
             public List<HierarchyRow> Children { get; } = new();
+            internal Dictionary<string, HierarchyRow>? MergedChildren;
         }
     }
 }

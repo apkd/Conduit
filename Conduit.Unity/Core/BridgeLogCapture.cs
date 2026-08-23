@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
+using UnityEngine.Pool;
 
 namespace Conduit
 {
@@ -11,8 +12,13 @@ namespace Conduit
     sealed class BridgeLogCapture : IDisposable
     {
         readonly object gate = new();
-        readonly Dictionary<LogSignature, int> indexes = new();
-        readonly List<LogEntry> entries = new();
+        Dictionary<LogSignature, int>? indexes;
+        List<LogEntry>? entries;
+        string? lastRawMessage;
+        string? lastRawStackTrace;
+        int lastRawEntryIndex;
+        LogType lastRawLogType;
+        bool hasLastRawEntry;
         bool hooked = true;
 
         public BridgeLogCapture()
@@ -23,7 +29,13 @@ namespace Conduit
             Stop();
             lock (gate)
             {
-                var builder = new StringBuilder();
+                if (entries is not { Count: > 0 })
+                {
+                    ReleaseCollections();
+                    return string.Empty;
+                }
+
+                using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
                 foreach (var entry in entries)
                 {
                     if (builder.Length > 0)
@@ -37,13 +49,18 @@ namespace Conduit
                     );
                 }
 
-                entries.Clear();
-                indexes.Clear();
-                return builder.ToString();
+                var result = builder.ToString();
+                ReleaseCollections();
+                return result;
             }
         }
 
-        public void Dispose() => Stop();
+        public void Dispose()
+        {
+            Stop();
+            lock (gate)
+                ReleaseCollections();
+        }
 
         void Stop()
         {
@@ -59,26 +76,81 @@ namespace Conduit
 
         void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
         {
+            var rawMessage = condition ?? string.Empty;
+            var rawStackTrace = stackTrace ?? string.Empty;
+            lock (gate)
+            {
+                // repeated logs bypass stack cleanup, which dominates log-storm capture cost.
+                if (!hooked)
+                    return;
+                if (hasLastRawEntry
+                    && logType == lastRawLogType
+                    && rawMessage == lastRawMessage
+                    && rawStackTrace == lastRawStackTrace)
+                {
+                    if (lastRawEntryIndex >= 0)
+                        entries![lastRawEntryIndex].RepeatCount++;
+                    return;
+                }
+            }
+
             var stack = logType == LogType.Log
                 ? null
                 : BridgeExceptionFormatter.TrimCommonLogTail(
                     BridgeExceptionFormatter.SimplifyStackTrace(stackTrace)
                 );
-            var signature = new LogSignature(condition ?? string.Empty, stack ?? string.Empty, logType);
+            var signature = new LogSignature(rawMessage, stack ?? string.Empty, logType);
             lock (gate)
             {
-                if (!hooked || signature.Message.Length == 0 && signature.StackTrace.Length == 0)
+                if (!hooked)
                     return;
 
-                if (indexes.TryGetValue(signature, out var index))
+                int entryIndex;
+                if (signature.Message.Length == 0 && signature.StackTrace.Length == 0)
+                    entryIndex = -1;
+                else if (indexes != null && indexes.TryGetValue(signature, out entryIndex))
+                    entries![entryIndex].RepeatCount++;
+                else
                 {
-                    entries[index].RepeatCount++;
-                    return;
+                    if (indexes == null)
+                    {
+                        _ = DictionaryPool<LogSignature, int>.Get(out indexes);
+                        indexes.Clear();
+                    }
+                    if (entries == null)
+                    {
+                        _ = ListPool<LogEntry>.Get(out entries);
+                        entries.Clear();
+                    }
+                    entryIndex = entries.Count;
+                    indexes.Add(signature, entryIndex);
+                    entries.Add(new(signature.Message, signature.StackTrace));
                 }
 
-                indexes.Add(signature, entries.Count);
-                entries.Add(new(signature.Message, signature.StackTrace));
+                lastRawMessage = rawMessage;
+                lastRawStackTrace = rawStackTrace;
+                lastRawLogType = logType;
+                lastRawEntryIndex = entryIndex;
+                hasLastRawEntry = true;
             }
+        }
+
+        void ReleaseCollections()
+        {
+            if (entries != null)
+            {
+                ListPool<LogEntry>.Release(entries);
+                entries = null;
+            }
+            if (indexes != null)
+            {
+                DictionaryPool<LogSignature, int>.Release(indexes);
+                indexes = null;
+            }
+
+            lastRawMessage = null;
+            lastRawStackTrace = null;
+            hasLastRawEntry = false;
         }
 
         sealed class LogEntry
@@ -101,11 +173,18 @@ namespace Conduit
                 Message = message;
                 StackTrace = stackTrace;
                 LogType = logType;
+                unchecked
+                {
+                    var hash = StringComparer.Ordinal.GetHashCode(message);
+                    hash = hash * 397 ^ StringComparer.Ordinal.GetHashCode(stackTrace);
+                    HashCode = hash * 397 ^ (int)logType;
+                }
             }
 
             public string Message { get; }
             public string StackTrace { get; }
             public LogType LogType { get; }
+            int HashCode { get; }
 
             public bool Equals(LogSignature other)
                 => Message == other.Message
@@ -115,15 +194,7 @@ namespace Conduit
             public override bool Equals(object? value)
                 => value is LogSignature other && Equals(other);
 
-            public override int GetHashCode()
-            {
-                unchecked
-                {
-                    var hash = StringComparer.Ordinal.GetHashCode(Message);
-                    hash = hash * 397 ^ StringComparer.Ordinal.GetHashCode(StackTrace);
-                    return hash * 397 ^ (int)LogType;
-                }
-            }
+            public override int GetHashCode() => HashCode;
         }
     }
 
