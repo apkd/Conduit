@@ -71,9 +71,9 @@ public sealed class RuntimeBridgeTests
             bytes
         );
 
-        Assert.That(artifact.Decode(), Is.EqualTo(bytes));
+        Assert.That(artifact.ReadVerified(), Is.EqualTo(bytes));
         artifact.Content![0] ^= 1;
-        Assert.Throws<InvalidDataException>(() => artifact.Decode());
+        Assert.Throws<InvalidDataException>(() => artifact.ReadVerified());
     }
 
     [Test]
@@ -103,7 +103,7 @@ public sealed class RuntimeBridgeTests
             };
             artifact.ResolveInEndpoint(endpointDirectory);
 
-            Assert.That(artifact.Decode(), Is.EqualTo(bytes));
+            Assert.That(artifact.ReadVerified(), Is.EqualTo(bytes));
             artifact.relative_path = "artifacts/../snippet.dll";
             Assert.Throws<InvalidDataException>(
                 () => artifact.ResolveInEndpoint(endpointDirectory)
@@ -384,7 +384,7 @@ public sealed class RuntimeBridgeTests
     [Test]
     public void SharedReflectionReportPreservesPlayerFunctionPointerSignatures()
     {
-        var result = reflect.Reflect(
+        var result = ReflectionTool.Reflect(
             new[] { "methods", nameof(DetourPlayModeTests), "FunctionPointerTarget" }
         );
 

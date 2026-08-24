@@ -8,7 +8,7 @@ using System.Reflection;
 
 namespace Conduit
 {
-    static class DetourRuntime
+    static partial class DetourRuntime
     {
         static readonly object gate = new();
         static readonly Dictionary<(Guid ModuleVersionId, int MetadataToken), ActiveDetour> active = new();
@@ -135,104 +135,6 @@ namespace Conduit
             }
         }
 
-        static string Test(
-            (Guid ModuleVersionId, int MetadataToken) key,
-            MethodInfo target,
-            string signatureHash,
-            string canonicalName,
-            string declaration,
-            MethodInfo replacement)
-        {
-            var targetCode = MonoJit.GetCode(target);
-            var replacementCode = MonoJit.GetCode(replacement);
-            var existing = GetActive(key);
-            var plan = NativePatch.Plan(targetCode, replacementCode.Start, existing?.Patch.Original);
-            var result = "Detourable: yes\n"
-                   + $"Method: {canonicalName}\n"
-                   + $"Identity: MVID {key.ModuleVersionId:N}, token 0x{key.MetadataToken:x8}, signature {signatureHash}\n"
-                   + $"Replacement: {declaration}\n"
-                   + $"Target JIT body: {targetCode.Size} bytes\n"
-                   + $"Jump encoding: {(plan.Kind == PatchKind.Relative ? "5-byte relative" : "14-byte absolute")}\n"
-                   + $"Active detour: {(existing == null ? "no" : "yes (" + existing.DisplayName + ")")}\n"
-                   + "Original-call delegate: unavailable";
-            return result + GetInliningWarning(target);
-        }
-
-        static string Apply(
-            (Guid ModuleVersionId, int MetadataToken) key,
-            MethodInfo target,
-            string signatureHash,
-            string canonicalName,
-            string declaration,
-            MethodInfo replacement,
-            byte[] assemblyBytes,
-            byte[]? pdbBytes,
-            string generatedTypeName,
-            string displayName)
-        {
-            lock (gate)
-            {
-                var targetCode = MonoJit.GetCode(target);
-                var replacementCode = MonoJit.GetCode(replacement);
-                active.TryGetValue(key, out var existing);
-                var plan = NativePatch.Plan(targetCode, replacementCode.Start, existing?.Patch.Original);
-                if (existing == null)
-                    NativePatch.Install(
-                        new(plan.Address, plan.Original, plan.Original, plan.Kind),
-                        plan
-                    );
-                else
-                    NativePatch.Install(existing.Patch, plan);
-
-                active[key] = new(
-                    key,
-                    replacement,
-                    plan,
-                    signatureHash,
-                    canonicalName,
-                    declaration,
-                    assemblyBytes,
-                    pdbBytes,
-                    generatedTypeName,
-                    displayName
-                );
-                RebuildActiveMethodNames();
-                var result = existing == null
-                    ? $"Detoured {canonicalName} with {displayName}."
-                    : $"Updated detour for {canonicalName} with {displayName}.";
-                return result + GetInliningWarning(target);
-            }
-        }
-
-        internal static string GetInliningWarning(MethodInfo target)
-        {
-            var implementation = target.GetMethodImplementationFlags();
-            if ((implementation & MethodImplAttributes.NoInlining) != 0)
-                return string.Empty;
-
-            var aggressive = (implementation & MethodImplAttributes.AggressiveInlining) != 0;
-            var triviallyInlineable = target.GetMethodBody()?.GetILAsByteArray() is { Length: <= 16 };
-            if (!aggressive && !triviallyInlineable)
-                return string.Empty;
-
-            return "\nWarning: this method may be inlined; already-compiled direct calls can bypass the detour.";
-        }
-
-        static string Restore(
-            (Guid ModuleVersionId, int MetadataToken) key,
-            string canonicalName)
-        {
-            lock (gate)
-            {
-                if (!active.TryGetValue(key, out var detour))
-                    return $"No detour is applied to {canonicalName} in the current domain lifetime.";
-                NativePatch.Restore(detour.Patch);
-                active.Remove(key);
-                RebuildActiveMethodNames();
-                return $"Restored the original implementation of {canonicalName}.";
-            }
-        }
-
         static void RebuildActiveMethodNames()
         {
             if (active.Count == 0)
@@ -248,56 +150,6 @@ namespace Conduit
 
             Array.Sort(names, StringComparer.Ordinal);
             activeMethodNames = names;
-        }
-
-        static MethodInfo LoadReplacement(
-            byte[]? assemblyBytes,
-            byte[]? pdbBytes,
-            string? generatedTypeName)
-        {
-            if (assemblyBytes == null || string.IsNullOrWhiteSpace(generatedTypeName))
-                throw new InvalidOperationException("The MCP server did not provide a compiled detour assembly.");
-
-            var assembly = CompiledAssembly.Load(assemblyBytes, pdbBytes);
-
-            var type = assembly.GetType(generatedTypeName, throwOnError: true)
-                       ?? throw new TypeLoadException($"Generated detour type '{generatedTypeName}' was not found.");
-            var method = type.GetMethod("Replace", BindingFlags.Public | BindingFlags.Static)
-                         ?? throw new MissingMethodException(type.FullName, "Replace");
-            var accessProbe = type.GetMethod("AccessProbe", BindingFlags.Public | BindingFlags.Static)
-                              ?? throw new MissingMethodException(type.FullName, "AccessProbe");
-            // validate Mono's private-access flag before a native entry point can be changed.
-            MonoAssemblyAccess.EnablePrivateAccess(assembly);
-            var probeValue = accessProbe.Invoke(null, null);
-            if (!Equals(probeValue, DetourAccessProbe.ExpectedValue))
-                throw new MethodAccessException("The generated detour assembly failed its private-access probe.");
-            return method;
-        }
-
-        static MethodInfo ResolveTarget(Guid moduleVersionId, int metadataToken)
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            foreach (var module in assembly.GetModules())
-            {
-                if (module.ModuleVersionId != moduleVersionId)
-                    continue;
-                try
-                {
-                    return module.ResolveMethod(metadataToken) as MethodInfo
-                           ?? throw new NotSupportedException("The selected metadata token is not a method.");
-                }
-                catch (ArgumentException exception)
-                {
-                    throw new InvalidOperationException(
-                        "The target metadata changed after compilation; run detour again.",
-                        exception
-                    );
-                }
-            }
-
-            throw new InvalidOperationException(
-                $"Loaded target module '{moduleVersionId:N}' was not found; scripts may have recompiled."
-            );
         }
 
         static ActiveDetour? GetActive((Guid ModuleVersionId, int MetadataToken) key)
@@ -357,18 +209,5 @@ namespace Conduit
                     DisplayName = DisplayName,
                 };
         }
-    }
-
-    sealed class DetourSnapshot
-    {
-        internal string ModuleVersionId = string.Empty;
-        internal string MetadataToken = string.Empty;
-        internal string SignatureHash = string.Empty;
-        internal string CanonicalName = string.Empty;
-        internal string Declaration = string.Empty;
-        internal byte[] AssemblyBytes = Array.Empty<byte>();
-        internal byte[]? PdbBytes;
-        internal string GeneratedTypeName = string.Empty;
-        internal string DisplayName = string.Empty;
     }
 }

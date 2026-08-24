@@ -166,7 +166,7 @@ public sealed class DetourMetadataTests
         {
             var target = catalog.Resolve("DetourSignatureFixture." + methodName).Target
                          ?? throw new InvalidOperationException(methodName);
-            var source = DetourCompiler.BuildSource(
+            var source = DetourSourceBuilder.BuildSource(
                 target,
                 "Generated_" + methodName,
                 methodName + ".cs",
@@ -195,11 +195,11 @@ public sealed class DetourMetadataTests
     [Test]
     public async Task ProbeBodiesReturnWithoutThrowingWhenTheSignatureAllowsIt()
     {
-        await Assert.That(DetourCompiler.BuildProbeBody(new("void", "void")))
+        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("void", "void")))
             .IsEqualTo("return;");
-        await Assert.That(DetourCompiler.BuildProbeBody(new("int", "int")))
+        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("int", "int")))
             .IsEqualTo("return default;");
-        await Assert.That(DetourCompiler.BuildProbeBody(new("int", "int", IsByRef: true)))
+        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("int", "int", IsByRef: true)))
             .Contains("NotSupportedException");
     }
 

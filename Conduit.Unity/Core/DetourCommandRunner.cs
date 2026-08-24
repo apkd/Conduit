@@ -7,7 +7,7 @@ namespace Conduit
     /// <summary>Executes a validated detour command in either Unity target.</summary>
     static class DetourCommandRunner
     {
-        public static BridgeCommandResult Execute(
+        internal static BridgeCommandResult Execute(
             string[] args,
             BridgeArtifact[] artifacts,
             string? generatedTypeName,

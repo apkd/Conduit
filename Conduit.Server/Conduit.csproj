@@ -41,9 +41,11 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="..\Conduit.Unity\Core\BridgeContract.cs" Link="Bridge\BridgeContract.cs"/>
-        <Compile Include="..\Conduit.Unity\Core\BridgeExceptionFormatter.cs" Link="Bridge\BridgeExceptionFormatter.cs"/>
-        <Compile Include="..\Conduit.Unity\Core\BridgeStringBuilderPool.cs" Link="Bridge\BridgeStringBuilderPool.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\Bridge\Contracts\*.cs" Link="Bridge\Contracts\%(Filename)%(Extension)"/>
+        <Compile Include="..\Conduit.Unity\Core\Bridge\BridgeEndpointNaming.cs" Link="Bridge\BridgeEndpointNaming.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\Bridge\BridgeExceptionFormatter.cs" Link="Bridge\BridgeExceptionFormatter.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\Bridge\BridgeStringBuilderExtensions.cs" Link="Bridge\BridgeStringBuilderExtensions.cs"/>
+        <Compile Include="..\Conduit.Unity\Core\Bridge\BridgeStringBuilderPool.cs" Link="Bridge\BridgeStringBuilderPool.cs"/>
     </ItemGroup>
 
     <ItemGroup>

@@ -8,7 +8,7 @@ public sealed class ToolExecutionResultSerializationTests
     [Test]
     public async Task NormalizeUserFacingTextCanonicalizesCarriageReturns()
     {
-        var normalized = ConduitUtility.NormalizeUserFacingText("a\r\nb\rc");
+        var normalized = ConduitText.NormalizeUserFacingText("a\r\nb\rc");
 
         await Assert.That(normalized).IsEqualTo("a\nb\nc");
     }
@@ -16,7 +16,9 @@ public sealed class ToolExecutionResultSerializationTests
     [Test]
     public async Task NormalizeUserFacingTextPreservesJsonQuotes()
     {
-        var normalized = ConduitUtility.NormalizeUserFacingText("\"dependencies\": {\r\n  \"dev.tryfinally.conduit\": \"url\",");
+        var normalized = ConduitText.NormalizeUserFacingText(
+            "\"dependencies\": {\r\n  \"dev.tryfinally.conduit\": \"url\","
+        );
 
         await Assert.That(normalized).IsEqualTo("\"dependencies\": {\n  \"dev.tryfinally.conduit\": \"url\",");
     }
@@ -95,7 +97,7 @@ public sealed class ToolExecutionResultSerializationTests
     [Test]
     public async Task NormalizePayloadTextCanonicalizesLineEndingsWithoutReplacingQuotes()
     {
-        var normalized = ConduitUtility.NormalizePayloadText("{\"a\":\"b\"}\r\n{\"c\":\"d\"}");
+        var normalized = ConduitText.NormalizePayloadText("{\"a\":\"b\"}\r\n{\"c\":\"d\"}");
 
         await Assert.That(normalized).IsEqualTo("{\"a\":\"b\"}\n{\"c\":\"d\"}");
     }

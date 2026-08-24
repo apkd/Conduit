@@ -1,0 +1,260 @@
+using Cysharp.Text;
+
+namespace Conduit;
+
+static class UnityProjectStatusFormatter
+{
+    public static string FormatPingFailure(
+        UnityProjectEnvironmentSnapshot snapshot,
+        ToolExecutionResult? bridgeResult,
+        UnityEditorProcessRuntimeInfo? processRuntime,
+        CompilationDiagnosticSummary compilationDiagnostics,
+        string? editorLogPath
+    )
+    {
+        var builder = ZString.CreateStringBuilder();
+        try
+        {
+            builder.Append("Project: ");
+            builder.AppendLine(snapshot.ProjectPath);
+            if (!snapshot.IsUnityProject)
+            {
+                builder.Append("Diagnostic: ");
+                builder.AppendLine(UnityProjectOfflinePreflight.InvalidProjectDiagnostic);
+                return ConduitText.FinishText(ref builder);
+            }
+
+            builder.Append("Bridge: ");
+            builder.AppendLine(FormatBridgeStatus(bridgeResult));
+            AppendProcessRuntime(ref builder, processRuntime, snapshot.MatchedProcess?.ProcessId);
+            AppendEditorLogPath(ref builder, editorLogPath);
+            builder.Append("Unity editor processes running: ");
+            builder.AppendLine(snapshot.RunningUnityProcessCount);
+            if (!string.IsNullOrWhiteSpace(bridgeResult?.Diagnostic))
+            {
+                builder.Append("Diagnostic: ");
+                builder.AppendLine(bridgeResult.Diagnostic);
+            }
+
+            AppendCompilationDiagnosticsFooter(ref builder, compilationDiagnostics);
+            return ConduitText.FinishText(ref builder);
+        }
+        finally
+        {
+            builder.Dispose();
+        }
+    }
+
+    public static string FormatPingReachable(
+        UnityProjectEnvironmentSnapshot snapshot,
+        BridgeProjectHandshake handshake,
+        UnityEditorProcessRuntimeInfo? processRuntime,
+        CompilationDiagnosticSummary compilationDiagnostics,
+        string? editorLogPath,
+        string diagnostic
+    )
+    {
+        var builder = ZString.CreateStringBuilder();
+        try
+        {
+            builder.Append("Project: ");
+            builder.AppendLine(snapshot.ProjectPath);
+            if (!snapshot.IsUnityProject)
+            {
+                builder.Append("Diagnostic: ");
+                builder.AppendLine(UnityProjectOfflinePreflight.InvalidProjectDiagnostic);
+            }
+
+            builder.AppendLine("Bridge: reachable");
+            if (!string.IsNullOrWhiteSpace(handshake.UnityVersion))
+            {
+                builder.Append("Unity: ");
+                builder.AppendLine(handshake.UnityVersion);
+            }
+
+            AppendProcessRuntime(ref builder, processRuntime, handshake.EditorProcessId > 0 ? handshake.EditorProcessId : snapshot.MatchedProcess?.ProcessId);
+            AppendEditorLogPath(ref builder, editorLogPath);
+            builder.Append("Unity editor processes running: ");
+            builder.AppendLine(snapshot.RunningUnityProcessCount);
+            if (!string.IsNullOrWhiteSpace(diagnostic))
+            {
+                builder.Append("Diagnostic: ");
+                builder.AppendLine(diagnostic);
+            }
+
+            AppendCompilationDiagnosticsFooter(ref builder, compilationDiagnostics);
+            return ConduitText.FinishText(ref builder);
+        }
+        finally
+        {
+            builder.Dispose();
+        }
+    }
+
+    public static string FormatPingReport(UnityPingSnapshot pingSnapshot, string? fallbackEditorLogPath = null)
+    {
+        var builder = ZString.CreateStringBuilder();
+        try
+        {
+            builder.Append("Unity ");
+            builder.Append(pingSnapshot.UnityVersion);
+            if (!string.IsNullOrWhiteSpace(pingSnapshot.Platform))
+            {
+                builder.Append(" (");
+                builder.Append(pingSnapshot.Platform);
+                builder.Append(')');
+            }
+
+            builder.AppendLine();
+            AppendCachedRuntime(ref builder, pingSnapshot);
+            AppendEditorLogPath(
+                ref builder,
+                string.IsNullOrWhiteSpace(pingSnapshot.EditorLogPath) ? fallbackEditorLogPath : pingSnapshot.EditorLogPath
+            );
+            AppendProfilerStatus(ref builder, pingSnapshot);
+            AppendRecordingStatus(ref builder, pingSnapshot);
+            AppendActiveDetours(ref builder, pingSnapshot);
+
+            builder.AppendLine("Scenes:");
+            if (pingSnapshot.Scenes.Length == 0)
+                builder.AppendLine("- none");
+            else
+                foreach (var scene in pingSnapshot.Scenes)
+                {
+                    builder.Append("- ");
+                    builder.AppendLine(scene);
+                }
+
+            if (pingSnapshot.DirtyScenes.Length > 0)
+            {
+                builder.AppendLine("Dirty Scenes:");
+                foreach (var dirtyScene in pingSnapshot.DirtyScenes)
+                {
+                    builder.Append("- ");
+                    builder.AppendLine(dirtyScene);
+                }
+            }
+
+            builder.Append("Status: ");
+            builder.AppendLine(BuildStatusLine(pingSnapshot));
+            return ConduitText.FinishText(ref builder);
+        }
+        finally
+        {
+            builder.Dispose();
+        }
+    }
+
+    static string FormatBridgeStatus(ToolExecutionResult? bridgeResult) =>
+        bridgeResult?.Outcome switch
+        {
+            null                     => "not attempted",
+            ToolOutcome.NotConnected => "unreachable",
+            ToolOutcome.Timeout      => "timed out",
+            _                        => bridgeResult.Outcome,
+        };
+
+    static void AppendProcessRuntime(ref Utf16ValueStringBuilder builder, UnityEditorProcessRuntimeInfo? processRuntime, int? fallbackProcessId)
+    {
+        var processId = processRuntime?.ProcessId ?? fallbackProcessId;
+        if (processId is > 0)
+        {
+            builder.Append("PID: ");
+            builder.AppendLine(processId.Value);
+        }
+
+        if (processRuntime is { } runtime)
+        {
+            builder.Append("Uptime: ");
+            builder.AppendLine(ConduitText.FormatDuration(DateTimeOffset.UtcNow - runtime.StartedAtUtc));
+        }
+    }
+
+    static void AppendCachedRuntime(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (pingSnapshot.EditorProcessId > 0)
+        {
+            builder.Append("PID: ");
+            builder.AppendLine(pingSnapshot.EditorProcessId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(pingSnapshot.Uptime))
+        {
+            builder.Append("Uptime: ");
+            builder.AppendLine(pingSnapshot.Uptime);
+        }
+    }
+
+    static void AppendEditorLogPath(ref Utf16ValueStringBuilder builder, string? editorLogPath)
+    {
+        if (string.IsNullOrWhiteSpace(editorLogPath))
+            return;
+
+        builder.Append("Editor log: ");
+        builder.AppendLine(editorLogPath);
+    }
+
+    static void AppendProfilerStatus(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (string.IsNullOrWhiteSpace(pingSnapshot.ProfilerStatusLine))
+            return;
+
+        builder.AppendLine(pingSnapshot.ProfilerStatusLine);
+    }
+
+    static void AppendRecordingStatus(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (string.IsNullOrWhiteSpace(pingSnapshot.RecordingStatusLine))
+            return;
+
+        builder.AppendLine(pingSnapshot.RecordingStatusLine);
+    }
+
+    static void AppendActiveDetours(ref Utf16ValueStringBuilder builder, UnityPingSnapshot pingSnapshot)
+    {
+        if (pingSnapshot.ActiveDetourCount == 0 && pingSnapshot.ActiveDetours.Length == 0)
+            return;
+
+        builder.Append("Active detours: ");
+        builder.AppendLine(Math.Max(pingSnapshot.ActiveDetourCount, pingSnapshot.ActiveDetours.Length));
+        foreach (var method in pingSnapshot.ActiveDetours)
+        {
+            builder.Append("- ");
+            builder.AppendLine(method);
+        }
+    }
+
+    static string BuildStatusLine(UnityPingSnapshot pingSnapshot)
+    {
+        var commandKind = BridgeCommandKinds.Parse(pingSnapshot.ActiveCommandType);
+        var isTestRunActive = BridgeCommandKinds.IsTest(commandKind) || pingSnapshot.IsTestRunnerActive;
+        var detail = isTestRunActive
+            ? FormatTestRunDetail(pingSnapshot.ActiveTestMode)
+            : pingSnapshot.IsCompiling
+                ? "compiling..."
+                : pingSnapshot.IsUpdating || BridgeCommandKinds.IsAssetImport(commandKind)
+                    ? "importing assets..."
+                    : null;
+
+        var mode = string.IsNullOrWhiteSpace(pingSnapshot.EditorMode) ? "edit mode" : pingSnapshot.EditorMode;
+        if (!pingSnapshot.IsPaused)
+            return detail is null ? mode : $"{mode} ({detail})";
+
+        return detail is null ? $"{mode} (paused)" : $"{mode} (paused, {detail})";
+    }
+
+    static string FormatTestRunDetail(string? activeTestMode)
+        => string.IsNullOrWhiteSpace(activeTestMode)
+            ? "running tests..."
+            : $"running {activeTestMode} tests...";
+
+    static void AppendCompilationDiagnosticsFooter(ref Utf16ValueStringBuilder builder, CompilationDiagnosticSummary diagnostics)
+    {
+        var footer = diagnostics.ErrorText ?? diagnostics.WarningText;
+        if (string.IsNullOrWhiteSpace(footer))
+            return;
+
+        builder.AppendLine();
+        builder.AppendLine(footer);
+    }
+}

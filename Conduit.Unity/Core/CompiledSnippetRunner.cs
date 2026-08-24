@@ -14,7 +14,7 @@ namespace Conduit
         static readonly Dictionary<string, (MethodInfo Method, string DisplayName)> snippets
             = new(StringComparer.OrdinalIgnoreCase);
 
-        public static async Task<BridgeCommandResult> ExecuteAsync(
+        internal static async Task<BridgeCommandResult> ExecuteAsync(
             BridgeArtifact[] artifacts,
             string? typeName,
             string? requestedDisplayName,

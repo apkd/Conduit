@@ -21,20 +21,23 @@ namespace Conduit
             ),
         };
         static string? cachedManifest;
+        static string? cachedPreservedManifest;
         static Dictionary<string, System.Reflection.Assembly>? cachedAssembliesById;
         static int manifestGeneration;
 
         static AssemblyReferences()
             => AppDomain.CurrentDomain.AssemblyLoad += static (_, args) => InvalidateManifest(args.LoadedAssembly);
 
-        public static BridgeCommandResult GetManifest()
+        internal static BridgeCommandResult GetManifest(bool preserveSnippets = false)
         {
             try
             {
                 lock (manifestGate)
                 {
                     EnsureManifest();
-                    return BridgeCommandResult.Success(cachedManifest);
+                    return BridgeCommandResult.Success(
+                        preserveSnippets ? cachedPreservedManifest : cachedManifest
+                    );
                 }
             }
             catch (Exception exception)
@@ -48,16 +51,21 @@ namespace Conduit
             while (cachedManifest == null)
             {
                 var generation = manifestGeneration;
-                var manifest = BuildManifest(out var assembliesById);
+                var manifest = BuildManifest(
+                    out var preservedManifest,
+                    out var assembliesById
+                );
                 if (generation != manifestGeneration)
                     continue;
 
                 cachedManifest = manifest;
+                cachedPreservedManifest = preservedManifest;
                 cachedAssembliesById = assembliesById;
             }
         }
 
         static string BuildManifest(
+            out string preservedManifest,
             out Dictionary<string, System.Reflection.Assembly> assembliesById)
         {
             var assemblies = AppDomain.CurrentDomain.GetAssemblies();
@@ -99,9 +107,14 @@ namespace Conduit
                 right.assembly_name,
                 StringComparison.Ordinal
             ));
-            return JsonUtility.ToJson(
-                new BridgeAssemblyReferenceManifest { references = references.ToArray() }
-            );
+            var manifest = new BridgeAssemblyReferenceManifest
+            {
+                references = references.ToArray(),
+            };
+            var transientManifest = JsonUtility.ToJson(manifest);
+            manifest.preserve_snippets = true;
+            preservedManifest = JsonUtility.ToJson(manifest);
+            return transientManifest;
         }
 
         static void InvalidateManifest(System.Reflection.Assembly assembly)
@@ -120,12 +133,13 @@ namespace Conduit
             lock (manifestGate)
             {
                 cachedManifest = null;
+                cachedPreservedManifest = null;
                 cachedAssembliesById = null;
                 manifestGeneration++;
             }
         }
 
-        public static BridgeCommandResult GetAssemblyBlobs(string[] referenceIds)
+        internal static BridgeCommandResult GetAssemblyBlobs(string[] referenceIds)
         {
             if (referenceIds.Length == 0)
                 return new()
