@@ -2,6 +2,8 @@ namespace Conduit;
 
 public sealed partial class UnityBridgeClient
 {
+    static readonly TimeSpan processExitConfirmationWindow = TimeSpan.FromMilliseconds(250);
+
     internal async Task<BridgeClientResult> ExecuteIdempotentCommandAsync(
         string projectPath,
         string requestId,
@@ -90,7 +92,7 @@ public sealed partial class UnityBridgeClient
 
             var startOutcome = await startWaitTask;
             if (startOutcome.Failure is { } startFailure)
-                return startFailure;
+                return await PreferProcessExitAsync(startFailure, processExitTask);
 
             if (startOutcome.FinalResult is { } earlyResult)
                 return earlyResult;
@@ -103,7 +105,7 @@ public sealed partial class UnityBridgeClient
                     return processFailure;
             }
 
-            return await waitForResultTask;
+            return await PreferProcessExitAsync(await waitForResultTask, processExitTask);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -164,6 +166,27 @@ public sealed partial class UnityBridgeClient
 
             using var sendCts = new CancellationTokenSource(commandCancellationSendTimeout);
             await connection.SendCancelCommandAsync(requestId, commandType, sendCts.Token);
+        }
+    }
+
+    internal static async Task<BridgeClientResult> PreferProcessExitAsync(
+        BridgeClientResult execution,
+        Task<BridgeClientResult?>? processExitTask
+    )
+    {
+        if (processExitTask is null
+            || execution.FailureKind is not (BridgeRuntimeFailureKind.StartAckDisconnected
+                or BridgeRuntimeFailureKind.ResultDisconnected))
+            return execution;
+
+        // pipe EOF can precede the OS process-exit signal; briefly let the stronger diagnosis win.
+        try
+        {
+            return await processExitTask.WaitAsync(processExitConfirmationWindow) ?? execution;
+        }
+        catch (TimeoutException)
+        {
+            return execution;
         }
     }
 }

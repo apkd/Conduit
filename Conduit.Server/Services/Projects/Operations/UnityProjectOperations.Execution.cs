@@ -191,13 +191,16 @@ public sealed partial class UnityProjectOperations
             );
 
             await ApplyHandshakeAsync(retriedExecution);
-            return retriedExecution;
+            return SelectReplayResult(execution, retriedExecution);
         }
 
         async Task ApplyHandshakeAsync(BridgeClientResult execution)
         {
             if (execution.Handshake is not { } handshake)
+            {
+                reachable = false;
                 return;
+            }
 
             reachable = execution.FailureKind != BridgeRuntimeFailureKind.ProcessExited;
             monitoredProcessId = handshake.EditorProcessId > 0 ? handshake.EditorProcessId : monitoredProcessId;
@@ -275,4 +278,11 @@ public sealed partial class UnityProjectOperations
             or BridgeRuntimeFailureKind.StartAckTimedOut
             or BridgeRuntimeFailureKind.ResultDisconnected
             or BridgeRuntimeFailureKind.ResultTimedOut;
+
+    internal static BridgeClientResult SelectReplayResult(
+        BridgeClientResult execution,
+        BridgeClientResult retriedExecution
+    ) => retriedExecution is { Handshake: null, FailureKind: BridgeRuntimeFailureKind.ConnectTimedOut }
+        ? execution
+        : retriedExecution;
 }

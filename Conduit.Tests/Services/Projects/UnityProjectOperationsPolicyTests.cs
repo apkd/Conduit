@@ -25,6 +25,37 @@ public sealed class UnityProjectOperationsPolicyTests
     }
 
     [Test]
+    public async Task FailedReconnectPreservesTheInFlightCommandFailure()
+    {
+        var interrupted = Failure(ResultDisconnected, commandSent: true);
+        var reconnectFailure = BridgeClientResult.Failure(
+            null,
+            ConnectTimedOut,
+            "reconnect failed",
+            commandSent: false
+        );
+
+        await Assert.That(
+            UnityProjectOperations.SelectReplayResult(interrupted, reconnectFailure)
+        ).IsSameReferenceAs(interrupted);
+    }
+
+    [Test]
+    public async Task SuccessfulReplaySupersedesTheInFlightCommandFailure()
+    {
+        var interrupted = Failure(ResultDisconnected, commandSent: true);
+        var replayResult = BridgeClientResult.Success(
+            handshake,
+            ToolExecutionResult.Success(string.Empty),
+            commandSent: true
+        );
+
+        await Assert.That(
+            UnityProjectOperations.SelectReplayResult(interrupted, replayResult)
+        ).IsSameReferenceAs(replayResult);
+    }
+
+    [Test]
     public async Task ReachableStatusRequiresMoreThanAHandshake()
     {
         await Assert.That(

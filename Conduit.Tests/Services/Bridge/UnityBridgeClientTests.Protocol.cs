@@ -9,6 +9,34 @@ namespace Conduit;
 public sealed partial class UnityBridgeClientTests
 {
     [Test]
+    public async Task ProcessExitSupersedesAConcurrentResultDisconnect()
+    {
+        var disconnected = BridgeClientResult.Failure(
+            new(),
+            BridgeRuntimeFailureKind.ResultDisconnected,
+            "disconnected",
+            commandSent: true
+        );
+        var processExited = BridgeClientResult.Failure(
+            new(),
+            BridgeRuntimeFailureKind.ProcessExited,
+            "process exited",
+            commandSent: true
+        );
+        var processExit = new TaskCompletionSource<BridgeClientResult?>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+
+        var resolution = UnityBridgeClient.PreferProcessExitAsync(
+            disconnected,
+            processExit.Task
+        );
+        processExit.SetResult(processExited);
+
+        await Assert.That(await resolution).IsSameReferenceAs(processExited);
+    }
+
+    [Test]
     public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
         await AssertProtocolMismatchAsync(
             BridgeProtocol.Version - 1,
