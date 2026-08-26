@@ -74,6 +74,17 @@ namespace Conduit
             EditorGUILayout.HelpBox(LowResolutionPlayModeDescription, MessageType.None);
 
             EditorGUILayout.Space();
+            EditorGUI.BeginChangeCheck();
+            bool muteAudioInPlayMode = EditorGUILayout.ToggleLeft(
+                "Mute audio in play mode",
+                settings.MuteAudioInPlayMode
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetMuteAudioInPlayMode(muteAudioInPlayMode);
+
+            EditorGUILayout.HelpBox(MuteAudioInPlayModeDescription, MessageType.None);
+
+            EditorGUILayout.Space();
             EditorGUILayout.BeginHorizontal();
             EditorGUI.BeginChangeCheck();
             bool trackToolUsage = EditorGUILayout.ToggleLeft(

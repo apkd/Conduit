@@ -17,6 +17,9 @@ namespace Conduit
         const string LowResolutionPlayModeDescription =
             "Lowers the game view resolution to 480x320 when executing play mode commands. " +
             "This helps preserve GPU resources. Useful when running multiple Unity instances at the same time.";
+        const string MuteAudioInPlayModeDescription =
+            "Mutes Game View audio when executing play mode commands. " +
+            "The previous mute setting is restored after returning to edit mode.";
         const string LocalToolUsageDescription =
             "Count the number of times each MCP tool was used and the average call duration. " +
             "This data is stored locally and never sent anywhere. Useful for analyzing and " +
@@ -82,6 +85,9 @@ namespace Conduit
                     "Game View",
                     "Resolution",
                     "GPU",
+                    "Audio",
+                    "Mute",
+                    "Sound",
                     "Play Mode",
                     "Tests",
                     "Usage",

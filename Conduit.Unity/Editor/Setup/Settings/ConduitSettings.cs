@@ -11,12 +11,14 @@ namespace Conduit
     {
         [SerializeField] bool unfocusedGameView;
         [SerializeField] bool lowResolutionPlayMode;
+        [SerializeField] bool muteAudioInPlayMode;
         [SerializeField] string selectedEditorId = string.Empty;
         [SerializeField] string serverExecutablePath = string.Empty;
         [SerializeField] SetupConfigurationLocation configurationLocation;
 
         internal bool UnfocusedGameView => unfocusedGameView;
         internal bool LowResolutionPlayMode => lowResolutionPlayMode;
+        internal bool MuteAudioInPlayMode => muteAudioInPlayMode;
         internal string SelectedEditorId => selectedEditorId;
         internal string ServerExecutablePath => serverExecutablePath;
         internal SetupConfigurationLocation ConfigurationLocation
@@ -37,6 +39,15 @@ namespace Conduit
                 return;
 
             lowResolutionPlayMode = value;
+            Save(true);
+        }
+
+        internal void SetMuteAudioInPlayMode(bool value)
+        {
+            if (muteAudioInPlayMode == value)
+                return;
+
+            muteAudioInPlayMode = value;
             Save(true);
         }
 

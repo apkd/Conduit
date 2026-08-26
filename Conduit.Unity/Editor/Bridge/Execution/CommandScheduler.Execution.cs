@@ -272,6 +272,7 @@ namespace Conduit
             OperationPersistence.ClearPendingTestCompletion();
             ConduitGameViewFocus.Restore();
             ConduitGameViewResolution.RestoreIfInEditMode();
+            ConduitGameViewAudio.RestoreIfInEditMode();
         }
 
         void CheckpointTestCompletion(BridgeCommandResult result)

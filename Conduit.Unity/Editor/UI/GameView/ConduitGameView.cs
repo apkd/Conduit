@@ -27,6 +27,7 @@ namespace Conduit
         {
             ConduitGameViewFocus.Prepare();
             ConduitGameViewResolution.Prepare();
+            ConduitGameViewAudio.Prepare();
         }
 
         internal static bool IsOtherWindowMaximized()

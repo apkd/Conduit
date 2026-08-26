@@ -361,6 +361,32 @@ public sealed partial class ConduitMcpToolsTests
     }
 
     [Test]
+    public void GameViewAudio_PrepareAndRestorePreservesMuteState()
+    {
+        bool originalMute = EditorUtility.audioMasterMute;
+        try
+        {
+            ConduitGameViewAudio.Restore();
+            EditorUtility.audioMasterMute = false;
+
+            ConduitGameViewAudio.Prepare(true);
+
+            Assert.That(ConduitGameViewAudio.IsPrepared, Is.True);
+            Assert.That(EditorUtility.audioMasterMute, Is.True);
+
+            ConduitGameViewAudio.Restore();
+
+            Assert.That(ConduitGameViewAudio.IsPrepared, Is.False);
+            Assert.That(EditorUtility.audioMasterMute, Is.False);
+        }
+        finally
+        {
+            ConduitGameViewAudio.Restore();
+            EditorUtility.audioMasterMute = originalMute;
+        }
+    }
+
+    [Test]
     public void PlayModePersistedOperation_RestoresCommand()
     {
         var pendingOperation = new PendingOperationState
