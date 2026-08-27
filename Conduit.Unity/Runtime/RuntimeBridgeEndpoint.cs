@@ -26,6 +26,7 @@ namespace Conduit.Runtime
         readonly string descriptorJsonSuffix;
         readonly string temporaryDescriptorPath;
         readonly bool useFifo;
+        readonly bool readFifoSynchronously;
         int nextSessionId;
 
         internal RuntimeBridgeEndpoint()
@@ -43,6 +44,7 @@ namespace Conduit.Runtime
             var handoffToken = Environment.GetEnvironmentVariable("CONDUIT_HANDOFF_TOKEN") ?? string.Empty;
             var now = DateTimeOffset.UtcNow.ToString("O");
             useFifo = platform != RuntimePlatform.WindowsPlayer || wine;
+            readFifoSynchronously = wine; // wine can consume FIFO bytes without completing overlapped reads
             var root = RuntimeIpcPaths.GetRoot(wine);
             endpointDirectory = Path.Combine(root, "endpoints", $"player-{processId}-{sessionId}");
             descriptorPath = Path.Combine(endpointDirectory, "endpoint.json");

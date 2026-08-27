@@ -47,7 +47,9 @@ namespace Conduit.Runtime
                                 FileAccess.Read,
                                 FileShare.ReadWrite,
                                 4096,
-                                FileOptions.Asynchronous
+                                readFifoSynchronously
+                                    ? FileOptions.None
+                                    : FileOptions.Asynchronous
                             );
                             output = new(
                                 Path.Combine(clientDirectory, "from-unity.fifo"),
@@ -62,7 +64,12 @@ namespace Conduit.Runtime
                                 string.Empty
                             );
                             _ = RunClientAsync(
-                                new RuntimeDuplexConnection(input, output, static () => true),
+                                new RuntimeDuplexConnection(
+                                    input,
+                                    output,
+                                    static () => true,
+                                    readSynchronously: readFifoSynchronously
+                                ),
                                 ct
                             );
                             input = null;

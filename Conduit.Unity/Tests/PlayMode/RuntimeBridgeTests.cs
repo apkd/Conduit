@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Conduit;
@@ -15,6 +16,23 @@ using UnityEngine.TestTools;
 
 public sealed class RuntimeBridgeTests
 {
+    [Test]
+    public async Task SynchronousRuntimeReaderAvoidsAsyncStreamIo()
+    {
+        using var input = new SyncOnlyStream(Encoding.UTF8.GetBytes("first\nsecond\n"));
+        using var output = new MemoryStream();
+        using var connection = new RuntimeDuplexConnection(
+            input,
+            output,
+            static () => true,
+            readSynchronously: true
+        );
+
+        Assert.That(await connection.Reader.ReadLineAsync(), Is.EqualTo("first"));
+        Assert.That(await connection.Reader.ReadLineAsync(), Is.EqualTo("second"));
+        Assert.That(await connection.Reader.ReadLineAsync(), Is.Null);
+    }
+
     [TestCase(@"Y:\host", @"Z:\legacy", @"Y:\host")]
     [TestCase(null, @"Z:\legacy", @"Z:\legacy")]
     public void WineIpcRootUsesHostHome(string? hostHome, string legacyHome, string expectedHome)
@@ -433,5 +451,17 @@ public sealed class RuntimeBridgeTests
         {
             UnityEngine.Object.DestroyImmediate(gameObject);
         }
+    }
+
+    sealed class SyncOnlyStream : MemoryStream
+    {
+        internal SyncOnlyStream(byte[] buffer) : base(buffer) { }
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Asynchronous reads are disabled for this stream.");
     }
 }
