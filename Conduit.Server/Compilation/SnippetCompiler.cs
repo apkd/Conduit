@@ -61,17 +61,18 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         {
             var source = snippet;
             string? requestedFileName = null;
+            CachedScript? script = null;
             if (TryParseScriptFileName(snippet, out var named))
             {
-                if (cache.ByName.TryGetValue(named, out var namedCompilation))
-                    return SnippetCompilation.Success(namedCompilation);
-
-                source = await LoadScriptSourceAsync(cache, snippetRoot, named, ct);
-                if (source is null)
+                if (await LoadScriptAsync(cache, snippetRoot, named, ct) is not { } loadedScript)
                     return SnippetCompilation.FromFailure(
                         CompileError($"Snippet '{snippet}' was not found in the current target session.")
                     );
+                if (loadedScript.ExecuteCodeCompilation is { } namedCompilation)
+                    return SnippetCompilation.Success(namedCompilation);
 
+                script = loadedScript;
+                source = script.Source;
                 requestedFileName = named;
             }
 
@@ -82,9 +83,10 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             var sourceFileName = requestedFileName ?? artifactId + ".cs";
             var typeName = "SnippetHost_" + artifactId;
             var fullTypeName = $"{SnippetSourceBuilder.Namespace}.{typeName}";
+            script ??= new(source);
             if (requestedFileName is null)
             {
-                cache.SourcesByName[sourceFileName] = source;
+                cache.ScriptsByName[sourceFileName] = script;
                 if (snippetRoot is not null)
                 {
                     Directory.CreateDirectory(snippetRoot);
@@ -251,8 +253,9 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 ),
                 warnings.Length == 0 ? null : warnings
             );
-            cache.BySource[source] = compiled;
-            cache.ByName[sourceFileName] = compiled;
+            if (requestedFileName is null)
+                cache.BySource[source] = compiled;
+            script.ExecuteCodeCompilation = compiled;
             return SnippetCompilation.Success(compiled);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -323,10 +326,16 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         internal SemaphoreSlim Gate { get; } = new(1, 1);
         internal int NextArtifactId { get; set; } = nextArtifactId;
         internal Dictionary<string, CompiledSnippet> BySource { get; } = new(StringComparer.Ordinal);
-        internal Dictionary<string, CompiledSnippet> ByName { get; } = new(StringComparer.Ordinal);
-        // raw sources remain available when editor files cannot be shared with a player target.
-        internal Dictionary<string, string> SourcesByName { get; } = new(StringComparer.Ordinal);
-        internal Dictionary<string, SourceArtifact> DetoursByName { get; } = new(StringComparer.Ordinal);
+        // player targets cannot read project files, so generated scripts live here for the Unity session.
+        // editor scripts keep each tool's cached result tied to the source text that produced it.
+        internal Dictionary<string, CachedScript> ScriptsByName { get; } = new(StringComparer.Ordinal);
+    }
+
+    sealed class CachedScript(string source)
+    {
+        internal string Source { get; } = source;
+        internal CompiledSnippet? ExecuteCodeCompilation { get; set; }
+        internal SourceArtifact? DetourArtifact { get; set; }
     }
 
     readonly record struct ReferenceSetResult(

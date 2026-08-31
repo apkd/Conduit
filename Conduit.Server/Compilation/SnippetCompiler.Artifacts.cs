@@ -35,33 +35,33 @@ public sealed partial class SnippetCompiler
         {
             if (TryParseScriptFileName(source, out var fileName))
             {
-                if (cache.DetoursByName.TryGetValue(fileName, out var cachedArtifact))
-                    return SourceArtifactResult.Succeeded(cachedArtifact);
-
-                var loadedSource = await LoadScriptSourceAsync(cache, snippetRoot, fileName, ct);
-                if (loadedSource is null)
+                if (await LoadScriptAsync(cache, snippetRoot, fileName, ct) is not { } script)
                     return SourceArtifactResult.Failed(CompileError($"Detour source '{source}' was not found."));
+                if (script.DetourArtifact is { } cachedArtifact)
+                    return SourceArtifactResult.Succeeded(cachedArtifact);
 
                 var artifact = new SourceArtifact(
                     GetNextArtifactId(cache, snippetRoot),
                     fileName,
-                    loadedSource
+                    script.Source
                 );
-                cache.DetoursByName[fileName] = artifact;
+                script.DetourArtifact = artifact;
                 return SourceArtifactResult.Succeeded(artifact);
             }
 
             var artifactId = GetNextArtifactId(cache, snippetRoot);
             var sourceFileName = artifactId + ".cs";
-            cache.SourcesByName[sourceFileName] = source;
+            var sourceArtifact = new SourceArtifact(artifactId, sourceFileName, source);
+            cache.ScriptsByName[sourceFileName] = new(source)
+            {
+                DetourArtifact = sourceArtifact,
+            };
             if (snippetRoot is not null)
             {
                 Directory.CreateDirectory(snippetRoot);
                 await File.WriteAllTextAsync(Path.Combine(snippetRoot, sourceFileName), source, ct);
             }
 
-            var sourceArtifact = new SourceArtifact(artifactId, sourceFileName, source);
-            cache.DetoursByName[sourceFileName] = sourceArtifact;
             return SourceArtifactResult.Succeeded(sourceArtifact);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -87,22 +87,30 @@ public sealed partial class SnippetCompiler
                 GetSnippetDirectory(preserveSnippets)
             );
 
-    static async Task<string?> LoadScriptSourceAsync(
+    static async Task<CachedScript?> LoadScriptAsync(
         TargetCompilationCache cache,
         string? snippetRoot,
         string fileName,
         CancellationToken ct)
     {
-        if (cache.SourcesByName.TryGetValue(fileName, out var cached))
-            return cached;
+        // player targets do not expose project files that the server could check for edits.
+        if (snippetRoot is null)
+            return cache.ScriptsByName.GetValueOrDefault(fileName);
 
-        var path = snippetRoot is null ? null : Path.Combine(snippetRoot, fileName);
-        if (path is null || !File.Exists(path))
+        var path = Path.Combine(snippetRoot, fileName);
+        if (!File.Exists(path))
             return null;
 
+        // timestamps can miss quick same-size rewrites, so editor cache identity follows the source text.
         var source = await File.ReadAllTextAsync(path, ct);
-        cache.SourcesByName[fileName] = source;
-        return source;
+        if (cache.ScriptsByName.TryGetValue(fileName, out var cached))
+            if (cached.Source == source)
+                return cached;
+
+        // replacing the entry invalidates execute_code and detour together.
+        var script = new CachedScript(source);
+        cache.ScriptsByName[fileName] = script;
+        return script;
     }
 
     static string GetNextArtifactId(TargetCompilationCache cache, string? snippetRoot)

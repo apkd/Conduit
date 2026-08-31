@@ -384,7 +384,7 @@ public sealed partial class ConduitMcpEndToEndTests
 
     [Test]
     [Order(17)]
-    public async Task ScriptFilesSupportArbitraryNamesAndBothCodeTools()
+    public async Task ScriptFilesSupportArbitraryNamesAndEditsAcrossCodeTools()
     {
         const string methodName = "ConduitMcpEndToEndTests.DetourProbe";
         var marker = Guid.NewGuid().ToString("N");
@@ -410,6 +410,21 @@ public sealed partial class ConduitMcpEndToEndTests
             var customDetour = await CallDetourAsync(methodName, customFileName);
             AssertSuccessful(customDetour, "Detoured", methodName);
             Assert.That(DetourProbe(1), Is.EqualTo(303));
+            AssertSuccessful(
+                await CallDetourAsync(methodName, "restore"),
+                "Restored the original implementation"
+            );
+
+            // both tools must discard results derived from the first version of this shared file.
+            File.WriteAllText(customPath, $"return 304; // {marker}");
+            var editedExecution = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(("projectPath", projectPath), ("snippet", customFileName))
+            );
+            var editedDetour = await CallDetourAsync(methodName, customFileName);
+            AssertSuccessful(editedExecution, "304");
+            AssertSuccessful(editedDetour, "Detoured", methodName);
+            Assert.That(DetourProbe(1), Is.EqualTo(304));
             AssertSuccessful(
                 await CallDetourAsync(methodName, "restore"),
                 "Restored the original implementation"

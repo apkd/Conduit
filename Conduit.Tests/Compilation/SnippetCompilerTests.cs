@@ -159,6 +159,57 @@ public sealed class SnippetCompilerTests
     }
 
     [Test]
+    public async Task EditorDetourSourceFilenameReloadsChangedFile()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"conduit-script-cache-{Guid.NewGuid():N}"
+        );
+        var compiler = new SnippetCompiler(null!);
+        try
+        {
+            var first = await compiler.PrepareDetourArtifactAsync(
+                target: root,
+                source: "return 1;",
+                preserveSnippets: false,
+                sessionInstanceId: "test-session",
+                ct: CancellationToken.None
+            );
+            var firstArtifact = first.Artifact!.Value;
+            var path = Path.Combine(root, "Temp", "Conduit", firstArtifact.FileName);
+            var writeTime = File.GetLastWriteTimeUtc(path);
+
+            // preserve size and timestamp to prove the source text invalidates the cache.
+            await File.WriteAllTextAsync(path, "return 2;");
+            File.SetLastWriteTimeUtc(path, writeTime);
+
+            var changed = await compiler.PrepareDetourArtifactAsync(
+                target: root,
+                source: firstArtifact.FileName,
+                preserveSnippets: false,
+                sessionInstanceId: "test-session",
+                ct: CancellationToken.None
+            );
+            var unchanged = await compiler.PrepareDetourArtifactAsync(
+                target: root,
+                source: firstArtifact.FileName,
+                preserveSnippets: false,
+                sessionInstanceId: "test-session",
+                ct: CancellationToken.None
+            );
+
+            await Assert.That(changed.Artifact?.Source).IsEqualTo("return 2;");
+            await Assert.That(changed.Artifact?.Id).IsNotEqualTo(firstArtifact.Id);
+            await Assert.That(unchanged.Artifact).IsEqualTo(changed.Artifact);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task ExecuteCodeCompilationSuppressesNullableWarnings()
     {
         var parsed = ConduitCodeParser.Parse(
