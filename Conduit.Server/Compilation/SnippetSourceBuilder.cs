@@ -24,6 +24,8 @@ static class SnippetSourceBuilder
             sourceFileName
         );
 
+        // one-off snippets expose runtime failures directly, while nullable warnings are usually wrapper or Unity metadata noise.
+        builder.AppendLine("#nullable disable warnings");
         builder.AppendLine("#pragma warning disable CS0162, CS1998");
         builder.Append("namespace ").AppendLine(Namespace);
         builder.AppendLine("{");
@@ -54,6 +56,7 @@ static class SnippetSourceBuilder
         builder.AppendLine("}");
         builder.AppendLine("}");
         builder.AppendLine("#pragma warning restore CS0162, CS1998");
+        builder.AppendLine("#nullable restore warnings");
         return builder.ToString();
     }
 

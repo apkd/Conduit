@@ -159,6 +159,31 @@ public sealed class SnippetCompilerTests
     }
 
     [Test]
+    public async Task ExecuteCodeCompilationSuppressesNullableWarnings()
+    {
+        var parsed = ConduitCodeParser.Parse(
+            "string? value = null;\n"
+            + "return value.Length;"
+        );
+        var output = SnippetCompilationEngine.Compile(
+            "TestHost",
+            "test.cs",
+            parsed,
+            platformReferences,
+            ["using System;"],
+            [],
+            async: false,
+            returnsValue: true
+        );
+        var warnings = output.Diagnostics
+            .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning)
+            .ToArray();
+
+        await Assert.That(output.AssemblyBytes).IsNotNull();
+        await Assert.That(warnings).IsEmpty();
+    }
+
+    [Test]
     public async Task BareReturnRecoveryRewritesOnlyTheGeneratedEntryPointBody()
     {
         var parsed = ConduitCodeParser.Parse(
