@@ -84,6 +84,20 @@ public sealed class McpToolArgumentDiagnosticsTests
         );
         await Assert.That(validNull.IsError == true).IsFalse();
 
+        var validRestartOptions = await client.CallToolAsync(
+            BridgeCommandTypes.Restart,
+            new Dictionary<string, object?>
+            {
+                ["projectPath"] = Path.Combine(Path.GetTempPath(), $"conduit-invalid-project-{Guid.NewGuid():N}"),
+                ["editorArguments"] = new[] { "-diagnostic-flag" },
+                ["environmentVariables"] = new Dictionary<string, string?>
+                {
+                    ["REMOVED_VARIABLE"] = null,
+                },
+            }
+        );
+        await Assert.That(validRestartOptions.IsError == true).IsFalse();
+
         async Task AssertError(string tool, Dictionary<string, object?> arguments, string diagnostic)
         {
             var result = await client.CallToolAsync(tool, arguments);

@@ -4,10 +4,12 @@ namespace Conduit;
 
 public sealed partial class UnityEditorProcessController
 {
-    internal static string BuildLaunchArguments(string platformProjectPath, string logPath) =>
-        $"-projectPath \"{platformProjectPath}\" -logFile \"{logPath}\"";
-
-    internal static ProcessStartInfo CreateLaunchStartInfo(string editorPath, string platformProjectPath, string restartLogPath)
+    internal static ProcessStartInfo CreateLaunchStartInfo(
+        string editorPath,
+        string platformProjectPath,
+        string restartLogPath,
+        IReadOnlyList<string>? editorArguments
+    )
         => CreateLaunchStartInfo(
             editorPath,
             platformProjectPath,
@@ -15,7 +17,8 @@ public sealed partial class UnityEditorProcessController
             OperatingSystem.IsLinux(),
             File.Exists("/etc/NIXOS"),
             FindExecutableOnPath,
-            TryReadAllText
+            TryReadAllText,
+            editorArguments
         );
 
     internal static ProcessStartInfo CreateLaunchStartInfo(
@@ -25,10 +28,10 @@ public sealed partial class UnityEditorProcessController
         bool isLinux,
         bool isNixOs,
         Func<string, string?> findExecutableOnPath,
-        Func<string, string?> readTextFile
+        Func<string, string?> readTextFile,
+        IReadOnlyList<string>? editorArguments = null
     )
     {
-        var launchArguments = BuildLaunchArguments(platformProjectPath, restartLogPath);
         if (isLinux)
         {
             var launchExecutablePath = isNixOs && ResolveNixOsUnityWrapper(findExecutableOnPath, readTextFile) is { Length: > 0 } wrapperPath
@@ -40,18 +43,24 @@ public sealed partial class UnityEditorProcessController
                 editorPath,
                 platformProjectPath,
                 restartLogPath,
-                findExecutableOnPath
+                findExecutableOnPath,
+                editorArguments
             );
             if (linuxStartInfo is null)
             {
                 linuxStartInfo = new(launchExecutablePath)
                 {
-                    Arguments = string.Equals(launchExecutablePath, editorPath, StringComparison.Ordinal)
-                        ? launchArguments
-                        : $"{QuoteArgument(editorPath)} {launchArguments}",
                     WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
                     UseShellExecute = false,
                 };
+                if (!string.Equals(launchExecutablePath, editorPath, StringComparison.Ordinal))
+                    linuxStartInfo.ArgumentList.Add(editorPath);
+                AppendLaunchArguments(
+                    linuxStartInfo,
+                    platformProjectPath,
+                    restartLogPath,
+                    editorArguments
+                );
             }
 
             UnityEditorLaunchEnvironment.ApplyGraphicalSessionEnvironment(linuxStartInfo);
@@ -60,10 +69,15 @@ public sealed partial class UnityEditorProcessController
 
         var startInfo = new ProcessStartInfo(editorPath)
         {
-            Arguments = launchArguments,
             WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
             UseShellExecute = true,
         };
+        AppendLaunchArguments(
+            startInfo,
+            platformProjectPath,
+            restartLogPath,
+            editorArguments
+        );
 
         return startInfo;
     }
@@ -81,7 +95,8 @@ public sealed partial class UnityEditorProcessController
         string editorPath,
         string platformProjectPath,
         string restartLogPath,
-        Func<string, string?> findExecutableOnPath
+        Func<string, string?> findExecutableOnPath,
+        IReadOnlyList<string>? editorArguments
     )
     {
         var shellPath = ResolveExecutablePath("bash", findExecutableOnPath, "/bin/bash", "/usr/bin/bash")
@@ -108,7 +123,48 @@ public sealed partial class UnityEditorProcessController
         startInfo.ArgumentList.Add(platformProjectPath);
         startInfo.ArgumentList.Add("-logFile");
         startInfo.ArgumentList.Add(restartLogPath);
+        AppendEditorArguments(startInfo, editorArguments);
         return startInfo;
+    }
+
+    static void AppendLaunchArguments(
+        ProcessStartInfo startInfo,
+        string platformProjectPath,
+        string restartLogPath,
+        IReadOnlyList<string>? editorArguments
+    )
+    {
+        startInfo.ArgumentList.Add("-projectPath");
+        startInfo.ArgumentList.Add(platformProjectPath);
+        startInfo.ArgumentList.Add("-logFile");
+        startInfo.ArgumentList.Add(restartLogPath);
+        AppendEditorArguments(startInfo, editorArguments);
+    }
+
+    static void AppendEditorArguments(
+        ProcessStartInfo startInfo,
+        IReadOnlyList<string>? editorArguments
+    )
+    {
+        if (editorArguments is null)
+            return;
+
+        // use ArgumentList to preserve token boundaries through direct launches and Linux wrappers.
+        foreach (var argument in editorArguments)
+            startInfo.ArgumentList.Add(argument);
+    }
+
+    internal static void ValidateEditorArguments(IReadOnlyList<string>? editorArguments)
+    {
+        if (editorArguments is null)
+            return;
+
+        foreach (var argument in editorArguments)
+            if (argument is null || argument.Contains('\0', StringComparison.Ordinal))
+                throw new ArgumentException(
+                    "Unity Editor arguments cannot be null or contain a null character.",
+                    nameof(editorArguments)
+                );
     }
 
     static string? ResolveExecutablePath(string executableName, Func<string, string?> findExecutableOnPath, params string[] fallbackPaths)
@@ -195,6 +251,4 @@ public sealed partial class UnityEditorProcessController
             return null;
         }
     }
-
-    static string QuoteArgument(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 }

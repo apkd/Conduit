@@ -51,14 +51,25 @@ public sealed partial class UnityProjectOperations(
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
         = new(bridgeClient, projectRegistry, environmentInspector, sceneReloadPromptRecovery, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
 
-    public Task<ToolExecutionResult> RestartAsync(string projectPath, CT ct)
+    public Task<ToolExecutionResult> RestartAsync(
+        string projectPath,
+        IReadOnlyList<string>? editorArguments,
+        IReadOnlyDictionary<string, string?>? environmentVariables,
+        CT ct
+    )
         => PlayerSelector.TryParse(BridgeTarget.Normalize(projectPath), out _)
             ? EnqueueAsync(
                 projectPath,
                 new() { CommandType = BridgeCommandTypes.Restart },
                 ct
             )
-            : RestartAsync(projectPath, trackUsage: true, ct);
+            : RestartAsync(
+                projectPath,
+                trackUsage: true,
+                editorArguments,
+                environmentVariables,
+                ct
+            );
 
     public Task<ToolExecutionResult> HelpAsync(string projectPath, CT ct)
         => EnqueueAsync(
@@ -67,10 +78,22 @@ public sealed partial class UnityProjectOperations(
             ct
         );
 
-    Task<ToolExecutionResult> RestartAsync(string projectPath, bool trackUsage, CT ct)
+    Task<ToolExecutionResult> RestartAsync(
+        string projectPath,
+        bool trackUsage,
+        IReadOnlyList<string>? editorArguments,
+        IReadOnlyDictionary<string, string?>? environmentVariables,
+        CT ct
+    )
         => restartOperations.RunAsync(
             projectPath,
-            (path, token) => processController.RestartAsync(path, trackUsage, token),
+            (path, token) => processController.RestartAsync(
+                path,
+                trackUsage,
+                editorArguments,
+                environmentVariables,
+                token
+            ),
             applicationLifetime.ApplicationStopping,
             ct
         );

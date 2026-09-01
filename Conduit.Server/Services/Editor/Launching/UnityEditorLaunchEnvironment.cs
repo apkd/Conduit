@@ -57,6 +57,44 @@ static class UnityEditorLaunchEnvironment
         ApplyGraphicalSessionEnvironment(startInfo);
     }
 
+    internal static void ValidateRestartEnvironmentOverrides(
+        IReadOnlyDictionary<string, string?>? environmentVariables
+    )
+    {
+        if (environmentVariables is null)
+            return;
+
+        foreach (var (variableName, value) in environmentVariables)
+        {
+            if (!IsValidEnvironmentVariableName(variableName))
+                throw new ArgumentException(
+                    "Environment variable names cannot be blank or contain '=' or a null character.",
+                    nameof(environmentVariables)
+                );
+            if (value?.Contains('\0', StringComparison.Ordinal) == true)
+                throw new ArgumentException(
+                    "Environment variable values cannot contain a null character.",
+                    nameof(environmentVariables)
+                );
+        }
+    }
+
+    internal static void ApplyRestartEnvironmentOverrides(
+        ProcessStartInfo startInfo,
+        IReadOnlyDictionary<string, string?>? environmentVariables
+    )
+    {
+        if (environmentVariables is not { Count: > 0 })
+            return;
+
+        startInfo.UseShellExecute = false; // custom process environments require direct execution
+        foreach (var (variableName, value) in environmentVariables)
+            if (value is null)
+                startInfo.Environment.Remove(variableName);
+            else
+                startInfo.Environment[variableName] = value;
+    }
+
     internal static void ApplyRestartUsageTracking(
         ProcessStartInfo startInfo,
         long? startedUtcTicks

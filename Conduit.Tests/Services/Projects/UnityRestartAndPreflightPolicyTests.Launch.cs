@@ -35,15 +35,27 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
-    public async Task RestartLaunchArgumentsIncludeAbsoluteProjectLogPath()
+    public async Task RestartLaunchArgumentsPreserveCallerTokenBoundaries()
     {
         var projectPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), $"conduit-project-{Guid.NewGuid():N}"));
         var logPath = Path.GetFullPath(Path.Combine(projectPath, "Logs", "Editor.log"));
 
-        var arguments = UnityEditorProcessController.BuildLaunchArguments(projectPath, logPath);
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            "/opt/unity/Editor/Unity",
+            projectPath,
+            logPath,
+            isLinux: false,
+            isNixOs: false,
+            findExecutableOnPath: static _ => null,
+            readTextFile: static _ => null,
+            editorArguments: ["-diagnostic-flag", "value with spaces"]
+        );
 
-        await Assert.That(arguments).Contains($"-projectPath \"{projectPath}\"");
-        await Assert.That(arguments).Contains($"-logFile \"{logPath}\"");
+        await Assert.That(
+            startInfo.ArgumentList.SequenceEqual(
+                ["-projectPath", projectPath, "-logFile", logPath, "-diagnostic-flag", "value with spaces"]
+            )
+        ).IsTrue();
     }
 
     [Test]
@@ -155,7 +167,8 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
                 "bash" => bashPath,
                 _ => null,
             },
-            readTextFile: static _ => null
+            readTextFile: static _ => null,
+            editorArguments: ["-diagnostic-flag", "value with spaces"]
         );
 
         await Assert.That(startInfo.FileName).IsEqualTo(setsidPath);
@@ -169,6 +182,8 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
         await Assert.That(startInfo.ArgumentList[6]).IsEqualTo(projectPath);
         await Assert.That(startInfo.ArgumentList[7]).IsEqualTo("-logFile");
         await Assert.That(startInfo.ArgumentList[8]).IsEqualTo(logPath);
+        await Assert.That(startInfo.ArgumentList[9]).IsEqualTo("-diagnostic-flag");
+        await Assert.That(startInfo.ArgumentList[10]).IsEqualTo("value with spaces");
         await Assert.That(startInfo.UseShellExecute).IsFalse();
     }
 
@@ -190,7 +205,12 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
         );
 
         await Assert.That(startInfo.FileName).IsEqualTo(editorPath);
-        await Assert.That(startInfo.Arguments).IsEqualTo(UnityEditorProcessController.BuildLaunchArguments(projectPath, logPath));
+        await Assert.That(startInfo.Arguments).IsEmpty();
+        await Assert.That(
+            startInfo.ArgumentList.SequenceEqual(
+                ["-projectPath", projectPath, "-logFile", logPath]
+            )
+        ).IsTrue();
         await Assert.That(startInfo.UseShellExecute).IsTrue();
     }
 

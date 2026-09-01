@@ -104,6 +104,29 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    public async Task RestartEnvironmentOverridesReplaceAndRemoveInheritedVariables()
+    {
+        var startInfo = new ProcessStartInfo("Unity")
+        {
+            UseShellExecute = true,
+        };
+        startInfo.Environment["REPLACED_VARIABLE"] = "inherited";
+        startInfo.Environment["REMOVED_VARIABLE"] = "inherited";
+        var overrides = new Dictionary<string, string?>
+        {
+            ["REPLACED_VARIABLE"] = "project-specific",
+            ["REMOVED_VARIABLE"] = null,
+        };
+
+        UnityEditorLaunchEnvironment.ValidateRestartEnvironmentOverrides(overrides);
+        UnityEditorLaunchEnvironment.ApplyRestartEnvironmentOverrides(startInfo, overrides);
+
+        await Assert.That(startInfo.Environment["REPLACED_VARIABLE"]).IsEqualTo("project-specific");
+        await Assert.That(startInfo.Environment.ContainsKey("REMOVED_VARIABLE")).IsFalse();
+        await Assert.That(startInfo.UseShellExecute).IsFalse();
+    }
+
+    [Test]
     public async Task ProcessEnvironmentParserReadsNullSeparatedEntries()
     {
         var environment = UnityEditorLaunchEnvironment.ParseProcessEnvironment(

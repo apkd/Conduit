@@ -10,15 +10,17 @@ public sealed partial class UnityEditorProcessController(
 {
     internal const string RestartedProcessExitedDiagnostic = "The restarted Unity process has shut down or crashed.";
 
-    internal Task<ToolExecutionResult> RestartAsync(string projectPath, CancellationToken ct)
-        => RestartAsync(projectPath, trackUsage: true, ct);
-
     internal async Task<ToolExecutionResult> RestartAsync(
         string projectPath,
         bool trackUsage,
+        IReadOnlyList<string>? editorArguments,
+        IReadOnlyDictionary<string, string?>? environmentVariables,
         CancellationToken ct
     )
     {
+        ValidateEditorArguments(editorArguments);
+        UnityEditorLaunchEnvironment.ValidateRestartEnvironmentOverrides(environmentVariables);
+
         // the replacement editor can recover this per-call state only from its launch environment.
         long? restartStartedUtcTicks = trackUsage ? DateTime.UtcNow.Ticks : null;
         var builder = new StringBuilder();
@@ -111,8 +113,15 @@ public sealed partial class UnityEditorProcessController(
             PrepareRestartLogPath(restartLogPath);
 
             var platformProjectPath = ProjectPathNormalizer.ToPlatformPath(snapshot.ProjectPath);
-            var startInfo = CreateLaunchStartInfo(editorPath, platformProjectPath, restartLogPath);
+            var startInfo = CreateLaunchStartInfo(
+                editorPath,
+                platformProjectPath,
+                restartLogPath,
+                editorArguments
+            );
             UnityEditorLaunchEnvironment.ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
+            // apply caller state last so null entries can remove inherited editor and service variables.
+            UnityEditorLaunchEnvironment.ApplyRestartEnvironmentOverrides(startInfo, environmentVariables);
             UnityEditorLaunchEnvironment.ApplyRestartUsageTracking(startInfo, restartStartedUtcTicks);
 
             var prelaunchSnapshot = environmentInspector.Inspect(snapshot.ProjectPath);

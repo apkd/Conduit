@@ -97,6 +97,7 @@ public sealed class UnityTools
         )
     );
 
+    /// <summary>Starts or restarts a Unity Editor with process options scoped to its project.</summary>
     [McpServerTool(Name = "restart", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         """
@@ -107,8 +108,19 @@ public sealed class UnityTools
     public static Task<string> Restart(
         [Description("Project path")] string projectPath,
         UnityProjectOperations operations,
-        CancellationToken ct
-    ) => ToPlainTextToolResponseAsync(operations.RestartAsync(projectPath, ct));
+        [Description("Additional editor launch arguments")]
+        string[]? editorArguments = null,
+        [Description("Launch env overrides; a null value removes an inherited variable")]
+        Dictionary<string, string?>? environmentVariables = null,
+        CancellationToken ct = default
+    ) => ToPlainTextToolResponseAsync(
+        operations.RestartAsync(
+            projectPath,
+            editorArguments,
+            environmentVariables,
+            ct
+        )
+    );
 
     [McpServerTool(Name = "help", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
