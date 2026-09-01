@@ -133,6 +133,7 @@ public sealed partial class UnityEditorProcessController(
                 return ToolExecutionResult.NotConnected(snapshot.ProjectPath, builder.ToTrimmedString());
             }
 
+            SystemdProcessIsolation.TryApply(startInfo);
             restartedProcess = Process.Start(startInfo);
 
             if (restartedProcess == null)
