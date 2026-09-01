@@ -86,7 +86,15 @@ public sealed class DetourMetadataTests
         var canonical = ambiguous.Diagnostic!
             .Split('\n')
             .Single(static line => line.EndsWith("(int)->int", StringComparison.Ordinal));
-        await Assert.That(catalog.Resolve(canonical).Target).IsNotNull();
+        var canonicalTarget = catalog.Resolve(canonical).Target;
+        await Assert.That(canonicalTarget).IsNotNull();
+
+        var clrStyle = canonical.Replace(
+            "(int)->int",
+            "(global::System.Int32) -> System.Int32",
+            StringComparison.Ordinal
+        );
+        await Assert.That(catalog.Resolve(clrStyle).Target).IsSameReferenceAs(canonicalTarget);
     }
 
     [Test]

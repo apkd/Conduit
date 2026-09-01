@@ -130,7 +130,13 @@ sealed class MethodTarget
                 || selector[memberOffset + expectedLength - 1] != '(')
                 return false;
 
-            return string.Equals(selector, CanonicalSelector, StringComparison.Ordinal);
+            if (string.Equals(selector, CanonicalSelector, StringComparison.Ordinal))
+                return true;
+
+            return MethodSelectorSignatureComparer.Equals(
+                selector.AsSpan(memberOffset + expectedLength - 1),
+                CanonicalSelector.AsSpan(memberOffset + expectedLength - 1)
+            );
         }
 
         if (MatchesCompositeSelector(selector, DeclaringTypeName, 0, MethodName))
