@@ -143,6 +143,73 @@ public sealed partial class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ReflectMethods_SummarizesManyExternOnlyIncompatibilities()
+    {
+        var scoped = ReflectionTool.Reflect(
+            new[] { "methods", "ConduitReflectManyExternFixture", "ConduitExtern" }
+        );
+        var wide = ReflectionTool.Reflect(new[] { "methods", string.Empty, "ConduitExtern" });
+
+        Assert.That(scoped.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(wide.outcome, Is.EqualTo(ToolOutcome.Success));
+        foreach (var output in new[] { scoped.return_value!, wide.return_value! })
+        {
+            const string note =
+                "Note: all `extern` methods are incompatible with the `detour` MCP tool.";
+            Assert.That(output, Does.Contain(note));
+            Assert.That(output, Does.Not.Contain("// detour-incompatible"));
+
+            var methodsHeader = output.IndexOf("  Methods:", StringComparison.Ordinal);
+            var notePosition = output.IndexOf(note, StringComparison.Ordinal);
+            var firstMethod = output.IndexOf("  - ", methodsHeader, StringComparison.Ordinal);
+            Assert.That(notePosition, Is.GreaterThan(methodsHeader));
+            Assert.That(firstMethod, Is.GreaterThan(notePosition));
+
+            foreach (var methodName in new[]
+                     {
+                         "ConduitExternOne",
+                         "ConduitExternTwo",
+                         "ConduitExternThree",
+                         "ConduitExternFour",
+                         "ConduitExternFive",
+                     })
+                Assert.That(output, Does.Contain(methodName + "()"));
+        }
+    }
+
+    [Test]
+    public void ReflectMethods_MixedIncompatibilitiesRemainInline()
+    {
+        var result = ReflectionTool.Reflect(
+            new[] { "methods", "ConduitReflectManyExternFixture", string.Empty }
+        );
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success));
+        Assert.That(
+            result.return_value,
+            Does.Not.Contain(
+                "Note: all `extern` methods are incompatible with the `detour` MCP tool."
+            )
+        );
+        foreach (var methodName in new[]
+                 {
+                     "ConduitExternOne",
+                     "ConduitExternTwo",
+                     "ConduitExternThree",
+                     "ConduitExternFour",
+                     "ConduitExternFive",
+                 })
+            Assert.That(
+                result.return_value,
+                Does.Contain(methodName + "() // detour-incompatible")
+            );
+        Assert.That(
+            result.return_value,
+            Does.Contain("ConduitUnsupported<T>() // detour-incompatible")
+        );
+    }
+
+    [Test]
     public void ReflectFieldsAndPropertiesPreserveUnsafeAndRefReturnDeclarations()
     {
         var fields = ReflectionTool.Reflect(

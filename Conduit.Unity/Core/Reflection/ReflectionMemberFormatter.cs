@@ -12,14 +12,19 @@ namespace Conduit
     {
         static readonly ConcurrentDictionary<MemberInfo, string> memberSignatureCache = new();
 
-        internal static MemberDisplay FormatMemberMatch(MemberMatch match) =>
-            new(
+        internal static MemberDisplay FormatMemberMatch(MemberMatch match)
+        {
+            var method = match.Member as MethodBase;
+            return new(
                 match.DeclaringType,
                 match.Kind,
                 match.Name,
                 FormatMemberSignature(match),
-                match.MatchRank
+                match.MatchRank,
+                method != null && MethodDetourSupport.GetUnsupportedReason(method) != null,
+                method is MethodInfo methodInfo && IsExtern(methodInfo)
             );
+        }
 
         static string FormatMemberSignature(MemberMatch match)
             => FormatMemberSignature(match.Member);
@@ -131,7 +136,6 @@ namespace Conduit
             builder.Append('(');
             builder.Append(FormatParameters(method.GetParameters()));
             builder.Append(')');
-            AppendDetourCompatibility(builder, method);
             return builder.ToString();
         }
 
@@ -154,7 +158,6 @@ namespace Conduit
             builder.Append('(');
             builder.Append(FormatParameters(constructor.GetParameters()));
             builder.Append(')');
-            AppendDetourCompatibility(builder, constructor);
             return builder.ToString();
         }
 
@@ -168,12 +171,6 @@ namespace Conduit
             }
 
             builder.Append(ReflectionTypeFormatter.FormatType(returnType));
-        }
-
-        static void AppendDetourCompatibility(StringBuilder builder, MethodBase method)
-        {
-            if (MethodDetourSupport.GetUnsupportedReason(method) != null)
-                builder.Append(" // detour-incompatible");
         }
 
         static string FormatParameters(ParameterInfo[] parameters)

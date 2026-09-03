@@ -54,7 +54,7 @@ namespace Conduit
             else if (method.IsVirtual && !method.IsFinal && (!isInterface || method.IsStatic))
                 builder.Append("virtual ");
 
-            if (!method.IsAbstract && HasNoManagedBody(method))
+            if (IsExtern(method))
                 builder.Append("extern ");
         }
 
@@ -164,6 +164,9 @@ namespace Conduit
 
         static bool IsInitOnly(MethodInfo? setter)
             => setter != null && HasRequiredModifier(setter.ReturnParameter, "System.Runtime.CompilerServices.IsExternalInit");
+
+        internal static bool IsExtern(MethodInfo method)
+            => !method.IsAbstract && HasNoManagedBody(method);
 
         static bool HasNoManagedBody(MethodInfo method)
         {

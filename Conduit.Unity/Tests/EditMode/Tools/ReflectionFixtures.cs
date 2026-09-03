@@ -91,6 +91,26 @@ sealed class ConduitReflectSignatureFixture
     sealed class @class { }
 }
 
+sealed class ConduitReflectManyExternFixture
+{
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void ConduitExternOne();
+
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void ConduitExternTwo();
+
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void ConduitExternThree();
+
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void ConduitExternFour();
+
+    [DllImport("ConduitReflectMissingNativeLibrary")]
+    static extern void ConduitExternFive();
+
+    static T ConduitUnsupported<T>() => default!;
+}
+
 sealed class ConduitReflectExactRankFixture
 {
     public void ReflectRank() { }

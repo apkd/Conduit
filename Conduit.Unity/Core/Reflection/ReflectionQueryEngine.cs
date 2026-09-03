@@ -199,6 +199,9 @@ namespace Conduit
             AppendWideMemberMatches(collector, index, mode.MemberKind, memberQuery);
 
             var matches = collector.GetSortedMatches();
+            var members = new List<MemberDisplay>(matches.Count);
+            foreach (var match in matches)
+                members.Add(ReflectionMemberFormatter.FormatMemberMatch(match));
 
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendLoadWarning(builder, loadWarning);
@@ -213,10 +216,10 @@ namespace Conduit
 
             Type? currentType = null;
             ReflectMemberKind currentKind = ReflectMemberKind.None;
+            var compatibilityDisplay = GetDetourCompatibilityDisplay(members);
             var shown = 0;
-            foreach (var match in matches)
+            foreach (var member in members)
             {
-                var member = ReflectionMemberFormatter.FormatMemberMatch(match);
                 if (currentType != member.DeclaringType)
                 {
                     if (shown > 0)
@@ -239,13 +242,10 @@ namespace Conduit
                 if (currentKind != member.Kind)
                 {
                     currentKind = member.Kind;
-                    builder.Append("  ");
-                    builder.Append(ReflectionMemberFormatter.MemberKindHeader(currentKind));
-                    builder.AppendLine(":");
+                    AppendMemberKindHeader(builder, currentKind, ref compatibilityDisplay);
                 }
 
-                builder.Append("  - ");
-                builder.AppendLine(member.Signature);
+                AppendMember(builder, member, compatibilityDisplay);
                 shown++;
             }
 
