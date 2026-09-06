@@ -14,7 +14,7 @@ namespace Conduit
                 return;
 
             hooked = true;
-            Application.logMessageReceivedThreaded += OnLogMessageReceived;
+            BridgeLogs.StartCapture(OnLogMessageReceived);
         }
 
         void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
@@ -91,18 +91,8 @@ namespace Conduit
             if (message.Length == 0 && stack.Length == 0)
                 return -1;
 
-            var signature = new LogSignature(message, stack, logType);
-            if (capturedLogEntryIndexes.TryGetValue(signature, out var entryIndex))
-            {
-                capturedLogEntries[entryIndex].RepeatCount++;
-                // entries are deduped globally while each target keeps its own first reference
-                target.AddEntryIndex(entryIndex);
-                return entryIndex;
-            }
-
-            entryIndex = capturedLogEntries.Count;
-            capturedLogEntryIndexes.Add(signature, entryIndex);
-            capturedLogEntries.Add(new(message, stack, logType));
+            var entryIndex = capturedLogs.Add(message, stack, logType);
+            // entries are deduped globally while each target keeps its own first reference
             target.AddEntryIndex(entryIndex);
             return entryIndex;
         }

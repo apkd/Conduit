@@ -15,6 +15,7 @@ namespace Conduit
         public bool @async;
         public bool rebuild_cache;
         public bool track_usage;
+        public bool include_background_logs;
         public string[] args = Array.Empty<string>();
         public BridgeArtifact[] artifacts = Array.Empty<BridgeArtifact>();
 
@@ -26,6 +27,7 @@ namespace Conduit
         public bool? Async { get => @async ? true : null; set => @async = value == true; }
         public bool? RebuildCache { get => rebuild_cache ? true : null; set => rebuild_cache = value == true; }
         public bool? TrackUsage { get => track_usage ? true : null; set => track_usage = value == true; }
+        public bool? IncludeBackgroundLogs { get => include_background_logs ? true : null; set => include_background_logs = value == true; }
         public string[] Args { get => args; set => args = value; }
         public BridgeArtifact[] Artifacts { get => artifacts; set => artifacts = value; }
     }

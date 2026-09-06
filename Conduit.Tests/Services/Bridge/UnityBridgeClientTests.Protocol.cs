@@ -29,11 +29,35 @@ public sealed partial class UnityBridgeClientTests
 
         var resolution = UnityBridgeClient.PreferProcessExitAsync(
             disconnected,
-            processExit.Task
+            processExit.Task,
+            new Microsoft.Extensions.Time.Testing.FakeTimeProvider()
         );
+        await Assert.That(resolution.IsCompleted).IsFalse();
         processExit.SetResult(processExited);
 
-        await Assert.That(await resolution).IsSameReferenceAs(processExited);
+        await Assert.That((await resolution).FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ProcessExited);
+    }
+
+    [Test]
+    public async Task ResultDisconnectSurvivesWhenProcessExitIsNotConfirmed()
+    {
+        var disconnected = BridgeClientResult.Failure(
+            new(),
+            BridgeRuntimeFailureKind.ResultDisconnected,
+            "disconnected",
+            commandSent: true
+        );
+        var processExit = new TaskCompletionSource<BridgeClientResult?>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var resolution = UnityBridgeClient.PreferProcessExitAsync(disconnected, processExit.Task, clock);
+        await Assert.That(resolution.IsCompleted).IsFalse();
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+
+        await Assert.That((await resolution).FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ResultDisconnected);
+        await Assert.That(processExit.Task.IsCompleted).IsFalse();
     }
 
     [Test]

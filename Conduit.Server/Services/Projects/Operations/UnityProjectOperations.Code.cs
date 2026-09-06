@@ -107,6 +107,7 @@ public sealed partial class UnityProjectOperations
             Outcome = result.Outcome,
             DisplayName = result.DisplayName,
             Logs = result.Logs,
+            BackgroundLogs = result.BackgroundLogs,
             ReturnValue = result.ReturnValue,
             Exception = result.Exception,
             Diagnostic = warning,

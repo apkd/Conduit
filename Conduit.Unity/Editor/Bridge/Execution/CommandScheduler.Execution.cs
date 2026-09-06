@@ -16,6 +16,7 @@ namespace Conduit
         {
             try
             {
+                operation.BackgroundLogs = operation.IncludeBackgroundLogs ? BridgeLogs.TakeBackground() : null;
                 logCapture.Start(commandKind);
                 assetImportMonitor.ClearCompilerMessages();
 
@@ -124,6 +125,7 @@ namespace Conduit
             if (activeOperation is not { IsRestored: true } operation)
                 return;
 
+            operation.BackgroundLogs = operation.IncludeBackgroundLogs ? BridgeLogs.TakeBackground() : null;
             if (!BridgeCommandKinds.IsTest(operation.Kind))
                 OperationPersistence.ClearPendingTestCompletion();
 
@@ -239,6 +241,7 @@ namespace Conduit
                 return;
 
             activeOperation = null;
+            logCapture.Stop();
             StopOperationHooks();
             OperationPersistence.ClearActiveOperation();
             UpdateSnapshot();
@@ -255,6 +258,7 @@ namespace Conduit
             result.diagnostic = BridgeExceptionFormatter.NormalizeDiagnostic(result.diagnostic, result.exception?.message);
             var logs = logCapture.Drain(operation.Kind, result.outcome, result.diagnostic, out var discardLogs);
             result.logs = discardLogs ? string.Empty : logs;
+            result.background_logs = operation.BackgroundLogs;
 
             StopOperationHooks();
             OperationPersistence.ClearActiveOperation();

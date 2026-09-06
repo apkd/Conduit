@@ -9,6 +9,7 @@ namespace Conduit
     {
         static Bootstrap()
         {
+            BridgeLogs.Configure(ConduitSettings.instance.IncludeBackgroundLogs, UnityEngine.Application.consoleLogPath);
             ConduitToolUsage.CompleteRestartFromEnvironment();
             ConduitToolRunner.Initialize();
             ConduitConnection.EnsureStarted();

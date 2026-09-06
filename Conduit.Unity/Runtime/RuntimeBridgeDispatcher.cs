@@ -38,6 +38,7 @@ namespace Conduit.Runtime
         static async void ExecuteAsync(RuntimeRequest request)
         {
             var ct = request.Session.Begin(request.RequestId);
+            var backgroundLogs = request.Command.include_background_logs ? BridgeLogs.TakeBackground() : null;
             BridgeCommandResult result;
             try
             {
@@ -58,6 +59,7 @@ namespace Conduit.Runtime
                 );
             }
 
+            result.background_logs = backgroundLogs;
             request.Session.Complete(request.RequestId);
             Volatile.Write(ref executing, false); // a closing one-command FIFO must not hold the player command queue
             try

@@ -10,9 +10,11 @@ namespace Conduit
         Task ExecuteStatusAsync(
             int clientId,
             string requestId,
-            long usageStartedUtcTicks
+            long usageStartedUtcTicks,
+            bool includeBackgroundLogs
         )
         {
+            var backgroundLogs = includeBackgroundLogs ? BridgeLogs.TakeBackground() : null;
             BridgeCommandResult result;
             try
             {
@@ -27,6 +29,7 @@ namespace Conduit
                 result = CreateExceptionResult(exception);
             }
 
+            result.background_logs = backgroundLogs;
             ConduitToolUsage.CompleteCall(BridgeCommandTypes.Status, usageStartedUtcTicks);
             return ConduitConnection.TrySendResultAsync(
                 clientId,

@@ -1,57 +1,40 @@
 #nullable enable
 
 using System;
-using System.Collections.Generic;
-using System.Text;
 using UnityEngine;
-using UnityEngine.Pool;
 
 namespace Conduit
 {
-    /// <summary>Captures and renders command logs consistently across Unity targets.</summary>
+    /// <summary>Captures player command logs through the shared Unity log source.</summary>
     sealed class BridgeLogCapture : IDisposable
     {
         readonly object gate = new();
-        Dictionary<LogSignature, int>? indexes;
-        List<LogEntry>? entries;
-        string? lastRawMessage;
-        string? lastRawStackTrace;
-        int lastRawEntryIndex;
-        LogType lastRawLogType;
-        bool hasLastRawEntry;
+        CapturedLogEntries? entries;
+        string? lastMessage;
+        string? lastStack;
+        LogType lastType;
+        int lastIndex = -1;
         bool hooked = true;
 
-        public BridgeLogCapture()
-            => Application.logMessageReceivedThreaded += OnLogMessageReceived;
+        public BridgeLogCapture() => BridgeLogs.StartCapture(Record);
 
         public string Drain()
         {
             Stop();
             lock (gate)
             {
-                if (entries is not { Count: > 0 })
-                {
-                    ReleaseCollections();
+                if (entries == null)
                     return string.Empty;
-                }
 
-                using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
-                foreach (var entry in entries)
+                using var pooled = BridgeStringBuilderPool.Rent(out var builder);
+                foreach (var entry in entries.Entries)
                 {
                     if (builder.Length > 0)
                         builder.Append("\n\n");
-
-                    BridgeLogFormatter.Append(
-                        builder,
-                        entry.Message,
-                        entry.StackTrace,
-                        entry.RepeatCount
-                    );
+                    BridgeLogFormatter.Append(builder, entry.Message, entry.StackTrace, entry.RepeatCount);
                 }
-
-                var result = builder.ToString();
-                ReleaseCollections();
-                return result;
+                Release();
+                return builder.ToString();
             }
         }
 
@@ -59,142 +42,44 @@ namespace Conduit
         {
             Stop();
             lock (gate)
-                ReleaseCollections();
+                Release();
         }
 
         void Stop()
         {
+            if (!hooked)
+                return;
+            BridgeLogs.StopCapture(Record);
+            hooked = false;
+        }
+
+        void Record(string message, string stack, LogType type)
+        {
             lock (gate)
             {
-                if (!hooked)
-                    return;
-
-                hooked = false;
-            }
-            Application.logMessageReceivedThreaded -= OnLogMessageReceived;
-        }
-
-        void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
-        {
-            var rawMessage = condition ?? string.Empty;
-            var rawStackTrace = stackTrace ?? string.Empty;
-            lock (gate)
-            {
-                // repeated logs bypass stack cleanup, which dominates log-storm capture cost.
-                if (!hooked)
-                    return;
-                if (hasLastRawEntry
-                    && logType == lastRawLogType
-                    && rawMessage == lastRawMessage
-                    && rawStackTrace == lastRawStackTrace)
+                if (lastIndex >= 0 && type == lastType && message == lastMessage && stack == lastStack)
                 {
-                    if (lastRawEntryIndex >= 0)
-                        entries![lastRawEntryIndex].RepeatCount++;
+                    entries!.Entries[lastIndex].RepeatCount++;
                     return;
                 }
-            }
 
-            var stack = logType == LogType.Log
-                ? null
-                : BridgeExceptionFormatter.TrimCommonLogTail(
-                    BridgeExceptionFormatter.SimplifyStackTrace(stackTrace)
-                );
-            var signature = new LogSignature(rawMessage, stack ?? string.Empty, logType);
-            lock (gate)
-            {
-                if (!hooked)
-                    return;
-
-                int entryIndex;
-                if (signature.Message.Length == 0 && signature.StackTrace.Length == 0)
-                    entryIndex = -1;
-                else if (indexes != null && indexes.TryGetValue(signature, out entryIndex))
-                    entries![entryIndex].RepeatCount++;
-                else
-                {
-                    if (indexes == null)
-                    {
-                        _ = DictionaryPool<LogSignature, int>.Get(out indexes);
-                        indexes.Clear();
-                    }
-                    if (entries == null)
-                    {
-                        _ = ListPool<LogEntry>.Get(out entries);
-                        entries.Clear();
-                    }
-                    entryIndex = entries.Count;
-                    indexes.Add(signature, entryIndex);
-                    entries.Add(new(signature.Message, signature.StackTrace));
-                }
-
-                lastRawMessage = rawMessage;
-                lastRawStackTrace = rawStackTrace;
-                lastRawLogType = logType;
-                lastRawEntryIndex = entryIndex;
-                hasLastRawEntry = true;
+                var cleaned = type == LogType.Log
+                    ? string.Empty
+                    : BridgeExceptionFormatter.TrimCommonLogTail(BridgeExceptionFormatter.SimplifyStackTrace(stack)) ?? string.Empty;
+                lastIndex = (entries ??= CapturedLogEntries.Rent()).Add(message, cleaned, type);
+                lastMessage = message;
+                lastStack = stack;
+                lastType = type;
             }
         }
 
-        void ReleaseCollections()
+        void Release()
         {
-            if (entries != null)
-            {
-                ListPool<LogEntry>.Release(entries);
-                entries = null;
-            }
-            if (indexes != null)
-            {
-                DictionaryPool<LogSignature, int>.Release(indexes);
-                indexes = null;
-            }
-
-            lastRawMessage = null;
-            lastRawStackTrace = null;
-            hasLastRawEntry = false;
-        }
-
-        sealed class LogEntry
-        {
-            internal LogEntry(string message, string stackTrace)
-            {
-                Message = message;
-                StackTrace = stackTrace;
-            }
-
-            internal string Message { get; }
-            internal string StackTrace { get; }
-            internal int RepeatCount { get; set; } = 1;
-        }
-
-        readonly struct LogSignature : IEquatable<LogSignature>
-        {
-            internal LogSignature(string message, string stackTrace, LogType logType)
-            {
-                Message = message;
-                StackTrace = stackTrace;
-                LogType = logType;
-                unchecked
-                {
-                    var hash = StringComparer.Ordinal.GetHashCode(message);
-                    hash = hash * 397 ^ StringComparer.Ordinal.GetHashCode(stackTrace);
-                    HashCode = hash * 397 ^ (int)logType;
-                }
-            }
-
-            internal string Message { get; }
-            internal string StackTrace { get; }
-            internal LogType LogType { get; }
-            int HashCode { get; }
-
-            public bool Equals(LogSignature other)
-                => Message == other.Message
-                   && StackTrace == other.StackTrace
-                   && LogType == other.LogType;
-
-            public override bool Equals(object? value)
-                => value is LogSignature other && Equals(other);
-
-            public override int GetHashCode() => HashCode;
+            entries?.Release();
+            entries = null;
+            lastMessage = null;
+            lastStack = null;
+            lastIndex = -1;
         }
     }
 }

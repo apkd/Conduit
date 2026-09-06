@@ -9,6 +9,7 @@ namespace Conduit
     {
         public string outcome = ToolOutcome.Success;
         public string logs = string.Empty;
+        public string? background_logs;
         public string? display_name;
         public string? return_value;
         public BridgeExceptionInfo? exception;
@@ -17,6 +18,7 @@ namespace Conduit
 
         public string Outcome { get => outcome; set => outcome = value; }
         public string Logs { get => logs; set => logs = value; }
+        public string? BackgroundLogs { get => background_logs; set => background_logs = value; }
         public string? DisplayName { get => display_name; set => display_name = value; }
         public string? ReturnValue { get => return_value; set => return_value = value; }
         public BridgeExceptionInfo? Exception { get => exception; set => exception = value; }

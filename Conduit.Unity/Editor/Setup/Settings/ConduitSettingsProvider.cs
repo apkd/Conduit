@@ -92,6 +92,7 @@ namespace Conduit
                     "Tests",
                     "Usage",
                     "Tracking",
+                    "Logs",
                     "Server",
                     "Editor",
                     "Configuration",

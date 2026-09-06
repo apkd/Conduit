@@ -7,6 +7,7 @@ static class BridgeCommandResultExtensions
         {
             Outcome = result.Outcome,
             Logs = ConduitText.NormalizeOptionalUserFacingText(result.Logs),
+            BackgroundLogs = ConduitText.NormalizeOptionalUserFacingText(result.BackgroundLogs),
             DisplayName = ConduitText.NormalizeOptionalUserFacingText(result.DisplayName),
             ReturnValue = ConduitText.NormalizeOptionalPayloadText(result.ReturnValue),
             Exception = TryNormalizeException(result.Exception),

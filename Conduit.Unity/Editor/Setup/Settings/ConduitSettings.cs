@@ -12,6 +12,7 @@ namespace Conduit
         [SerializeField] bool unfocusedGameView;
         [SerializeField] bool lowResolutionPlayMode;
         [SerializeField] bool muteAudioInPlayMode;
+        [SerializeField] bool includeBackgroundLogs;
         [SerializeField] string selectedEditorId = string.Empty;
         [SerializeField] string serverExecutablePath = string.Empty;
         [SerializeField] SetupConfigurationLocation configurationLocation;
@@ -19,6 +20,7 @@ namespace Conduit
         internal bool UnfocusedGameView => unfocusedGameView;
         internal bool LowResolutionPlayMode => lowResolutionPlayMode;
         internal bool MuteAudioInPlayMode => muteAudioInPlayMode;
+        internal bool IncludeBackgroundLogs => includeBackgroundLogs;
         internal string SelectedEditorId => selectedEditorId;
         internal string ServerExecutablePath => serverExecutablePath;
         internal SetupConfigurationLocation ConfigurationLocation
@@ -30,6 +32,16 @@ namespace Conduit
                 return;
 
             unfocusedGameView = value;
+            Save(true);
+        }
+
+        internal void SetIncludeBackgroundLogs(bool value)
+        {
+            if (includeBackgroundLogs == value)
+                return;
+
+            includeBackgroundLogs = value;
+            BridgeLogs.Configure(value, Application.consoleLogPath);
             Save(true);
         }
 
