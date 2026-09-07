@@ -3,6 +3,7 @@
 #if UNITY_EDITOR
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Conduit;
 using NUnit.Framework;
@@ -123,6 +124,47 @@ public sealed partial class ConduitMcpEndToEndTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     static ref readonly int DetourRefReadonlyProbe() => ref detourOriginalStorage;
+
+    [Test]
+    [Order(21)]
+    public async Task Detour_TaskReturningMethodCompletesWithoutAnotherRequest()
+    {
+        const string methodName = "ConduitMcpEndToEndTests.DetourAsyncProbe";
+        var request = new AsyncDetourRequest { Bytes = new byte[] { 1, 2, 3 } };
+        try
+        {
+            // the long replacement signature reproduces the FIFO framing failure seen in async service detours
+            var applied = await client.CallToolAsync(
+                BridgeCommandTypes.Detour,
+                Args(
+                    ("projectPath", projectPath),
+                    ("methodName", methodName),
+                    ("replacementBody", "return Task.FromException<byte[]>(new InvalidOperationException());")
+                ),
+                TimeSpan.FromSeconds(20)
+            );
+            Assert.That(applied.IsError, Is.False, applied.Text);
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await DetourAsyncProbe(request, CancellationToken.None)
+            );
+        }
+        finally
+        {
+            var restored = await CallDetourAsync(methodName, "restore");
+            Assert.That(restored.IsError, Is.False, restored.Text);
+        }
+
+        Assert.That(await DetourAsyncProbe(request, CancellationToken.None), Is.EqualTo(request.Bytes));
+    }
+
+    sealed class AsyncDetourRequest
+    {
+        internal byte[] Bytes = Array.Empty<byte>();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static Task<byte[]> DetourAsyncProbe(AsyncDetourRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(request.Bytes);
 
 }
 #endif

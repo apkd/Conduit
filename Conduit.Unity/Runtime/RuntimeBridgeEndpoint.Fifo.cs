@@ -41,15 +41,9 @@ namespace Conduit.Runtime
                         FileStream? output = null;
                         try
                         {
-                            input = new(
+                            input = BridgeFifoStreams.OpenRead(
                                 Path.Combine(clientDirectory, "to-unity.fifo"),
-                                FileMode.Open,
-                                FileAccess.Read,
-                                FileShare.ReadWrite,
-                                4096,
-                                readFifoSynchronously
-                                    ? FileOptions.None
-                                    : FileOptions.Asynchronous
+                                asynchronous: !readFifoSynchronously
                             );
                             output = new(
                                 Path.Combine(clientDirectory, "from-unity.fifo"),
@@ -97,4 +91,3 @@ namespace Conduit.Runtime
         }
     }
 }
-

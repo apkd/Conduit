@@ -110,13 +110,8 @@ namespace Conduit
                         FileStream? output = null;
                         try
                         {
-                            input = new(
-                                Path.Combine(clientDirectory, "to-unity.fifo"),
-                                FileMode.Open,
-                                FileAccess.Read,
-                                FileShare.ReadWrite,
-                                4096,
-                                FileOptions.Asynchronous
+                            input = BridgeFifoStreams.OpenRead(
+                                Path.Combine(clientDirectory, "to-unity.fifo")
                             );
                             output = new(
                                 Path.Combine(clientDirectory, "from-unity.fifo"),
