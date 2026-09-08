@@ -76,9 +76,9 @@ public sealed partial class UnityBridgeClientTests
     [Test]
     public async Task BridgeTransportConnectsToDotNetNamedPipeServer()
     {
-        if (!OperatingSystem.IsWindows())
-            return;
-
+        // bound both sides while allowing delayed I/O completions on shared CI runners
+        var timeout = TimeSpan.FromSeconds(10);
+        using var cancellation = new CancellationTokenSource(timeout);
         var pipeName = $"unity-conduit-test-{Guid.NewGuid():N}";
         await using var server = new NamedPipeServerStream(
             pipeName,
@@ -88,14 +88,14 @@ public sealed partial class UnityBridgeClientTests
             PipeOptions.Asynchronous
         );
 
-        var waitForConnection = server.WaitForConnectionAsync();
+        var waitForConnection = server.WaitForConnectionAsync(cancellation.Token);
         await using var transport = await BridgeTransport.ConnectAsync(
-            pipeName,
-            TimeSpan.FromSeconds(2),
-            CancellationToken.None
+            new BridgeEndpointDescriptor { Transport = BridgeTransportKinds.NamedPipe, PipeName = pipeName },
+            timeout,
+            cancellation.Token
         );
 
-        await waitForConnection.WaitAsync(TimeSpan.FromSeconds(2));
+        await waitForConnection;
 
         await Assert.That(server.IsConnected).IsTrue();
         await Assert.That(transport.IsConnected).IsTrue();
