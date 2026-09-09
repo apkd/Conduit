@@ -28,6 +28,8 @@ namespace Conduit
 
         internal string? ActiveCommandType { get; }
 
+        internal bool HasOutstandingWork => activeClientId >= 0 || firstQueuedClientId >= 0 || hasReconnectableWork;
+
         internal static ClientWorkSnapshot Create(
             PendingOperationState? activeOperation,
             List<PendingOperationState> queuedOperations,

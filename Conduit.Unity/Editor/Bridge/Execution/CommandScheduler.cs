@@ -33,6 +33,9 @@ namespace Conduit
 
         internal string? ActiveCommandType => Volatile.Read(ref snapshot).ActiveCommandType;
 
+        internal bool HasOutstandingWork
+            => !pendingEvents.IsEmpty || !pendingMainThreadActions.IsEmpty || Volatile.Read(ref snapshot).HasOutstandingWork;
+
         internal void Initialize() => testRunMonitor.EnsureCallbacksRegistered();
 
         internal bool IsTestRunnerActive() => testRunMonitor.IsAnyTestRunActive();

@@ -242,6 +242,10 @@ public sealed partial class UnityProjectOperations
     )
     {
         var fallback = ToToolExecutionResult(projectPath, commandType, execution, timeout);
+        if (execution.Result is null
+            && environmentInspector.TryReadIdleCloseDiagnostic(projectPath) is { } idleDiagnostic)
+            return ToolExecutionResult.NotConnected(projectPath, idleDiagnostic);
+
         if (execution.Result is not null || execution.Handshake is not null || execution.FailureKind is null)
             return fallback;
 

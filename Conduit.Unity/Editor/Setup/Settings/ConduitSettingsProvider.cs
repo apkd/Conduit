@@ -12,6 +12,11 @@ namespace Conduit
     sealed partial class ConduitSettingsProvider : SettingsProvider
     {
         const string SettingsPath = "Preferences/Conduit";
+        const string IdleCloseDescription =
+            "When Unity Editor is not focused for a long time without agent interaction, it will be " +
+            "automatically closed to conserve resources. The agent will restart Unity if necessary.\n\n" +
+            "Clicks, typing, or scrolling keep Unity open until the next MCP interaction. " +
+            "Unity stays open in Play mode and while work is running. Changes are saved before closing.";
         const string UnfocusedGameViewDescription =
             "Saves some power by keeping the game view window unfocused during play mode runs.";
         const string LowResolutionPlayModeDescription =
@@ -92,6 +97,9 @@ namespace Conduit
                     "Tests",
                     "Usage",
                     "Tracking",
+                    "Idle",
+                    "Close",
+                    "Minutes",
                     "Server",
                     "Editor",
                     "Configuration",

@@ -51,6 +51,14 @@ public sealed partial class UnityProjectOperations(
     readonly RefreshAssetDatabaseRecoveryCoordinator refreshAssetDatabaseRecoveryCoordinator
         = new(bridgeClient, projectRegistry, environmentInspector, sceneReloadPromptRecovery, loggerFactory.CreateLogger<RefreshAssetDatabaseRecoveryCoordinator>());
 
+    internal string? GetIdleCloseDiagnostic(string projectPath)
+    {
+        string target = BridgeTarget.Normalize(projectPath);
+        return PlayerSelector.TryParse(target, out _)
+            ? null
+            : environmentInspector.TryReadIdleCloseDiagnostic(target);
+    }
+
     public Task<ToolExecutionResult> RestartAsync(
         string projectPath,
         IReadOnlyList<string>? editorArguments,

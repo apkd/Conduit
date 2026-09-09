@@ -12,6 +12,15 @@ public sealed class UnityProjectEnvironmentInspector
     internal UnityProjectEnvironmentSnapshot Inspect(string projectPath) =>
         UnityProjectEnvironmentProbe.Inspect(projectPath);
 
+    internal string? TryReadIdleCloseDiagnostic(string projectPath)
+    {
+        // normal tool calls only pay for a file check; a marker needs process and lock confirmation
+        if (!BridgeIdleCloseMarker.Exists(ProjectPathNormalizer.ToPlatformPath(projectPath)))
+            return null;
+
+        return Inspect(projectPath).WasClosedAfterIdle ? BridgeIdleCloseMarker.Diagnostic : null;
+    }
+
     internal string FormatPingFailure(UnityProjectEnvironmentSnapshot snapshot, ToolExecutionResult? bridgeResult)
     {
         var processRuntime = UnityEditorProcessProbe.TryReadProcessRuntime(snapshot.MatchedProcess?.ProcessId);

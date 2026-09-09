@@ -11,6 +11,8 @@ namespace Conduit
         internal const int ReimportIdleSettleUpdates = AssetImportMonitor.IdleSettleUpdates;
         static bool initialized;
 
+        internal static bool HasOutstandingWork => scheduler.HasOutstandingWork || RecordTool.IsRecording;
+
         internal static void Initialize()
         {
             if (initialized)
@@ -51,6 +53,7 @@ namespace Conduit
         internal static void HandleIncomingCommand(int clientId, BridgeMessage message)
         {
             Initialize();
+            ConduitEditorIdleClose.RecordCommand(message);
             scheduler.EnqueueIncomingCommand(clientId, message);
         }
 

@@ -39,6 +39,8 @@ namespace Conduit
         static int nextClientId;
         static readonly string sessionInstanceId = Guid.NewGuid().ToString("N");
 
+        internal static bool HasIncomingMessages => Volatile.Read(ref inboundMessageCount) > 0;
+
         internal static void EnsureStarted()
         {
             if (AssetDatabase.IsAssetImportWorkerProcess())
@@ -181,6 +183,8 @@ namespace Conduit
             ConduitToolRunner.PumpQueuedCommands();
             if (refreshClientHandshakesRequested)
                 RefreshIdleClientHandshakes();
+
+            ConduitEditorIdleClose.Update();
         }
 
         static void OnBeforeAssemblyReload()

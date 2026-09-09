@@ -27,7 +27,7 @@ public sealed partial class UnityProjectOperations
     {
         var prepared = await snippetCompiler.CompileAsync(target, snippet, ct);
         if (prepared.Failure is { } failure)
-            return failure;
+            return ResolveCompilationFailure(target, failure);
 
         var compilation = prepared.Compilation!;
         return await DispatchCompiledCommandAsync(
@@ -51,7 +51,7 @@ public sealed partial class UnityProjectOperations
         var target = BridgeTarget.Normalize(projectPath);
         var prepared = await detourCompiler.PrepareAsync(target, methodName, replacementBody, ct);
         if (prepared.Failure is { } failure)
-            return failure;
+            return ResolveCompilationFailure(target, failure);
 
         return await DispatchCompiledCommandAsync(
             target,
@@ -61,6 +61,12 @@ public sealed partial class UnityProjectOperations
             ct
         );
     }
+
+    ToolExecutionResult ResolveCompilationFailure(string target, ToolExecutionResult failure)
+        => failure.Outcome is ToolOutcome.NotConnected or ToolOutcome.Timeout
+           && GetIdleCloseDiagnostic(target) is { } diagnostic
+            ? ToolExecutionResult.NotConnected(target, diagnostic)
+            : failure;
 
     async Task<ToolExecutionResult> DispatchCompiledCommandAsync(
         string target,

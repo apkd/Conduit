@@ -14,6 +14,8 @@ namespace Conduit
         static RecordingSession? active;
         static string? completedUncollected;
 
+        internal static bool IsRecording => active != null;
+
         internal static async Task<string> ExecuteAsync(string? target, string[] args)
         {
             RestoreReloadCompletion();

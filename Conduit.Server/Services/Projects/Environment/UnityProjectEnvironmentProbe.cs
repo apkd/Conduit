@@ -20,6 +20,6 @@ static class UnityProjectEnvironmentProbe
             UnityProjectPackageProbe.InspectLockfile(Path.Combine(platformProjectPath, "Temp", "UnityLockfile")),
             runningUnityProcesses.Length,
             UnityEditorProcessProbe.FindMatchingProjectProcess(runningUnityProcesses, normalizedProjectPath)
-        );
+        ) { HasIdleCloseMarker = BridgeIdleCloseMarker.Exists(platformProjectPath) };
     }
 }

@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -41,6 +42,16 @@ namespace Conduit
                 throw new InvalidOperationException($"Failed to save scene '{scenePath}'.");
 
             return $"Saved scene: {scenePath}";
+        }
+
+        internal static void SavePrefabStage(PrefabStage prefabStage)
+        {
+            if (prefabStage.prefabContentsRoot == null || string.IsNullOrWhiteSpace(prefabStage.assetPath))
+                throw new InvalidOperationException("Current prefab stage does not expose a saveable prefab root.");
+
+            PrefabUtility.SaveAsPrefabAsset(prefabStage.prefabContentsRoot, prefabStage.assetPath, out bool saved);
+            if (!saved)
+                throw new InvalidOperationException($"Failed to save prefab '{prefabStage.assetPath}'.");
         }
 
         internal static string DiscardScenes(string? targetScenePath)

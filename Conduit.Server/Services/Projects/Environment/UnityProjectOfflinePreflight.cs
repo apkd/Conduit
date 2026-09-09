@@ -33,6 +33,12 @@ static class UnityProjectOfflinePreflight
             return new(snapshot, null, true, InvalidProjectDiagnostic);
         }
 
+        if (snapshot.WasClosedAfterIdle)
+        {
+            projectRegistry.MarkReachable(normalizedProjectPath, false);
+            return new(snapshot, null, true, BridgeIdleCloseMarker.Diagnostic);
+        }
+
         var timeout = snapshot.MatchedProcess is null ? noProcessTimeout : UnityToolTimeouts.StatusCommand;
 
         var probeExecution = await bridgeClient.ProbeAsync(
@@ -84,6 +90,9 @@ static class UnityProjectOfflinePreflight
     {
         if (!snapshot.IsUnityProject)
             return InvalidProjectDiagnostic;
+
+        if (snapshot.WasClosedAfterIdle)
+            return BridgeIdleCloseMarker.Diagnostic;
 
         if (!string.IsNullOrWhiteSpace(safeModeDiagnostic))
             return safeModeDiagnostic;

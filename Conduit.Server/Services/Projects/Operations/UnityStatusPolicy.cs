@@ -48,6 +48,7 @@ static class UnityStatusPolicy
         diagnostic == UnityProjectOfflinePreflight.InvalidProjectDiagnostic
         || diagnostic == UnityProjectOfflinePreflight.MissingPackageDiagnostic
         || diagnostic == UnityProjectOfflinePreflight.OfflineDiagnostic
+        || diagnostic == BridgeIdleCloseMarker.Diagnostic
         || diagnostic == UnityProjectEnvironmentProbe.SafeModeDiagnostic
         || diagnostic == UnityProjectEnvironmentProbe.RefreshAssetDatabaseSafeModeDiagnostic;
 }

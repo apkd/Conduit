@@ -52,6 +52,28 @@ namespace Conduit
 
         static void DrawOtherSettings(ConduitSettings settings)
         {
+            EditorGUILayout.HelpBox(IdleCloseDescription, MessageType.Info);
+            EditorGUI.BeginChangeCheck();
+            bool automaticallyClose = EditorGUILayout.ToggleLeft(
+                "Automatically close Unity when idle",
+                settings.AutomaticallyCloseWhenIdle
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetAutomaticallyCloseWhenIdle(automaticallyClose);
+
+            if (settings.AutomaticallyCloseWhenIdle)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(15f);
+                EditorGUI.BeginChangeCheck();
+                float minutes = EditorGUILayout.DelayedFloatField(settings.IdleCloseMinutes, GUILayout.Width(60f));
+                if (EditorGUI.EndChangeCheck())
+                    settings.SetIdleCloseMinutes(minutes);
+                EditorGUILayout.LabelField("Idle time in minutes until Unity is closed");
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EditorGUILayout.Space();
             EditorGUI.BeginChangeCheck();
             bool unfocusedGameView = EditorGUILayout.ToggleLeft(
                 "Hide game view in play mode",

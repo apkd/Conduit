@@ -62,7 +62,7 @@ namespace Conduit
             ApplyOwningGameObjectNameOverwrite(target, json);
             MarkPrefabOverrideIfNeeded(target);
             EditorSceneManager.MarkSceneDirty(prefabStage.scene);
-            SavePrefabStage(prefabStage);
+            ConduitSceneCommandUtility.SavePrefabStage(prefabStage);
             AssetDatabase.SaveAssets();
             return true;
         }
@@ -81,7 +81,7 @@ namespace Conduit
                 ApplyOwningGameObjectNameOverwrite(stageTarget, json);
                 MarkPrefabOverrideIfNeeded(stageTarget);
                 EditorSceneManager.MarkSceneDirty(currentPrefabStage.scene);
-                SavePrefabStage(currentPrefabStage);
+                ConduitSceneCommandUtility.SavePrefabStage(currentPrefabStage);
                 AssetDatabase.SaveAssets();
                 return stageTarget;
             }
@@ -212,14 +212,5 @@ namespace Conduit
             if (PrefabUtility.IsPartOfPrefabInstance(target))
                 PrefabUtility.RecordPrefabInstancePropertyModifications(target);
         }
-
-        static void SavePrefabStage(PrefabStage prefabStage)
-        {
-            if (prefabStage.prefabContentsRoot == null || string.IsNullOrWhiteSpace(prefabStage.assetPath))
-                throw new InvalidOperationException("Current prefab stage does not expose a saveable prefab root.");
-
-            PrefabUtility.SaveAsPrefabAsset(prefabStage.prefabContentsRoot, prefabStage.assetPath);
-        }
-
     }
 }

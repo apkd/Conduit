@@ -14,4 +14,7 @@ sealed class UnityProjectEnvironmentSnapshot(
     internal UnityProjectLockfileState LockfileState { get; } = lockfileState;
     internal int RunningUnityProcessCount { get; } = runningUnityProcessCount;
     internal UnityProjectProcessInfo? MatchedProcess { get; } = matchedProcess;
+    internal bool HasIdleCloseMarker { get; init; }
+    internal bool WasClosedAfterIdle => HasIdleCloseMarker && IsUnityProject
+        && MatchedProcess is null && LockfileState != UnityProjectLockfileState.Locked;
 }
