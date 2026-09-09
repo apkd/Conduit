@@ -29,6 +29,7 @@ namespace Conduit
                         Snippet = operation.Snippet,
                         Args = operation.Args,
                         TestFilter = operation.TestFilter,
+                        IncludeBackgroundLogs = operation.IncludeBackgroundLogs,
                         ToolUsageStartedUtcTicks = operation.ToolUsageStartedUtcTicks,
                         ReimportAssetPaths = operation.ReimportAssetPaths,
                         ProjectSettingPrevious = operation.ProjectSettingPrevious,
@@ -75,6 +76,7 @@ namespace Conduit
                 Target = restoredState.Target,
                 Snippet = restoredState.Snippet,
                 TestFilter = restoredState.TestFilter,
+                IncludeBackgroundLogs = restoredState.IncludeBackgroundLogs,
                 ToolUsageStartedUtcTicks = restoredState.ToolUsageStartedUtcTicks,
                 Args = restoredState.Args ?? Array.Empty<string>(),
                 IsAcknowledged = true,
@@ -163,6 +165,7 @@ namespace Conduit
             public string? Snippet;
             public string[] Args = Array.Empty<string>();
             public string? TestFilter;
+            public bool IncludeBackgroundLogs;
             public long ToolUsageStartedUtcTicks;
             public string[] ReimportAssetPaths = Array.Empty<string>();
             public string? ProjectSettingPrevious;

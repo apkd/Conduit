@@ -31,7 +31,7 @@ namespace Conduit
         internal static string FormatCapturedLogEntryForTest(string message, string? stackTrace, int repeatCount = 1)
         {
             using var pooledBuilder = ConduitPool.GetStringBuilder(out var builder);
-            var entry = new ToolLogCapture.CapturedLogEntry(
+            var entry = new CapturedLogEntries.Entry(
                 message,
                 stackTrace ?? string.Empty,
                 LogType.Log
@@ -71,7 +71,7 @@ namespace Conduit
 
         internal static void AppendCapturedLogEntry(
             StringBuilder builder,
-            ToolLogCapture.CapturedLogEntry entry)
+            CapturedLogEntries.Entry entry)
             => BridgeLogFormatter.Append(
                 builder,
                 entry.Message,

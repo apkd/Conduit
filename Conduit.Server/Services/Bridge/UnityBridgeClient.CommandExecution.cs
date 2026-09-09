@@ -171,7 +171,8 @@ public sealed partial class UnityBridgeClient
 
     internal static async Task<BridgeClientResult> PreferProcessExitAsync(
         BridgeClientResult execution,
-        Task<BridgeClientResult?>? processExitTask
+        Task<BridgeClientResult?>? processExitTask,
+        TimeProvider? timeProvider = null
     )
     {
         if (processExitTask is null
@@ -182,7 +183,10 @@ public sealed partial class UnityBridgeClient
         // pipe EOF can precede the OS process-exit signal; briefly let the stronger diagnosis win.
         try
         {
-            return await processExitTask.WaitAsync(processExitConfirmationWindow) ?? execution;
+            return await processExitTask.WaitAsync(
+                processExitConfirmationWindow,
+                timeProvider ?? TimeProvider.System
+            ) ?? execution;
         }
         catch (TimeoutException)
         {

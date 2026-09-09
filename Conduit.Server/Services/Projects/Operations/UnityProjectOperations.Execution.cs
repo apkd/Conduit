@@ -29,6 +29,7 @@ public sealed partial class UnityProjectOperations
     async Task<ToolExecutionResult> EnqueueAsync(string projectPath, BridgeCommand command, CT ct)
     {
         command.TrackUsage = true;
+        command.IncludeBackgroundLogs = true;
         var normalizedProjectPath = BridgeTarget.Normalize(projectPath);
         if (PlayerSelector.TryParse(normalizedProjectPath, out _))
         {

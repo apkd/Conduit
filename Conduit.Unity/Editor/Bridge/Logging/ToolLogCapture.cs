@@ -17,8 +17,8 @@ namespace Conduit
         readonly List<CapturedLogTarget> completedTestLogTargets = new();
         // nested test callbacks make the latest started test the owner of subsequent logs
         readonly List<string> activeTestScopes = new();
-        readonly Dictionary<LogSignature, int> capturedLogEntryIndexes = new();
-        readonly List<CapturedLogEntry> capturedLogEntries = new();
+        readonly CapturedLogEntries capturedLogs = new();
+        List<CapturedLogEntries.Entry> capturedLogEntries => capturedLogs.Entries;
         string? lastRawMessage;
         string? lastRawStackTrace;
         int lastRawEntryIndex;
@@ -43,7 +43,7 @@ namespace Conduit
         {
             if (hooked)
             {
-                Application.logMessageReceivedThreaded -= OnLogMessageReceived;
+                BridgeLogs.StopCapture(OnLogMessageReceived);
                 hooked = false;
             }
 
@@ -63,6 +63,17 @@ namespace Conduit
         {
             lock (gate)
                 discardOnCompletion = true;
+        }
+
+        internal void Stop()
+        {
+            if (hooked)
+            {
+                BridgeLogs.StopCapture(OnLogMessageReceived);
+                hooked = false;
+            }
+            lock (gate)
+                ResetStateUnderLock();
         }
 
         internal void HandleTestStarted(ITestAdaptor test)
@@ -105,8 +116,7 @@ namespace Conduit
             activeTestScopes.Clear();
             activeTestLogTargets.Clear();
             completedTestLogTargets.Clear();
-            capturedLogEntryIndexes.Clear();
-            capturedLogEntries.Clear();
+            capturedLogs.Clear();
             lastRawMessage = null;
             lastRawStackTrace = null;
             lastRawEntryIndex = 0;
@@ -126,53 +136,6 @@ namespace Conduit
                 activeTestScopes.RemoveAt(index);
                 return;
             }
-        }
-
-        internal sealed class CapturedLogEntry
-        {
-            internal CapturedLogEntry(string message, string stackTrace, LogType logType)
-            {
-                Message = message;
-                StackTrace = stackTrace;
-                LogType = logType;
-                RepeatCount = 1;
-            }
-
-            internal string Message { get; }
-            internal string StackTrace { get; }
-            internal LogType LogType { get; }
-            internal int RepeatCount { get; set; }
-        }
-
-        readonly struct LogSignature : IEquatable<LogSignature>
-        {
-            internal LogSignature(string message, string stackTrace, LogType logType)
-            {
-                Message = message;
-                StackTrace = stackTrace;
-                LogType = logType;
-                unchecked
-                {
-                    var hashCode = StringComparer.Ordinal.GetHashCode(message);
-                    hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(stackTrace);
-                    HashCode = (hashCode * 397) ^ (int)logType;
-                }
-            }
-
-            internal string Message { get; }
-            internal string StackTrace { get; }
-            internal LogType LogType { get; }
-            internal int HashCode { get; }
-
-            public bool Equals(LogSignature other)
-                => Message == other.Message
-                   && StackTrace == other.StackTrace
-                   && LogType == other.LogType;
-
-            public override bool Equals(object? value)
-                => value is LogSignature other && Equals(other);
-
-            public override int GetHashCode() => HashCode;
         }
 
         sealed class CapturedLogTarget

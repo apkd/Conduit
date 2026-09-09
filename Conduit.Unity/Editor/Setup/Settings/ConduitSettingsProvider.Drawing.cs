@@ -75,6 +75,15 @@ namespace Conduit
 
             EditorGUILayout.Space();
             EditorGUI.BeginChangeCheck();
+            var includeBackgroundLogs = EditorGUILayout.ToggleLeft(
+                new GUIContent("Include logs between tool calls", "Adds a small, lossy summary to the next Unity tool reply. Messages may be merged or discarded. Resets on script reload. Development players always enable this."),
+                settings.IncludeBackgroundLogs
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetIncludeBackgroundLogs(includeBackgroundLogs);
+            EditorGUILayout.Space();
+
+            EditorGUI.BeginChangeCheck();
             bool unfocusedGameView = EditorGUILayout.ToggleLeft(
                 "Hide game view in play mode",
                 settings.UnfocusedGameView

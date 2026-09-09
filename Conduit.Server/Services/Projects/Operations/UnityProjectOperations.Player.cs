@@ -26,13 +26,14 @@ public sealed partial class UnityProjectOperations
             {
                 CommandType = BridgeCommandTypes.Status,
                 TrackUsage = true,
+                IncludeBackgroundLogs = true,
             },
             UnityToolTimeouts.StatusCommand,
             processIdHint: null,
             ct
         );
         if (TryParsePingSnapshot(execution, out var snapshot))
-            return AppendLivePlayers(
+            return ToolResponseFormatter.AppendBackgroundLogs(AppendLivePlayers(
                 UnityProjectStatusFormatter.FormatPingReport(snapshot),
                 execution.Handshake is { IsPlayer: true } handshake
                     ?
@@ -44,7 +45,7 @@ public sealed partial class UnityProjectOperations
                         },
                     ]
                     : []
-            );
+            ), execution.Result?.BackgroundLogs);
 
         return ToolResponseFormatter.Format(
             execution.Result

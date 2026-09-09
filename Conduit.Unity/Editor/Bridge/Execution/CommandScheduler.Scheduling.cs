@@ -83,7 +83,8 @@ namespace Conduit
                     message.request_id,
                     message.command.track_usage
                         ? ConduitToolUsage.BeginCall(BridgeCommandTypes.Status)
-                        : 0L
+                        : 0L,
+                    message.command.include_background_logs
                 );
                 return;
             }
@@ -210,6 +211,7 @@ namespace Conduit
                 DisplayName = command.display_name,
                 TestFilter = command.test_filter,
                 IsAsync = command.@async,
+                IncludeBackgroundLogs = command.include_background_logs,
                 RebuildCache = command.rebuild_cache,
                 ToolUsageStartedUtcTicks = usageStartedUtcTicks,
                 Args = command.args ?? Array.Empty<string>(),
@@ -222,14 +224,15 @@ namespace Conduit
         async Task AcknowledgeAndExecuteStatusAsync(
             int clientId,
             string requestId,
-            long usageStartedUtcTicks
+            long usageStartedUtcTicks,
+            bool includeBackgroundLogs
         )
         {
             if (!await ConduitConnection.TrySendCommandStartedAsync(clientId, requestId, BridgeCommandTypes.Status))
                 return;
 
             EnqueueMainThreadAction(
-                () => _ = ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks)
+                () => _ = ExecuteStatusAsync(clientId, requestId, usageStartedUtcTicks, includeBackgroundLogs)
             );
         }
 

@@ -12,10 +12,12 @@ public sealed partial class UnityProjectOperations
         if (PlayerSelector.TryParse(normalizedProjectPath, out var playerSelector))
             return await StatusPlayerAsync(playerSelector, ct);
 
-        string AppendPlayers(string report) =>
-            AppendLivePlayers(report, playerDiscovery.FindForProject(normalizedProjectPath));
-
         var usage = new StatusUsageState();
+        string AppendPlayers(string report) =>
+            ToolResponseFormatter.AppendBackgroundLogs(
+                AppendLivePlayers(report, playerDiscovery.FindForProject(normalizedProjectPath)),
+                usage.BackgroundLogs
+            );
         try
         {
             var session = projectRegistry.GetOrAddProject(normalizedProjectPath);
@@ -198,12 +200,15 @@ public sealed partial class UnityProjectOperations
                 {
                     CommandType = BridgeCommandTypes.Status,
                     TrackUsage = trackUsage,
+                    IncludeBackgroundLogs = !usage.BackgroundRequested,
                 },
                 timeout,
                 processIdHint,
                 ct
             );
             usage.WasSent |= trackUsage && result.CommandSent;
+            usage.BackgroundRequested |= result.CommandSent;
+            usage.BackgroundLogs ??= result.Result?.BackgroundLogs;
             return result;
         }
     }
@@ -223,5 +228,7 @@ public sealed partial class UnityProjectOperations
     sealed class StatusUsageState
     {
         internal bool WasSent;
+        internal bool BackgroundRequested;
+        internal string? BackgroundLogs;
     }
 }

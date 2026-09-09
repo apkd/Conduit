@@ -10,10 +10,15 @@ static class ToolResponseFormatter
         var content = TryGetSingleContent(result, exceptionText)
                       ?? FormatSections(result, exceptionText);
         if (!string.IsNullOrWhiteSpace(result.DisplayName))
-            return FormatDisplayName(result.DisplayName, content);
+            content = FormatDisplayName(result.DisplayName, content);
 
-        return content ?? FormatOutcomeFallback(result.Outcome);
+        return AppendBackgroundLogs(content ?? FormatOutcomeFallback(result.Outcome), result.BackgroundLogs);
     }
+
+    internal static string AppendBackgroundLogs(string content, string? backgroundLogs)
+        => string.IsNullOrWhiteSpace(backgroundLogs)
+            ? content
+            : $"{content}\n\nBetween calls:\n{backgroundLogs}";
 
     static string? FormatSections(ToolExecutionResult result, string? exceptionText)
     {

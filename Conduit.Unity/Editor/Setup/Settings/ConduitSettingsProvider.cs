@@ -97,6 +97,7 @@ namespace Conduit
                     "Tests",
                     "Usage",
                     "Tracking",
+                    "Logs",
                     "Idle",
                     "Close",
                     "Minutes",

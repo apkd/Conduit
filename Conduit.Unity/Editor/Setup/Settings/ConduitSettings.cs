@@ -12,6 +12,7 @@ namespace Conduit
         [SerializeField] bool unfocusedGameView;
         [SerializeField] bool lowResolutionPlayMode;
         [SerializeField] bool muteAudioInPlayMode;
+        [SerializeField] bool includeBackgroundLogs;
         [SerializeField] bool automaticallyCloseWhenIdle;
         [SerializeField] float idleCloseMinutes = 15f;
         [SerializeField] string selectedEditorId = string.Empty;
@@ -21,6 +22,7 @@ namespace Conduit
         internal bool UnfocusedGameView => unfocusedGameView;
         internal bool LowResolutionPlayMode => lowResolutionPlayMode;
         internal bool MuteAudioInPlayMode => muteAudioInPlayMode;
+        internal bool IncludeBackgroundLogs => includeBackgroundLogs;
         internal bool AutomaticallyCloseWhenIdle => automaticallyCloseWhenIdle;
         internal float IdleCloseMinutes => idleCloseMinutes;
         internal string SelectedEditorId => selectedEditorId;
@@ -34,6 +36,16 @@ namespace Conduit
                 return;
 
             unfocusedGameView = value;
+            Save(true);
+        }
+
+        internal void SetIncludeBackgroundLogs(bool value)
+        {
+            if (includeBackgroundLogs == value)
+                return;
+
+            includeBackgroundLogs = value;
+            BridgeLogs.Configure(value, Application.consoleLogPath);
             Save(true);
         }
 

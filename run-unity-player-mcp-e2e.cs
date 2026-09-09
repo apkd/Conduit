@@ -36,6 +36,43 @@ try
     RequireContains(status, endpoint.Selector, "player status selector");
     RequireContains(status, "Status: player", "player status mode");
 
+    const string idleLog = "Conduit player between-call diagnostic";
+    var scheduledLog = await client.CallAsync(
+        "execute_code",
+        new()
+        {
+            ["projectPath"] = endpoint.Selector,
+            // resume on a later player frame, after the command's log capture has ended.
+            ["snippet"] = $$"""
+                class BackgroundLogProbe : MonoBehaviour
+                {
+                    System.Collections.IEnumerator Start()
+                    {
+                        yield return null;
+                        Debug.LogWarning("{{idleLog}}");
+                        Destroy(gameObject);
+                    }
+                }
+                new GameObject("Conduit background log probe").AddComponent<BackgroundLogProbe>();
+                return "scheduled";
+                """,
+        }
+    );
+    RequireContains(scheduledLog, "scheduled", "scheduling the player between-call log");
+    var idleWait = Stopwatch.StartNew();
+    string idleStatus;
+    do
+    {
+        idleStatus = await client.CallAsync("status", new() { ["projectPath"] = endpoint.Selector });
+        if (idleStatus.Contains(idleLog, StringComparison.Ordinal))
+            break;
+        await Task.Delay(100);
+    } while (idleWait.Elapsed < TimeSpan.FromSeconds(10));
+    RequireContains(idleStatus, idleLog, "player between-call logs");
+    var consumedStatus = await client.CallAsync("status", new() { ["projectPath"] = endpoint.Selector });
+    if (consumedStatus.Contains(idleLog, StringComparison.Ordinal))
+        throw new InvalidOperationException("Player background logs were delivered more than once.");
+
     var projects = new[]
     {
         CreateAssociationProject(testRoot, "project-copy-a", endpoint),

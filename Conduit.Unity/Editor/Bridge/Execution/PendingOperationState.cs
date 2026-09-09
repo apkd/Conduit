@@ -16,6 +16,8 @@ namespace Conduit
         internal bool IsAsync;
         internal bool RebuildCache;
         internal bool IsRestored;
+        internal bool IncludeBackgroundLogs;
+        internal string? BackgroundLogs;
         internal int ClientID;
         internal bool IsAcknowledged;
         // build-target and define changes reload the domain; retain the original value for the final confirmation.

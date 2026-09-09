@@ -34,6 +34,7 @@ public sealed partial class UnityProjectOperations
         var selector = PlayerSelector.TryParse(playerTarget, out var parsedSelector)
             ? parsedSelector
             : throw new InvalidOperationException($"Player target '{playerTarget}' is invalid.");
+        command.IncludeBackgroundLogs = true;
         var resolution = await playerDiscovery.ResolveAsync(selector, ct);
         if (resolution.Endpoint is null)
             return new()
@@ -135,6 +136,7 @@ public sealed partial class UnityProjectOperations
                 Outcome = result.Outcome,
                 DisplayName = result.DisplayName,
                 Logs = result.Logs,
+                BackgroundLogs = result.BackgroundLogs,
                 ReturnValue = $"Player image captured: {path}",
                 Exception = result.Exception,
                 Diagnostic = result.Diagnostic,
@@ -145,7 +147,8 @@ public sealed partial class UnityProjectOperations
             return ToolExecutionResult.FromException(
                 exception,
                 result.Logs ?? string.Empty,
-                "The player screenshot was received but could not be stored by the MCP server."
+                "The player screenshot was received but could not be stored by the MCP server.",
+                result.BackgroundLogs
             );
         }
     }

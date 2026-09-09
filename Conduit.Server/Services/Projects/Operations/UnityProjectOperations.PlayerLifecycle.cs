@@ -30,12 +30,14 @@ public sealed partial class UnityProjectOperations
             if (endpoint is null)
                 return ToolExecutionResult.Timeout(
                     TimeSpan.FromSeconds(20),
-                    $"The replacement player process {processId} did not advertise its bridge endpoint."
+                    $"The replacement player process {processId} did not advertise its bridge endpoint.",
+                    result.BackgroundLogs
                 );
 
             return ToolExecutionResult.Success(
-                string.Empty,
-                $"Player restarted.\nLIVE PLAYER PROCESS ID: `{endpoint.Selector}`"
+                result.Logs ?? string.Empty,
+                $"Player restarted.\nLIVE PLAYER PROCESS ID: `{endpoint.Selector}`",
+                backgroundLogs: result.BackgroundLogs
             );
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -43,7 +45,8 @@ public sealed partial class UnityProjectOperations
             return ToolExecutionResult.FromException(
                 exception,
                 result.Logs ?? string.Empty,
-                "The player restarted but returned an invalid handoff response."
+                "The player restarted but returned an invalid handoff response.",
+                result.BackgroundLogs
             );
         }
     }
