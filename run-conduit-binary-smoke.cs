@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Net;
 using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -131,7 +129,7 @@ static async Task<string> RunHttpStatusAsync(
     string projectPath
 )
 {
-    var port = ReserveLoopbackPort();
+    var listening = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
     using var process = new Process
     {
         StartInfo = new(conduitExecutable)
@@ -141,20 +139,21 @@ static async Task<string> RunHttpStatusAsync(
         },
     };
     process.StartInfo.ArgumentList.Add("--http");
-    process.StartInfo.ArgumentList.Add("--port");
-    process.StartInfo.ArgumentList.Add(port.ToString());
+    process.StartInfo.ArgumentList.Add("--url");
+    process.StartInfo.ArgumentList.Add("http://127.0.0.1:0");
 
     process.Start();
-    var stderrTask = CaptureStandardErrorAsync(process);
+    var stderrTask = CaptureStandardErrorAsync(process, listening);
 
     try
     {
-        await WaitForHttpServerAsync(process, port, TimeSpan.FromSeconds(10));
+        // let the server own the port from allocation through shutdown
+        var address = await listening.Task.WaitAsync(TimeSpan.FromMinutes(1));
         using var client = new HttpClient(
             new SocketsHttpHandler { UseProxy = false }
         )
         {
-            BaseAddress = new($"http://127.0.0.1:{port}/"),
+            BaseAddress = address,
         };
 
         var requestId = 0;
@@ -213,47 +212,6 @@ static string ReadStatusText(JsonObject status)
        ?? throw new InvalidOperationException(
            $"Status response did not contain text content: {status}"
        );
-
-static int ReserveLoopbackPort()
-{
-    var listener = new TcpListener(IPAddress.Loopback, 0);
-    listener.Start();
-    try
-    {
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
-    finally
-    {
-        listener.Stop();
-    }
-}
-
-static async Task WaitForHttpServerAsync(
-    Process process,
-    int port,
-    TimeSpan timeout
-)
-{
-    using var cts = new CancellationTokenSource(timeout);
-    while (true)
-    {
-        if (process.HasExited)
-            throw new InvalidOperationException(
-                $"The HTTP server exited during startup with code {process.ExitCode}."
-            );
-
-        try
-        {
-            using var client = new TcpClient();
-            await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
-            return;
-        }
-        catch (SocketException) when (!cts.IsCancellationRequested)
-        {
-            await Task.Delay(50, cts.Token);
-        }
-    }
-}
 
 static async Task<JsonObject> RequestHttpAsync(
     HttpClient client,
@@ -391,12 +349,21 @@ static void StopProcess(Process process)
     catch { }
 }
 
-static async Task<List<string>> CaptureStandardErrorAsync(Process process)
+static async Task<List<string>> CaptureStandardErrorAsync(Process process, TaskCompletionSource<Uri>? listening = null)
 {
     var lines = new List<string>();
     while (await process.StandardError.ReadLineAsync() is { } line)
+    {
         if (!string.IsNullOrWhiteSpace(line))
             lines.Add(line);
+        const string prefix = "Now listening on: ";
+        var index = line.IndexOf(prefix, StringComparison.Ordinal);
+        if (listening is not null && index >= 0
+            && Uri.TryCreate(line[(index + prefix.Length)..].Trim(), UriKind.Absolute, out var address))
+            listening.TrySetResult(address);
+    }
+
+    listening?.TrySetException(new InvalidOperationException("The HTTP server exited before reporting its listen address."));
 
     return lines;
 }

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -36,42 +38,7 @@ try
     RequireContains(status, endpoint.Selector, "player status selector");
     RequireContains(status, "Status: player", "player status mode");
 
-    const string idleLog = "Conduit player between-call diagnostic";
-    var scheduledLog = await client.CallAsync(
-        "execute_code",
-        new()
-        {
-            ["projectPath"] = endpoint.Selector,
-            // resume on a later player frame, after the command's log capture has ended.
-            ["snippet"] = $$"""
-                class BackgroundLogProbe : MonoBehaviour
-                {
-                    System.Collections.IEnumerator Start()
-                    {
-                        yield return null;
-                        Debug.LogWarning("{{idleLog}}");
-                        Destroy(gameObject);
-                    }
-                }
-                new GameObject("Conduit background log probe").AddComponent<BackgroundLogProbe>();
-                return "scheduled";
-                """,
-        }
-    );
-    RequireContains(scheduledLog, "scheduled", "scheduling the player between-call log");
-    var idleWait = Stopwatch.StartNew();
-    string idleStatus;
-    do
-    {
-        idleStatus = await client.CallAsync("status", new() { ["projectPath"] = endpoint.Selector });
-        if (idleStatus.Contains(idleLog, StringComparison.Ordinal))
-            break;
-        await Task.Delay(100);
-    } while (idleWait.Elapsed < TimeSpan.FromSeconds(10));
-    RequireContains(idleStatus, idleLog, "player between-call logs");
-    var consumedStatus = await client.CallAsync("status", new() { ["projectPath"] = endpoint.Selector });
-    if (consumedStatus.Contains(idleLog, StringComparison.Ordinal))
-        throw new InvalidOperationException("Player background logs were delivered more than once.");
+    await CheckBackgroundLogsAsync(client, endpoint.Selector);
 
     var projects = new[]
     {
@@ -374,6 +341,54 @@ finally
             Directory.Delete(testRoot, recursive: true);
     }
     catch { }
+}
+
+static async Task CheckBackgroundLogsAsync(McpClient client, string selector)
+{
+    const string idleLog = "Conduit player between-call diagnostic";
+    using var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var scheduledLog = await client.CallAsync(
+        "execute_code",
+        new()
+        {
+            ["projectPath"] = selector,
+            ["snippet"] = $$"""
+                class BackgroundLogProbe
+                {
+                    public static async Task RunAsync()
+                    {
+                        using var peer = new System.Net.Sockets.TcpClient();
+                        await peer.ConnectAsync("127.0.0.1", {{port}});
+                        using var stream = peer.GetStream();
+                        var signal = new byte[1];
+                        if (await stream.ReadAsync(signal, 0, 1) != 1)
+                            throw new System.IO.IOException("The log probe connection closed before release.");
+                        Debug.LogWarning("{{idleLog}}");
+                        await stream.WriteAsync(signal, 0, 1);
+                    }
+                }
+                _ = BackgroundLogProbe.RunAsync();
+                return "scheduled";
+                """,
+        }
+    );
+    RequireContains(scheduledLog, "scheduled", "scheduling the player between-call log");
+
+    // release logging only after capture ends, and await its acknowledgement before the next call
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+    using var peer = await listener.AcceptTcpClientAsync(timeout.Token);
+    using var stream = peer.GetStream();
+    var signal = new byte[1];
+    await stream.WriteAsync(signal, timeout.Token);
+    await stream.ReadExactlyAsync(signal, timeout.Token);
+
+    var idleStatus = await client.CallAsync("status", new() { ["projectPath"] = selector });
+    RequireContains(idleStatus, idleLog, "player between-call logs");
+    var consumedStatus = await client.CallAsync("status", new() { ["projectPath"] = selector });
+    if (consumedStatus.Contains(idleLog, StringComparison.Ordinal))
+        throw new InvalidOperationException("Player background logs were delivered more than once.");
 }
 
 static Process StartPlayer(Options options, string ipcRoot)
