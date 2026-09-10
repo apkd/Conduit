@@ -9,7 +9,7 @@ namespace Conduit;
 public sealed partial class UnityBridgeClientTests
 {
     [Test]
-    public async Task BridgeCommandSerializesToolUsageIntent()
+    public async Task BridgeCommandSerializesToolUsageIntent(CancellationToken ct)
     {
         var payload = BridgeProtocol.Serialize(
             BridgeMessage.CreateCommand(
@@ -27,36 +27,44 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task ProbeTimeoutWhileWaitingForTheProjectGateReturnsATimeoutResult()
+    public async Task ProbeTimeoutWhileWaitingForTheProjectGateReturnsATimeoutResult(CancellationToken ct)
     {
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
         var projectPath = $"/tmp/conduit-probe-timeout-{Guid.NewGuid():N}";
+        using var firstCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         var firstProbe = client.ProbeAsync(
             projectPath,
             processIdHint: null,
-            timeout: TimeSpan.FromMilliseconds(900),
-            CancellationToken.None
+            timeout: TestTimeout,
+            firstCancellation.Token
         );
 
-        await Task.Delay(50);
+        try
+        {
+            // the first probe holds the gate until cancellation; only the second probe times out
+            var secondProbe = await client.ProbeAsync(
+                projectPath,
+                processIdHint: null,
+                timeout: TimeSpan.FromMilliseconds(50),
+                ct
+            );
 
-        var secondProbe = await client.ProbeAsync(
-            projectPath,
-            processIdHint: null,
-            timeout: TimeSpan.FromMilliseconds(50),
-            CancellationToken.None
-        );
-
-        await Assert.That(secondProbe.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ConnectTimedOut);
-        await Assert.That(secondProbe.FailureDiagnostic).Contains("Could not establish a Unity connection");
-        await Assert.That(secondProbe.Result).IsNull();
-
-        await firstProbe;
+            await Assert.That(secondProbe.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ConnectTimedOut);
+            await Assert.That(secondProbe.FailureDiagnostic).Contains("Could not establish a Unity connection");
+            await Assert.That(secondProbe.Result).IsNull();
+            await Assert.That(firstProbe.IsCompleted).IsFalse();
+        }
+        finally
+        {
+            firstCancellation.Cancel();
+            try { await firstProbe; }
+            catch (OperationCanceledException) when (firstCancellation.IsCancellationRequested) { }
+        }
     }
 
     [Test]
-    public async Task ProbeTreatsProcessIdHintAsAHintNotAFatalLivenessCheck()
+    public async Task ProbeTreatsProcessIdHintAsAHintNotAFatalLivenessCheck(CancellationToken ct)
     {
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
         var projectPath = $"/tmp/conduit-stale-pid-{Guid.NewGuid():N}";
@@ -65,7 +73,7 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             processIdHint: int.MaxValue,
             timeout: TimeSpan.FromMilliseconds(50),
-            CancellationToken.None
+            ct
         );
 
         await Assert.That(result.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ConnectTimedOut);
@@ -74,11 +82,11 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task BridgeTransportConnectsToDotNetNamedPipeServer()
+    public async Task BridgeTransportConnectsToDotNetNamedPipeServer(CancellationToken ct)
     {
         // bound both sides while allowing delayed I/O completions on shared CI runners
-        var timeout = TimeSpan.FromSeconds(10);
-        using var cancellation = new CancellationTokenSource(timeout);
+        var timeout = TestTimeout;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var pipeName = $"unity-conduit-test-{Guid.NewGuid():N}";
         await using var server = new NamedPipeServerStream(
             pipeName,
@@ -105,7 +113,7 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task FifoTransportReadHonorsCancellation()
+    public async Task FifoTransportReadHonorsCancellation(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -114,22 +122,24 @@ public sealed partial class UnityBridgeClientTests
         await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
         await using var transport = await BridgeTransport.ConnectAsync(
             BridgeIdentifiers.GetPipeName(projectPath),
-            TimeSpan.FromSeconds(2),
-            CancellationToken.None
+            TestTimeout,
+            ct
         );
         await transport.WritePayloadAsync(
             BridgeProtocol.Serialize(
                 BridgeMessage.CreateHello(new() { ProjectPath = projectPath })
             ),
-            CancellationToken.None
+            ct
         );
-        await Assert.That(await transport.ReadLineAsync(CancellationToken.None)).IsNotNull();
+        await Assert.That(await transport.ReadLineAsync(ct)).IsNotNull();
 
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var read = transport.ReadLineAsync(cancellation.Token);
+        cancellation.Cancel();
         var cancelled = false;
         try
         {
-            await transport.ReadLineAsync(cancellation.Token);
+            await read;
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -140,7 +150,7 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task ExecuteCommandIgnoresHandshakeProcessIdThatIsNotVisible()
+    public async Task ExecuteCommandIgnoresHandshakeProcessIdThatIsNotVisible(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -153,9 +163,9 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             BridgeIdentifiers.CreateRequestId(),
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None
+            ct
         );
 
         await Assert.That(result.FailureKind).IsNull();
@@ -163,7 +173,7 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task ExecuteCommandReadsCoalescedUnixSocketResponses()
+    public async Task ExecuteCommandReadsCoalescedFifoResponses(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -180,9 +190,9 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             BridgeIdentifiers.CreateRequestId(),
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None
+            ct
         );
 
         await Assert.That(result.FailureKind).IsNull();
@@ -190,33 +200,34 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task IdleRemoteCloseInvalidatesTheCachedHandshake()
+    public async Task IdleRemoteCloseInvalidatesTheCachedHandshake(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
 
         var projectPath = $"/tmp/conduit-idle-close-{Guid.NewGuid():N}";
-        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue);
+        await using var bridge = await FakeFifoBridge.StartAsync(projectPath, int.MaxValue, holdConnection: true);
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
         var result = await client.ExecuteCommandAsync(
             projectPath,
             BridgeIdentifiers.CreateRequestId(),
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None
+            ct
         );
 
         await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
-        for (var attempt = 0; attempt < 100
-             && client.TryGetLiveHandshake(projectPath, out _); attempt++)
-            await Task.Delay(10);
+        await Assert.That(client.TryGetLiveHandshake(projectPath, out _)).IsTrue();
+        bridge.CloseConnection();
+        while (client.TryGetLiveHandshake(projectPath, out _))
+            await Task.Delay(10, ct);
 
         await Assert.That(client.TryGetLiveHandshake(projectPath, out _)).IsFalse();
     }
 
     [Test]
-    public async Task StatusCompletesWhileAnotherCommandIsStillRunning()
+    public async Task StatusCompletesWhileAnotherCommandIsStillRunning(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -232,23 +243,23 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             "long-command",
             new() { CommandType = BridgeCommandTypes.RunTestsEditMode },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None
+            ct
         );
 
-        await bridge.CommandStarted.WaitAsync(TimeSpan.FromSeconds(10));
+        await bridge.CommandStarted.WaitAsync(ct);
         var status = client.ExecuteCommandAsync(
             projectPath,
             "concurrent-status",
             new() { CommandType = BridgeCommandTypes.Status },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None
+            ct
         );
 
-        await bridge.ConcurrentCommandCompleted.WaitAsync(TimeSpan.FromSeconds(10));
-        var statusResult = await status.WaitAsync(TimeSpan.FromSeconds(10));
+        await bridge.ConcurrentCommandCompleted.WaitAsync(ct);
+        var statusResult = await status.WaitAsync(ct);
         await Assert.That(statusResult.Result?.Outcome).IsEqualTo(ToolOutcome.Success);
         await Assert.That(longCommand.IsCompleted).IsFalse();
 
@@ -258,7 +269,7 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task IdempotentCommandReconnectsOnceAfterDisconnect()
+    public async Task IdempotentCommandReconnectsOnceAfterDisconnect(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -274,8 +285,8 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             "idempotent-read",
             new() { CommandType = BridgeCommandTypes.CompilationReferences },
-            TimeSpan.FromSeconds(10),
-            CancellationToken.None
+            TestTimeout,
+            ct
         );
 
         await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Success);

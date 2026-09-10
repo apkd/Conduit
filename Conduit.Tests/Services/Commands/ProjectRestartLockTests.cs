@@ -3,28 +3,29 @@ namespace Conduit;
 public sealed class ProjectRestartLockTests
 {
     [Test]
-    public async Task SameProjectWaitsForTheActiveRestartProcess()
+    [Timeout(60_000)]
+    public async Task SameProjectWaitsForTheActiveRestartProcess(CancellationToken ct)
     {
         string projectPath = Path.Combine(Path.GetTempPath(), $"conduit-restart-{Guid.NewGuid():N}");
-        string lockPath = ProjectRestartLock.GetLockPath(projectPath);
-        var first = await ProjectRestartLock.AcquireAsync(projectPath, CancellationToken.None);
-        var secondTask = ProjectRestartLock.AcquireAsync(projectPath, CancellationToken.None);
+        Task<ProjectRestartLock> secondTask;
+        bool wasBlocked;
+        using (var first = await ProjectRestartLock.AcquireAsync(projectPath, ct))
+        {
+            secondTask = ProjectRestartLock.AcquireAsync(projectPath, ct);
+            // acquisition tries the file lock before yielding, so contention is already established
+            wasBlocked = !secondTask.IsCompleted;
+        }
 
         try
         {
-            await Task.Delay(250);
-            await Assert.That(secondTask.IsCompleted).IsFalse();
+            using var second = await secondTask;
+            await Assert.That(wasBlocked).IsTrue();
+            await Assert.That(second.WasContended).IsTrue();
         }
         finally
         {
-            first.Dispose();
+            Directory.Delete(projectPath, recursive: true);
         }
-
-        using (var second = await secondTask.WaitAsync(TimeSpan.FromSeconds(10)))
-            await Assert.That(second.WasContended).IsTrue();
-
-        File.Delete(lockPath);
-        Directory.Delete(projectPath, recursive: true);
     }
 
     [Test]

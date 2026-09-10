@@ -174,7 +174,7 @@ sealed partial class BridgeTransport
 
     // FileStream cannot cancel a pending FIFO read on Linux. Polling a nonblocking
     // descriptor keeps bridge command deadlines enforceable when a peer stops responding.
-    sealed class FifoLineReader(int descriptor) : IDisposable
+    internal sealed class FifoLineReader(int descriptor) : IDisposable
     {
         const int RetryDelayMilliseconds = 10;
         readonly byte[] readBuffer = new byte[4096];

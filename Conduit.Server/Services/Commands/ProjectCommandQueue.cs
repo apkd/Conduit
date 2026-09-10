@@ -32,8 +32,10 @@ sealed class ProjectCommandQueue
             }
         );
 
-        _ = Task.Run(ProcessAsync, shutdownToken);
+        Completion = ProcessAsync();
     }
+
+    internal Task Completion { get; }
 
     public async Task<ToolExecutionResult> EnqueueAsync(QueuedProjectCommand command, CancellationToken ct)
     {

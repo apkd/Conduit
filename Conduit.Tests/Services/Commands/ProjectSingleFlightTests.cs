@@ -1,9 +1,10 @@
 namespace Conduit;
 
+[Timeout(60_000)]
 public sealed class ProjectSingleFlightTests
 {
     [Test]
-    public async Task ConcurrentCallersForTheSameProjectShareOneExecution()
+    public async Task ConcurrentCallersForTheSameProjectShareOneExecution(CancellationToken ct)
     {
         var singleFlight = new ProjectSingleFlight<int>();
         var executionCount = 0;
@@ -35,17 +36,17 @@ public sealed class ProjectSingleFlightTests
 
         release.SetResult();
 
-        await Assert.That(await first).IsEqualTo(42);
-        await Assert.That(await second).IsEqualTo(42);
+        await Assert.That(await first.WaitAsync(ct)).IsEqualTo(42);
+        await Assert.That(await second.WaitAsync(ct)).IsEqualTo(42);
         await Assert.That(executionCount).IsEqualTo(1);
     }
 
     [Test]
-    public async Task CallerCancellationDoesNotCancelTheSharedExecution()
+    public async Task CallerCancellationDoesNotCancelTheSharedExecution(CancellationToken ct)
     {
         var singleFlight = new ProjectSingleFlight<int>();
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var callerCts = new CancellationTokenSource();
+        using var callerCts = new CancellationTokenSource();
 
         var cancelledCaller = singleFlight.RunAsync(
             @"B:\Projects\Sample",
@@ -72,13 +73,13 @@ public sealed class ProjectSingleFlightTests
         callerCts.Cancel();
         try
         {
-            await cancelledCaller;
+            await cancelledCaller.WaitAsync(ct);
             throw new InvalidOperationException("The cancelled caller should not complete successfully.");
         }
         catch (OperationCanceledException) { }
 
         release.SetResult();
 
-        await Assert.That(await waitingCaller).IsEqualTo(7);
+        await Assert.That(await waitingCaller.WaitAsync(ct)).IsEqualTo(7);
     }
 }
