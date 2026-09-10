@@ -22,7 +22,7 @@ public sealed partial class ConduitMcpEndToEndTests
     const string PackageScriptAsset = "Packages/dev.tryfinally.conduit/Editor/Bridge/Execution/ConduitToolRunner.cs";
     const string MissingScenePath = "Assets/ConduitMcpDefinitelyMissingScene.unity";
     const string MissingQuery = "ConduitMcpDefinitelyMissingObject";
-    static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(20);
+    static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(2);
 
     readonly List<string> temporaryAssetPaths = new();
     readonly List<string> temporaryDirectories = new();

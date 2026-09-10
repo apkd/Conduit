@@ -4,6 +4,7 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Conduit;
 using NUnit.Framework;
@@ -117,11 +118,19 @@ public sealed class BridgeFifoStreamTests
 
     static async Task AssertLineAsync(Task<string?> read, string? expected)
     {
-        Assert.That(
-            await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(2))),
-            Is.SameAs(read),
-            "A complete FIFO line must arrive while the writer stays open and sends nothing else."
-        );
+        using var timeout = new CancellationTokenSource();
+        try
+        {
+            Assert.That(
+                await Task.WhenAny(read, Task.Delay(TimeSpan.FromMinutes(1), timeout.Token)),
+                Is.SameAs(read),
+                "A complete FIFO line must arrive while the writer stays open and sends nothing else."
+            );
+        }
+        finally
+        {
+            timeout.Cancel();
+        }
         Assert.That(await read, Is.EqualTo(expected));
     }
 

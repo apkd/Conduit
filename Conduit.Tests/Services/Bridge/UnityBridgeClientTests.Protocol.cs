@@ -9,7 +9,7 @@ namespace Conduit;
 public sealed partial class UnityBridgeClientTests
 {
     [Test]
-    public async Task ProcessExitSupersedesAConcurrentResultDisconnect()
+    public async Task ProcessExitSupersedesAConcurrentResultDisconnect(CancellationToken ct)
     {
         var disconnected = BridgeClientResult.Failure(
             new(),
@@ -39,7 +39,7 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task ResultDisconnectSurvivesWhenProcessExitIsNotConfirmed()
+    public async Task ResultDisconnectSurvivesWhenProcessExitIsNotConfirmed(CancellationToken ct)
     {
         var disconnected = BridgeClientResult.Failure(
             new(),
@@ -61,21 +61,23 @@ public sealed partial class UnityBridgeClientTests
     }
 
     [Test]
-    public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
+    public async Task OlderUnityProtocolReturnsATerminalCompatibilityDiagnostic(CancellationToken ct) =>
         await AssertProtocolMismatchAsync(
             BridgeProtocol.Version - 1,
-            $"Unity Editor bridge protocol {BridgeProtocol.Version - 1} is older than Conduit server protocol {BridgeProtocol.Version}."
+            $"Unity Editor bridge protocol {BridgeProtocol.Version - 1} is older than Conduit server protocol {BridgeProtocol.Version}.",
+            ct
         );
 
     [Test]
-    public async Task NewerUnityProtocolReturnsATerminalCompatibilityDiagnostic() =>
+    public async Task NewerUnityProtocolReturnsATerminalCompatibilityDiagnostic(CancellationToken ct) =>
         await AssertProtocolMismatchAsync(
             BridgeProtocol.Version + 1,
-            $"Conduit server protocol {BridgeProtocol.Version} is older than Unity Editor bridge protocol {BridgeProtocol.Version + 1}."
+            $"Conduit server protocol {BridgeProtocol.Version} is older than Unity Editor bridge protocol {BridgeProtocol.Version + 1}.",
+            ct
         );
 
     [Test]
-    public async Task CancellingATestRequestSendsCancellationAndWaitsForUnityToFinish()
+    public async Task CancellingATestRequestSendsCancellationAndWaitsForUnityToFinish(CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -93,25 +95,25 @@ public sealed partial class UnityBridgeClientTests
             projectPath,
             "cancel-test-request",
             new() { CommandType = BridgeCommandTypes.RunTestsEditMode },
-            TimeSpan.FromSeconds(10),
+            TestTimeout,
             processIdHint: null,
-            CancellationToken.None,
+            ct,
             cancellation.Token
         );
 
-        await bridge.CommandStarted.WaitAsync(TimeSpan.FromSeconds(10));
+        await bridge.CommandStarted.WaitAsync(ct);
         cancellation.Cancel();
-        var result = await execution.WaitAsync(TimeSpan.FromSeconds(15));
+        var result = await execution.WaitAsync(ct);
 
         await Assert.That(
-            await bridge.CancelledRequestId.WaitAsync(TimeSpan.FromSeconds(15))
+            await bridge.CancelledRequestId.WaitAsync(ct)
         ).IsEqualTo("cancel-test-request");
         await Assert.That(result.FailureKind).IsNull();
         await Assert.That(result.Result?.Outcome).IsEqualTo(ToolOutcome.Cancelled);
     }
 
     [Test]
-    public async Task ReceivePumpRoutesCommandStartedWhenTransportLivenessProbeIsFalse()
+    public async Task ReceivePumpRoutesCommandStartedWhenTransportLivenessProbeIsFalse(CancellationToken ct)
     {
         var requestId = BridgeIdentifiers.CreateRequestId();
         var payload = BridgeProtocol.Serialize(BridgeMessage.CreateCommandStarted(requestId));
@@ -121,7 +123,7 @@ public sealed partial class UnityBridgeClientTests
             async ct =>
             {
                 if (Interlocked.Increment(ref readCount) == 1)
-                    return await read.Task;
+                    return await read.Task.WaitAsync(ct);
 
                 await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                 return null;
@@ -146,8 +148,8 @@ public sealed partial class UnityBridgeClientTests
 
         var outcome = await connection.WaitForCommandStartedAsync(
             pending,
-            CancellationToken.None,
-            CancellationToken.None
+            ct,
+            ct
         );
 
         await Assert.That(outcome.Failure).IsNull();

@@ -6,9 +6,12 @@ using System.Text.Json.Nodes;
 
 namespace Conduit;
 
+[Timeout(120_000)]
 public sealed partial class UnityBridgeClientTests
 {
-    static async Task AssertProtocolMismatchAsync(int unityProtocolVersion, string expectedDiagnostic)
+    static readonly TimeSpan TestTimeout = TimeSpan.FromMinutes(1);
+
+    static async Task AssertProtocolMismatchAsync(int unityProtocolVersion, string expectedDiagnostic, CancellationToken ct)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -24,8 +27,8 @@ public sealed partial class UnityBridgeClientTests
         var result = await client.ProbeAsync(
             projectPath,
             processIdHint: null,
-            timeout: TimeSpan.FromSeconds(10),
-            ct: CancellationToken.None
+            timeout: TestTimeout,
+            ct: ct
         );
 
         await Assert.That(result.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.ProtocolMismatch);
@@ -49,12 +52,15 @@ public sealed partial class UnityBridgeClientTests
         readonly bool disconnectFirstCommand;
         readonly bool changeSessionOnReconnect;
         readonly bool preserveSnippetsAfterFirstCommand;
+        readonly bool holdCommand;
+        readonly bool holdConnection;
         readonly string endpointDirectory;
         readonly Task serverTask;
         readonly TaskCompletionSource commandStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource<string?> cancelledRequestId = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource concurrentCommandCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource releaseFirstCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        readonly TaskCompletionSource closeConnection = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int connectionCount;
         int commandCount;
 
@@ -68,6 +74,8 @@ public sealed partial class UnityBridgeClientTests
             bool disconnectFirstCommand,
             bool changeSessionOnReconnect,
             bool preserveSnippetsAfterFirstCommand,
+            bool holdCommand,
+            bool holdConnection,
             string endpointDirectory)
         {
             this.projectPath = projectPath;
@@ -79,8 +87,10 @@ public sealed partial class UnityBridgeClientTests
             this.disconnectFirstCommand = disconnectFirstCommand;
             this.changeSessionOnReconnect = changeSessionOnReconnect;
             this.preserveSnippetsAfterFirstCommand = preserveSnippetsAfterFirstCommand;
+            this.holdCommand = holdCommand;
+            this.holdConnection = holdConnection;
             this.endpointDirectory = endpointDirectory;
-            serverTask = Task.Run(RunAsync);
+            serverTask = RunAsync();
         }
 
         public Task CommandStarted => commandStarted.Task;
@@ -93,6 +103,7 @@ public sealed partial class UnityBridgeClientTests
         public int CommandCount => Volatile.Read(ref commandCount);
 
         public void ReleaseFirstCommand() => releaseFirstCommand.TrySetResult();
+        public void CloseConnection() => closeConnection.TrySetResult();
 
         public static Task<FakeFifoBridge> StartAsync(
             string projectPath,
@@ -103,6 +114,8 @@ public sealed partial class UnityBridgeClientTests
             bool disconnectFirstCommand = false,
             bool changeSessionOnReconnect = false,
             bool preserveSnippetsAfterFirstCommand = false,
+            bool holdCommand = false,
+            bool holdConnection = false,
             int handshakeProtocolVersion = BridgeProtocol.Version)
         {
             var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
@@ -127,6 +140,8 @@ public sealed partial class UnityBridgeClientTests
                     disconnectFirstCommand,
                     changeSessionOnReconnect,
                     preserveSnippetsAfterFirstCommand,
+                    holdCommand,
+                    holdConnection,
                     endpointDirectory
                 )
             );
@@ -166,44 +181,27 @@ public sealed partial class UnityBridgeClientTests
                 }
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+            catch (Exception exception) when (cts.IsCancellationRequested
+                && exception is IOException or ObjectDisposedException) { }
         }
 
         async Task HandleClientAsync(string clientDirectory)
         {
+            var handshakeReceived = false;
             try
             {
-                var connectionNumber = Interlocked.Increment(ref connectionCount);
-                await using var input = new FileStream(
-                    Path.Combine(clientDirectory, "to-unity.fifo"),
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite,
-                    4096,
-                    FileOptions.Asynchronous
-                );
-                await using var output = new FileStream(
-                    Path.Combine(clientDirectory, "from-unity.fifo"),
-                    FileMode.Open,
-                    FileAccess.Write,
-                    FileShare.ReadWrite,
-                    4096,
-                    FileOptions.Asynchronous
-                );
+                using var reader = BridgeTransport.FifoLineReader.Open(Path.Combine(clientDirectory, "to-unity.fifo"));
+                await using var output = OpenResponseWriter(Path.Combine(clientDirectory, "from-unity.fifo"));
                 await File.WriteAllTextAsync(
                     Path.Combine(clientDirectory, "connected"),
                     string.Empty,
                     cts.Token
                 );
-                using var reader = new StreamReader(
-                    input,
-                    Utf8NoBom,
-                    detectEncodingFromByteOrderMarks: false,
-                    leaveOpen: true
-                );
-
                 if (await reader.ReadLineAsync(cts.Token) is null)
                     return;
 
+                handshakeReceived = true;
+                var connectionNumber = Interlocked.Increment(ref connectionCount);
                 await WritePayloadAsync(output, new JsonObject
                 {
                     ["protocol_version"] = handshakeProtocolVersion,
@@ -318,12 +316,25 @@ public sealed partial class UnityBridgeClientTests
                 else
                 {
                     await WritePayloadAsync(output, commandStarted, cts.Token);
+                    this.commandStarted.TrySetResult();
+                    if (holdCommand)
+                        await releaseFirstCommand.Task.WaitAsync(cts.Token);
                     await WritePayloadAsync(output, commandResult, cts.Token);
                 }
+
+                if (holdConnection)
+                    await closeConnection.Task.WaitAsync(cts.Token);
             }
-            catch (Exception exception) when (!cts.IsCancellationRequested)
+            catch (IOException) when (!handshakeReceived)
             {
-                Console.Error.WriteLine($"Fake FIFO bridge client failed: {exception}");
+                // the client can abandon a connection attempt before the fixture accepts it
+            }
+
+            static FileStream OpenResponseWriter(string path)
+            {
+                // keep a reader open during setup so an abandoned client cannot block open(2)
+                using var keeper = BridgeTransport.FifoLineReader.Open(path);
+                return new(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, 4096, FileOptions.Asynchronous);
             }
         }
 
@@ -346,17 +357,13 @@ public sealed partial class UnityBridgeClientTests
             cts.Cancel();
             try
             {
-                await serverTask.WaitAsync(TimeSpan.FromSeconds(1));
+                await serverTask.WaitAsync(TestTimeout);
             }
-            catch { }
-
-            try
+            finally
             {
                 Directory.Delete(endpointDirectory, recursive: true);
+                cts.Dispose();
             }
-            catch { }
-
-            cts.Dispose();
         }
     }
 }

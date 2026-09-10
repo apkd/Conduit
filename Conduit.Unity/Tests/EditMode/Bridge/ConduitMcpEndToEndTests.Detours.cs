@@ -141,8 +141,7 @@ public sealed partial class ConduitMcpEndToEndTests
                     ("projectPath", projectPath),
                     ("methodName", methodName),
                     ("replacementBody", "return Task.FromException<byte[]>(new InvalidOperationException());")
-                ),
-                TimeSpan.FromSeconds(20)
+                )
             );
             Assert.That(applied.IsError, Is.False, applied.Text);
             Assert.ThrowsAsync<InvalidOperationException>(
