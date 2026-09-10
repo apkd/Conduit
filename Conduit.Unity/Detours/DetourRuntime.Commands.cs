@@ -10,7 +10,6 @@ namespace Conduit
         static string Test(
             (Guid ModuleVersionId, int MetadataToken) key,
             MethodInfo target,
-            string signatureHash,
             string canonicalName,
             string declaration,
             MethodInfo replacement)
@@ -18,15 +17,11 @@ namespace Conduit
             var targetCode = MonoJit.GetCode(target);
             var replacementCode = MonoJit.GetCode(replacement);
             var existing = GetActive(key);
-            var plan = NativePatch.Plan(targetCode, replacementCode.Start, existing?.Patch.Original);
-            var result = "Detourable: yes\n"
-                   + $"Method: {canonicalName}\n"
-                   + $"Identity: MVID {key.ModuleVersionId:N}, token 0x{key.MetadataToken:x8}, signature {signatureHash}\n"
-                   + $"Replacement: {declaration}\n"
-                   + $"Target JIT body: {targetCode.Size} bytes\n"
-                   + $"Jump encoding: {(plan.Kind == PatchKind.Relative ? "5-byte relative" : "14-byte absolute")}\n"
-                   + $"Active detour: {(existing == null ? "no" : "yes (" + existing.DisplayName + ")")}\n"
-                   + "Original-call delegate: unavailable";
+            NativePatch.Plan(targetCode, replacementCode.Start, existing?.Patch.Original); // validates without changing the target
+            var result = $"Method: {canonicalName}\n"
+                   + "Detourable: yes\n"
+                   + $"Generated replacement signature: {declaration}\n"
+                   + $"Active detour: {(existing == null ? "no" : "yes (" + existing.DisplayName + ")")}";
             return result + GetInliningWarning(target);
         }
 
@@ -106,4 +101,3 @@ namespace Conduit
         }
     }
 }
-

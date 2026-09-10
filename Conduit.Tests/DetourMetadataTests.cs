@@ -147,7 +147,7 @@ public sealed class DetourMetadataTests
     }
 
     [Test]
-    public async Task GeneratedReplacementDeclarationsCompileAgainstPublicizedMetadata()
+    public async Task GeneratedProbeReplacementsSupportRequiredAbiShapes()
     {
         var path = typeof(DetourMetadataTests).Assembly.Location;
         var catalog = MethodCatalog.Create([path]);
@@ -169,7 +169,11 @@ public sealed class DetourMetadataTests
                      "EchoSpan",
                      "EchoPointer",
                      "EchoFunctionPointer",
+                     "event",
                      "Instance",
+                     "RefParameters",
+                     "RefReadonlyParameter",
+                     "OutParameters",
                  })
         {
             var target = catalog.Resolve("DetourSignatureFixture." + methodName).Target
@@ -178,7 +182,7 @@ public sealed class DetourMetadataTests
                 target,
                 "Generated_" + methodName,
                 methodName + ".cs",
-                ConduitCodeParser.Parse("throw null;"),
+                ConduitCodeParser.Parse(DetourSourceBuilder.BuildProbeBody(target)),
                 [],
                 [],
                 async: false
@@ -193,22 +197,22 @@ public sealed class DetourMetadataTests
                     nullableContextOptions: NullableContextOptions.Enable
                 )
             );
-            var errors = compilation.GetDiagnostics()
-                .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            var diagnostics = compilation.GetDiagnostics()
+                .Where(static diagnostic => diagnostic.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning)
                 .ToArray();
-            await Assert.That(errors).IsEmpty();
-        }
-    }
+            await Assert.That(diagnostics).IsEmpty();
 
-    [Test]
-    public async Task ProbeBodiesReturnWithoutThrowingWhenTheSignatureAllowsIt()
-    {
-        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("void", "void")))
-            .IsEqualTo("return;");
-        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("int", "int")))
-            .IsEqualTo("return default;");
-        await Assert.That(DetourSourceBuilder.BuildProbeBody(new("int", "int", IsByRef: true)))
-            .Contains("NotSupportedException");
+            if (methodName is "RefParameters" or "OutParameters")
+            {
+                using var assemblyStream = new MemoryStream();
+                var emitted = compilation.Emit(assemblyStream);
+                await Assert.That(emitted.Success).IsTrue();
+                var replacement = System.Reflection.Assembly.Load(assemblyStream.ToArray())
+                    .GetType(DetourSourceBuilder.GeneratedNamespace + ".Generated_" + methodName)!
+                    .GetMethod("Replace")!;
+                replacement.Invoke(null, [1, 2, null]);
+            }
+        }
     }
 
     unsafe sealed class DetourSignatureFixture
@@ -224,6 +228,12 @@ public sealed class DetourMetadataTests
         public static void RefParameters(ref int byRef, in int byIn, out int byOut) =>
             byOut = byRef + byIn;
         public static void RefReadonlyParameter(ref readonly int location) { }
+        public static int OutParameters(int input, out int number, out string text)
+        {
+            number = input;
+            text = input.ToString();
+            return input;
+        }
         public static int Overload(int value) => value;
         public static string Overload(string value) => value;
         [System.Runtime.InteropServices.DllImport("conduit-detour-test")]

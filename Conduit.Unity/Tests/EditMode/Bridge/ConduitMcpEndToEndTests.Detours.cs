@@ -19,6 +19,7 @@ public sealed partial class ConduitMcpEndToEndTests
 
         var tested = await CallDetourAsync(methodName, "test");
         AssertSuccessful(tested, "Detourable: yes", "int Replace(int arg0)", "Active detour: no");
+        Assert.That(tested.Text, Does.StartWith("Method: "));
 
         try
         {
@@ -165,6 +166,30 @@ public sealed partial class ConduitMcpEndToEndTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     static Task<byte[]> DetourAsyncProbe(AsyncDetourRequest request, CancellationToken cancellationToken)
         => Task.FromResult(request.Bytes);
+
+    [Test]
+    [Order(22)]
+    public async Task Detour_TestSupportsOutParametersWithoutChangingTheTarget()
+    {
+        const string methodName = "ConduitMcpEndToEndTests.DetourOutProbe";
+        var expected = DetourOutProbe(7, out var expectedNumber, out var expectedText);
+
+        var tested = await CallDetourAsync(methodName, "test");
+        AssertSuccessful(tested, "Detourable: yes", "Active detour: no");
+
+        var actual = DetourOutProbe(7, out var actualNumber, out var actualText);
+        Assert.That(actual, Is.EqualTo(expected));
+        Assert.That(actualNumber, Is.EqualTo(expectedNumber));
+        Assert.That(actualText, Is.EqualTo(expectedText));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static bool DetourOutProbe(int input, out int number, out string text)
+    {
+        number = input * 2;
+        text = input.ToString();
+        return input > 0;
+    }
 
 }
 #endif

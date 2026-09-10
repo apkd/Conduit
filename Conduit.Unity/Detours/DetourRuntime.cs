@@ -58,7 +58,6 @@ namespace Conduit
                 "test" => Test(
                     key,
                     target,
-                    signatureHash,
                     canonicalName,
                     declaration,
                     LoadReplacement(assemblyBytes, pdbBytes, generatedTypeName)

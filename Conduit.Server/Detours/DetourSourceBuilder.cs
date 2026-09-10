@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 
 namespace Conduit;
@@ -6,13 +7,23 @@ static class DetourSourceBuilder
 {
     internal const string GeneratedNamespace = "ConduitGenerated.Detour";
 
-    internal static string BuildProbeBody(CSharpType returnType) =>
-        returnType switch
-        {
-            { IsByRef: true } => "throw new global::System.NotSupportedException();",
-            { Source: "void" } => "return;",
-            _ => "return default;",
-        };
+    internal static string BuildProbeBody(MethodTarget method)
+    {
+        var builder = new StringBuilder();
+        // test mode never invokes this body, but C# still requires definite assignment.
+        foreach (var (index, parameter) in method.Parameters.Index())
+            if (parameter.Type.IsByRef && (parameter.Attributes & ParameterAttributes.Out) != 0)
+                builder.Append("arg").Append(index).AppendLine(" = default!;");
+
+        return builder
+            .Append(method.ReturnType switch
+            {
+                { IsByRef: true } => "throw new global::System.NotSupportedException();",
+                { Source: "void" } => "return;",
+                _ => "return default!;",
+            })
+            .ToString();
+    }
 
     internal static string BuildSource(
         MethodTarget method,

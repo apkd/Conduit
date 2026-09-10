@@ -46,7 +46,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         SourceArtifact artifact;
         bool probe = replacementBody == "test";
         if (probe)
-            artifact = new("test", "test.cs", DetourSourceBuilder.BuildProbeBody(method.ReturnType));
+            artifact = new("test", "test.cs", DetourSourceBuilder.BuildProbeBody(method));
         else
         {
             if (replacementBody.Length == 0)
@@ -64,6 +64,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             artifact = preparedArtifact.Artifact!.Value;
         }
 
+        var displayName = probe ? null : artifact.FileName;
         SnippetParseResult parsed;
         try
         {
@@ -75,7 +76,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
                 new()
                 {
                     Outcome = ToolOutcome.CompileError,
-                    DisplayName = artifact.FileName,
+                    DisplayName = displayName,
                     Exception = ToolExceptionInfo.FromException(exception),
                     Diagnostic = exception.Message,
                 }
@@ -137,7 +138,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
                 new()
                 {
                     Outcome = ToolOutcome.CompileError,
-                    DisplayName = artifact.FileName,
+                    DisplayName = displayName,
                     Diagnostic = errors,
                 }
             );
@@ -148,7 +149,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         );
         var command = BuildCommand(method, probe ? "test" : "apply");
         command.Target = DetourSourceBuilder.GeneratedNamespace + "." + typeName;
-        command.DisplayName = artifact.FileName;
+        command.DisplayName = displayName;
         command.Artifacts =
         [
             await SnippetCompiler.CreateArtifactAsync(
