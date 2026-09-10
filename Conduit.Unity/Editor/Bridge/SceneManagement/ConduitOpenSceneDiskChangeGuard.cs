@@ -18,6 +18,7 @@ namespace Conduit
         static readonly object gate = new();
         static readonly BindingFlags StaticNonPublic = BindingFlags.Static | BindingFlags.NonPublic;
         static readonly Dictionary<string, SceneFileStamp> knownSceneStamps = new(StringComparer.OrdinalIgnoreCase);
+        static readonly Dictionary<string, SceneFileStamp?> observedSceneStamps = new(StringComparer.OrdinalIgnoreCase);
         static readonly Dictionary<string, PendingSceneFileChange> pendingSceneFileChanges = new(StringComparer.OrdinalIgnoreCase);
         static int pendingSceneFileChangeCount;
 
@@ -37,7 +38,7 @@ namespace Conduit
 
         static bool initialized;
         static string? projectRootPath;
-        static FileSystemWatcher? sceneFileWatcher;
+        static double nextSceneFileCheck;
 
         internal static void Initialize()
         {
@@ -54,7 +55,6 @@ namespace Conduit
                 ? rootPath
                 : rootPath + Path.DirectorySeparatorChar;
             SnapshotOpenSceneStamps();
-            TryStartSceneFileWatcher(assetsPath);
 
             EditorApplication.update += OnEditorUpdate;
             EditorSceneManager.sceneOpened += OnSceneOpened;
@@ -69,6 +69,7 @@ namespace Conduit
 
             using var pooledBlockedScenes = ConduitPool.GetPooledList<string>(out var blockedScenes);
             if (ReloadChangedOpenScenes(
+                    EditorApplication.timeSinceStartup,
                     scanAllOpenScenes: true,
                     respectSettleDelay: false,
                     blockedScenes: blockedScenes
@@ -90,16 +91,11 @@ namespace Conduit
             {
                 pendingSceneFileChanges.Clear();
                 knownSceneStamps.Clear();
+                observedSceneStamps.Clear();
                 UpdatePendingChangeCount();
             }
 
-            try
-            {
-                sceneFileWatcher?.Dispose();
-            }
-            catch (Exception) { }
-
-            sceneFileWatcher = null;
+            nextSceneFileCheck = 0d;
             initialized = false;
         }
     }

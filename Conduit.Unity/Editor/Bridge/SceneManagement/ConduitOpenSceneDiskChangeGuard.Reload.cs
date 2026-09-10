@@ -11,12 +11,13 @@ namespace Conduit
     static partial class ConduitOpenSceneDiskChangeGuard
     {
         static string ReloadChangedOpenScenes(
+            double now,
             bool scanAllOpenScenes,
             bool respectSettleDelay,
             List<string> blockedScenes)
         {
             using var pooledChangedScenePaths = ConduitPool.GetPooledList<string>(out var changedScenePaths);
-            CollectChangedOpenScenePaths(scanAllOpenScenes, respectSettleDelay, changedScenePaths);
+            CollectChangedOpenScenePaths(now, scanAllOpenScenes, respectSettleDelay, changedScenePaths);
             if (changedScenePaths.Count == 0)
                 return string.Empty;
 
@@ -57,9 +58,8 @@ namespace Conduit
             return BuildReloadReport(reloadedScenes);
         }
 
-        static void CollectChangedOpenScenePaths(bool scanAllOpenScenes, bool respectSettleDelay, List<string> changedScenePaths)
+        static void CollectChangedOpenScenePaths(double now, bool scanAllOpenScenes, bool respectSettleDelay, List<string> changedScenePaths)
         {
-            var now = EditorApplication.timeSinceStartup;
             using var pooledPendingPaths = ConduitPool.GetPooledList<string>(out var pendingPaths);
 
             lock (gate)
@@ -124,7 +124,7 @@ namespace Conduit
 
                 if (!pendingSceneFileChanges.TryGetValue(scenePath, out var pendingChange))
                 {
-                    // filesystem events often arrive before the writer has closed the new scene file.
+                    // external writers may still have the new scene file open.
                     pendingSceneFileChanges[scenePath] = new(currentStamp, now);
                     UpdatePendingChangeCount();
 

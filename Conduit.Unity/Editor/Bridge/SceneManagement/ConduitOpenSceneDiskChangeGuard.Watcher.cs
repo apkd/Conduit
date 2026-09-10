@@ -1,7 +1,6 @@
 #nullable enable
 
 using System;
-using System.IO;
 using System.Threading;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -13,6 +12,17 @@ namespace Conduit
     {
         static void OnEditorUpdate()
         {
+            var now = EditorApplication.timeSinceStartup;
+            if (now < nextSceneFileCheck)
+                return;
+
+            nextSceneFileCheck = now + FileChangeSettleSeconds;
+            CheckForSceneChanges(now);
+        }
+
+        internal static void CheckForSceneChanges(double now)
+        {
+            PollOpenSceneFiles(now);
             if (Volatile.Read(ref pendingSceneFileChangeCount) == 0)
                 return;
 
@@ -20,6 +30,7 @@ namespace Conduit
             {
                 using var pooledBlockedScenes = ConduitPool.GetPooledList<string>(out var blockedScenes);
                 if (ReloadChangedOpenScenes(
+                        now,
                         scanAllOpenScenes: false,
                         respectSettleDelay: true,
                         blockedScenes: blockedScenes
@@ -39,83 +50,33 @@ namespace Conduit
 
         static void OnSceneClosed(Scene scene)
         {
-            var scenePath = scene.path;
-            if (string.IsNullOrWhiteSpace(scenePath))
-                return;
-
-            lock (gate)
-            {
-                knownSceneStamps.Remove(scenePath);
-                pendingSceneFileChanges.Remove(scenePath);
-                UpdatePendingChangeCount();
-            }
+            if (!string.IsNullOrWhiteSpace(scene.path))
+                ForgetScenePath(scene.path);
         }
 
         static void OnSceneSaved(Scene scene) => RememberSceneStamp(scene);
 
-        static void TryStartSceneFileWatcher(string assetsPath)
+        static void PollOpenSceneFiles(double now)
         {
-            if (string.IsNullOrWhiteSpace(assetsPath) || !Directory.Exists(assetsPath))
-                return;
-
-            try
+            // mono's recursive filesystem watcher can throw outside its error handler during folder deletion.
+            // checking only open scene files also avoids scanning the entire asset tree on its polling backend.
+            for (var index = 0; index < SceneManager.sceneCount; index++)
             {
-                var watcher = new FileSystemWatcher(assetsPath, "*.unity")
+                var scenePath = SceneManager.GetSceneAt(index).path;
+                if (string.IsNullOrWhiteSpace(scenePath))
+                    continue;
+
+                var stamp = TryReadSceneFileStamp(scenePath);
+                lock (gate)
                 {
-                    IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-                    InternalBufferSize = 64 * 1024,
-                };
+                    if (observedSceneStamps.TryGetValue(scenePath, out var previousStamp)
+                        && Nullable.Equals(previousStamp, stamp))
+                        continue;
 
-                watcher.Changed += OnSceneFileWatcherEvent;
-                watcher.Created += OnSceneFileWatcherEvent;
-                watcher.Renamed += OnSceneFileRenamed;
-                watcher.Deleted += OnSceneFileWatcherEvent;
-                watcher.Error += OnSceneFileWatcherError;
-                watcher.EnableRaisingEvents = true;
-                sceneFileWatcher = watcher;
-            }
-            catch (Exception exception)
-            {
-                // refresh-time scanning still protects conduit commands when the watcher is unavailable.
-                ConduitDiagnostics.Error("Failed to start open-scene disk change watcher.", exception);
-            }
-        }
-
-        static void OnSceneFileWatcherEvent(object sender, FileSystemEventArgs args)
-        {
-            if (TryConvertAbsoluteScenePathToAssetPath(args.FullPath, out var sceneAssetPath))
-                QueueSceneFileChange(sceneAssetPath, args.FullPath);
-        }
-
-        static void OnSceneFileRenamed(object sender, RenamedEventArgs args)
-        {
-            if (TryConvertAbsoluteScenePathToAssetPath(args.OldFullPath, out var oldSceneAssetPath))
-                QueueSceneFileChange(oldSceneAssetPath, args.OldFullPath);
-
-            if (TryConvertAbsoluteScenePathToAssetPath(args.FullPath, out var newSceneAssetPath))
-                QueueSceneFileChange(newSceneAssetPath, args.FullPath);
-        }
-
-        static void OnSceneFileWatcherError(object sender, ErrorEventArgs args)
-        {
-            ConduitDiagnostics.Error("Open-scene disk change watcher reported an error.", args.GetException());
-            lock (gate)
-            {
-                pendingSceneFileChanges.Clear();
-                UpdatePendingChangeCount();
-            }
-        }
-
-        static void QueueSceneFileChange(string sceneAssetPath, string absolutePath)
-        {
-            lock (gate)
-            {
-                pendingSceneFileChanges[sceneAssetPath] = new(
-                    TryReadSceneFileStampFromAbsolutePath(absolutePath),
-                    0d
-                );
-                UpdatePendingChangeCount();
+                    observedSceneStamps[scenePath] = stamp;
+                    pendingSceneFileChanges[scenePath] = new(stamp, now);
+                    UpdatePendingChangeCount();
+                }
             }
         }
     }

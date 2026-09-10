@@ -29,6 +29,7 @@ namespace Conduit
             var stamp = TryReadSceneFileStamp(scenePath);
             lock (gate)
             {
+                observedSceneStamps[scenePath] = stamp;
                 if (stamp == null)
                     knownSceneStamps.Remove(scenePath);
                 else
@@ -44,6 +45,7 @@ namespace Conduit
             lock (gate)
             {
                 knownSceneStamps.Remove(scenePath);
+                observedSceneStamps.Remove(scenePath);
                 pendingSceneFileChanges.Remove(scenePath);
                 UpdatePendingChangeCount();
             }
@@ -82,35 +84,6 @@ namespace Conduit
             catch
             {
                 return null;
-            }
-        }
-
-        static bool TryConvertAbsoluteScenePathToAssetPath(string absolutePath, out string sceneAssetPath)
-        {
-            sceneAssetPath = string.Empty;
-            if (string.IsNullOrWhiteSpace(projectRootPath))
-                return false;
-
-            try
-            {
-                var fullPath = Path.GetFullPath(absolutePath);
-                var rootPath = projectRootPath!;
-                if (!fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
-                    return false;
-
-                var relativePath = fullPath[rootPath.Length..].Replace(Path.DirectorySeparatorChar, '/');
-                if (!relativePath.StartsWith(AssetsPrefix, StringComparison.OrdinalIgnoreCase))
-                    return false;
-
-                if (!relativePath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
-                    return false;
-
-                sceneAssetPath = relativePath;
-                return true;
-            }
-            catch
-            {
-                return false;
             }
         }
 

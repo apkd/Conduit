@@ -21,6 +21,57 @@ using UnityEngine.TestTools;
 
 public sealed partial class ConduitMcpToolsTests
 {
+    [TestCase(false)]
+    [TestCase(true)]
+    public void SceneDiskChanges_ReloadCleanScenesAndPreserveDirtyScenes(bool dirty)
+    {
+        var assetPath = ConduitTestAssets.GetTemporaryPath("UnitTests", $"DiskChange_{Guid.NewGuid():N}.unity");
+        CreateTemporaryScreenshotSceneAsset(assetPath);
+        ConduitOpenSceneDiskChangeGuard.Initialize();
+        var scene = EditorSceneManager.OpenScene(assetPath, OpenSceneMode.Additive);
+        AssetDatabase.DisallowAutoRefresh();
+        try
+        {
+            var originalName = scene.GetRootGameObjects().Single().name;
+            var diskName = originalName + "ChangedOnDisk";
+            if (dirty)
+            {
+                scene.GetRootGameObjects().Single().name = "UnsavedSceneChange";
+                EditorSceneManager.MarkSceneDirty(scene);
+            }
+
+            File.WriteAllText(assetPath, File.ReadAllText(assetPath).Replace($"m_Name: {originalName}", $"m_Name: {diskName}"));
+            var now = EditorApplication.timeSinceStartup + 10;
+            ConduitOpenSceneDiskChangeGuard.CheckForSceneChanges(now);
+            Assert.That(scene.GetRootGameObjects().Single().name, Is.EqualTo(dirty ? "UnsavedSceneChange" : originalName));
+
+            ConduitOpenSceneDiskChangeGuard.CheckForSceneChanges(now + 10);
+            scene = SceneManager.GetSceneByPath(assetPath);
+            Assert.That(scene.GetRootGameObjects().Single().name, Is.EqualTo(dirty ? "UnsavedSceneChange" : diskName));
+            Assert.That(scene.isDirty, Is.EqualTo(dirty));
+
+            ConduitOpenSceneDiskChangeGuard.CheckForSceneChanges(now + 20);
+            scene = SceneManager.GetSceneByPath(assetPath);
+            Assert.That(scene.GetRootGameObjects().Single().name, Is.EqualTo(dirty ? "UnsavedSceneChange" : diskName));
+            Assert.That(scene.isDirty, Is.EqualTo(dirty));
+        }
+        finally
+        {
+            try
+            {
+                scene = SceneManager.GetSceneByPath(assetPath);
+                if (scene.isLoaded)
+                    EditorSceneManager.CloseScene(scene, true);
+
+                DeleteTemporaryAsset(assetPath);
+            }
+            finally
+            {
+                AssetDatabase.AllowAutoRefresh();
+            }
+        }
+    }
+
     [Test]
     public void SaveScenes_SavesDirtyOpenScene()
     {
