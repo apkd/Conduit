@@ -24,6 +24,7 @@ public sealed partial class ConduitMcpEndToEndTests
 
             var status = await client.CallToolAsync(BridgeCommandTypes.Status, Args(("projectPath", projectPath)));
             Assert.That(status.Text, Does.Contain(background));
+            Assert.That(status.Text, Does.Contain("OLDER LOGS:\n> [ERROR] " + background));
             var next = await client.CallToolAsync(BridgeCommandTypes.Status, Args(("projectPath", projectPath)));
             Assert.That(next.Text, Does.Not.Contain(background));
 

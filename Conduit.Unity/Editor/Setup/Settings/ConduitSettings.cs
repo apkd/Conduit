@@ -45,7 +45,7 @@ namespace Conduit
                 return;
 
             includeBackgroundLogs = value;
-            BridgeLogs.Configure(value, Application.consoleLogPath);
+            BridgeLogs.Configure(value);
             Save(true);
         }
 

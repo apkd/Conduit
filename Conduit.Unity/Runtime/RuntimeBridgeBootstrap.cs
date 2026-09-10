@@ -19,7 +19,7 @@ namespace Conduit.Runtime
             if (Application.isEditor || behaviour != null)
                 return;
 
-            BridgeLogs.Configure(true, Application.consoleLogPath);
+            BridgeLogs.Configure(true);
             var gameObject = new GameObject("Conduit Player Bridge")
             {
                 hideFlags = HideFlags.HideAndDontSave,

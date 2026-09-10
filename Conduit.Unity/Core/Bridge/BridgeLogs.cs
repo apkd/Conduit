@@ -11,16 +11,14 @@ namespace Conduit
         static readonly object gate = new();
         static Action<string, string, LogType>? captures;
         static BackgroundLogSummary? background;
-        static string logPath = string.Empty;
         static bool backgroundEnabled;
         static bool hooked;
 
-        internal static void Configure(bool enabled, string path)
+        internal static void Configure(bool enabled)
         {
             lock (gate)
             {
                 backgroundEnabled = enabled;
-                logPath = path;
                 if (!enabled)
                     background = null;
                 UpdateSubscription();
@@ -48,15 +46,13 @@ namespace Conduit
         internal static string? TakeBackground()
         {
             BackgroundLogSummary? summary;
-            string path;
             lock (gate)
             {
                 summary = background;
                 background = null;
-                path = logPath;
             }
 
-            return summary?.Format(path); // stack cleanup and rendering never block the log callback
+            return summary?.Format(); // stack cleanup and rendering never block the log callback
         }
 
         static void UpdateSubscription()

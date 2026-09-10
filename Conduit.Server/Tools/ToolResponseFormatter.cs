@@ -18,7 +18,7 @@ static class ToolResponseFormatter
     internal static string AppendBackgroundLogs(string content, string? backgroundLogs)
         => string.IsNullOrWhiteSpace(backgroundLogs)
             ? content
-            : $"{content}\n\nBetween calls:\n{backgroundLogs}";
+            : $"{content}\n\nOLDER LOGS:\n{backgroundLogs}";
 
     static string? FormatSections(ToolExecutionResult result, string? exceptionText)
     {

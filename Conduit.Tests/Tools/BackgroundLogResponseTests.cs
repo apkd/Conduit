@@ -19,8 +19,7 @@ public sealed class BackgroundLogResponseTests
         await Assert.That(text.Contains(result.ReturnValue, StringComparison.Ordinal)).IsTrue();
         await Assert.That(text.Contains(result.DisplayName, StringComparison.Ordinal)).IsTrue();
         await Assert.That(text.Contains(result.Logs, StringComparison.Ordinal)).IsTrue();
-        await Assert.That(text.IndexOf(result.BackgroundLogs, StringComparison.Ordinal))
-            .IsGreaterThan(text.IndexOf(result.Logs, StringComparison.Ordinal));
+        await Assert.That(text).EndsWith("\n\nOLDER LOGS:\n" + result.BackgroundLogs);
     }
 
     [Test]

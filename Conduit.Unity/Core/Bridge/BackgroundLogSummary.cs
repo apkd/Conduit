@@ -9,29 +9,24 @@ namespace Conduit
     // retain early causes, not the latest tail of an error cascade; bound collection work as well as storage
     sealed class BackgroundLogSummary
     {
-        internal const int MaxGroups = 6;
+        internal const int MaxGroups = 16;
         internal const int InspectionLimit = 64;
         internal const int MaxOutputLength = 2000;
         const int MaxMessageLength = 256;
         const int MaxInspectedLength = 1024;
         const int MaxStackLength = 1024;
-        const int QuietGroupLimit = 3;
         readonly Group[] groups = new Group[MaxGroups];
         readonly int[] inspected = new int[3];
-        readonly long[] omitted = new long[3];
         int count;
         long order;
-        bool trimmed;
-        bool busy;
+        long omitted;
 
         internal void Record(string message, string stackTrace, LogType type)
         {
             var severity = type == LogType.Log ? 0 : type == LogType.Warning ? 1 : 2;
             if (inspected[severity] == InspectionLimit)
             {
-                omitted[severity]++;
-                trimmed = true;
-                MakeBusy();
+                omitted++;
                 return;
             }
             inspected[severity]++;
@@ -45,8 +40,6 @@ namespace Conduit
                     continue;
 
                 group.Count++;
-                if (!message.AsSpan().SequenceEqual(group.Message.AsSpan()))
-                    trimmed = true;
                 return;
             }
 
@@ -60,21 +53,16 @@ namespace Conduit
                             || groups[index].Severity == groups[slot].Severity && groups[index].Order > groups[slot].Order))
                         slot = index;
 
-                trimmed = true;
                 if (slot < 0)
                 {
-                    omitted[severity]++;
+                    omitted++;
                     return;
                 }
-                omitted[groups[slot].Severity] += groups[slot].Count;
+                omitted += groups[slot].Count;
             }
             else
-            {
-                if (count >= QuietGroupLimit)
-                    MakeBusy();
                 count++;
-            }
-            trimmed |= message.Length > MaxMessageLength;
+
             groups[slot] = new()
             {
                 Fingerprint = fingerprint,
@@ -82,68 +70,66 @@ namespace Conduit
                 Order = order++,
                 Count = 1,
                 Message = Clip(message, MaxMessageLength),
-                Stack = severity > 0 && !busy ? Clip(stackTrace, MaxStackLength) : string.Empty,
+                Stack = severity > 0 ? Clip(stackTrace, MaxStackLength) : string.Empty,
             };
-            trimmed |= severity > 0 && !busy && stackTrace.Length > MaxStackLength;
         }
 
-        internal string Format(string logPath)
+        internal string Format()
         {
             Array.Sort(groups, 0, count, GroupComparer.Instance);
             using var pooled = BridgeStringBuilderPool.Rent(out var builder);
-            foreach (var group in groups.AsSpan(0, count))
+            Span<int> starts = stackalloc int[count];
+            Span<int> lengths = stackalloc int[count];
+            var totalEvents = omitted;
+            for (var index = 0; index < count; index++)
             {
-                if (builder.Length > 0)
-                    builder.Append('\n');
-                builder.Append(group.Severity == 2 ? "error: " : group.Severity == 1 ? "warning: " : "info: ");
+                ref var group = ref groups[index];
+                starts[index] = builder.Length;
+                totalEvents += group.Count;
+                builder.Append(group.Severity == 2 ? "> [ERROR] " : group.Severity == 1 ? "> [WARN] " : "> ");
                 AppendSingleLine(builder, group.Message);
                 if (group.Count > 1)
                     builder.Append(" (×").Append(group.Count).Append(" similar)");
 
-                if (!busy && group.Stack.Length > 0)
-                    trimmed |= AppendStack(builder, group.Stack);
+                if (group.Stack.Length > 0)
+                    AppendStack(builder, group.Stack);
+                builder.Append('\n');
+                lengths[index] = builder.Length - starts[index];
             }
 
-            var footer = BuildFooter(logPath);
-            // reserve the fallback path before trimming rendered content
-            var remaining = Math.Max(0, MaxOutputLength - footer.Length - 1);
-            if (builder.Length > remaining)
+            if (omitted == 0 && builder.Length <= MaxOutputLength + 1)
             {
-                trimmed = true;
-                footer = BuildFooter(logPath);
-                remaining = Math.Max(0, MaxOutputLength - footer.Length - 1);
-                builder.Length = Math.Min(builder.Length, remaining);
                 if (builder.Length > 0)
-                    builder[builder.Length - 1] = '…';
+                    builder.Length--;
+                return builder.ToString();
             }
-            if (footer.Length > 0)
-                builder.Append('\n').Append(footer);
-            return builder.ToString();
-        }
 
-        void MakeBusy()
-        {
-            if (busy)
-                return;
-            busy = true;
+            // reserve enough space for the omission count before choosing complete groups.
+            var remaining = MaxOutputLength - FormatOmissions(totalEvents).Length;
+            Span<bool> included = stackalloc bool[count];
+            for (var severity = 2; severity >= 0; severity--)
             for (var index = 0; index < count; index++)
             {
-                trimmed |= groups[index].Stack.Length > 0;
-                groups[index].Stack = string.Empty;
+                if (groups[index].Severity != severity)
+                    continue;
+                included[index] = lengths[index] <= remaining;
+                if (included[index])
+                    remaining -= lengths[index];
             }
-        }
 
-        string BuildFooter(string logPath)
-        {
-            if (!trimmed)
-                return string.Empty;
+            var dropped = omitted;
+            // removing from the end preserves the recorded positions and chronological order.
+            for (var index = count - 1; index >= 0; index--)
+            {
+                if (included[index])
+                    continue;
+                dropped += groups[index].Count;
+                builder.Remove(starts[index], lengths[index]);
+            }
+            return builder.Append(FormatOmissions(dropped)).ToString();
 
-            var dropped = omitted[0] + omitted[1] + omitted[2];
-            var notice = dropped > 0 ? $"Condensed; {dropped} more events omitted. " : "Condensed; details omitted. ";
-            var path = string.IsNullOrWhiteSpace(logPath) ? "Unity log path unavailable." : "Full logs: " + logPath;
-            if (notice.Length + path.Length >= MaxOutputLength)
-                path = "Unity log path exceeds the summary limit; use status to retrieve it.";
-            return notice + path;
+            static string FormatOmissions(long events)
+                => $"{events} more {(events == 1 ? "event" : "events")} omitted.";
         }
 
         static string Clip(string value, int limit)
@@ -155,12 +141,11 @@ namespace Conduit
                 builder.Append(char.IsWhiteSpace(character) ? ' ' : character);
         }
 
-        static bool AppendStack(StringBuilder builder, string stack)
+        static void AppendStack(StringBuilder builder, string stack)
         {
             var simplified = BridgeExceptionFormatter.TrimCommonLogTail(BridgeExceptionFormatter.SimplifyStackTrace(stack));
             var remaining = simplified.AsSpan();
             var frames = 0;
-            var trimmed = false;
             while (!remaining.IsEmpty && frames < 2)
             {
                 var newline = remaining.IndexOf('\n');
@@ -170,11 +155,12 @@ namespace Conduit
                     || frame.StartsWith("UnityEngine.Logger".AsSpan(), StringComparison.Ordinal))
                     continue;
 
-                builder.Append("\n  ").Append(frame.Slice(0, Math.Min(frame.Length, 128)));
-                trimmed |= frame.Length > 128;
+                var shortened = frame.Length > 128 || frames == 1 && !remaining.Trim().IsEmpty;
+                builder.Append("\n  ").Append(frame.Slice(0, Math.Min(frame.Length, shortened ? 127 : 128)));
+                if (shortened)
+                    builder.Append('…');
                 frames++;
             }
-            return trimmed || !remaining.Trim().IsEmpty;
         }
 
         struct Group
@@ -190,11 +176,7 @@ namespace Conduit
         sealed class GroupComparer : System.Collections.Generic.IComparer<Group>
         {
             internal static readonly GroupComparer Instance = new();
-            public int Compare(Group left, Group right)
-            {
-                var severity = right.Severity.CompareTo(left.Severity);
-                return severity != 0 ? severity : left.Order.CompareTo(right.Order);
-            }
+            public int Compare(Group left, Group right) => left.Order.CompareTo(right.Order);
         }
     }
 }
