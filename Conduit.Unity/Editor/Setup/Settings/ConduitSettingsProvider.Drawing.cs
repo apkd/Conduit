@@ -50,39 +50,8 @@ namespace Conduit
             EditorGUILayout.EndHorizontal();
         }
 
-        static void DrawOtherSettings(ConduitSettings settings)
+        static void DrawPlayModeSettings(ConduitSettings settings)
         {
-            EditorGUILayout.HelpBox(IdleCloseDescription, MessageType.Info);
-            EditorGUI.BeginChangeCheck();
-            bool automaticallyClose = EditorGUILayout.ToggleLeft(
-                "Automatically close Unity when idle",
-                settings.AutomaticallyCloseWhenIdle
-            );
-            if (EditorGUI.EndChangeCheck())
-                settings.SetAutomaticallyCloseWhenIdle(automaticallyClose);
-
-            if (settings.AutomaticallyCloseWhenIdle)
-            {
-                EditorGUILayout.BeginHorizontal();
-                GUILayout.Space(15f);
-                EditorGUI.BeginChangeCheck();
-                float minutes = EditorGUILayout.DelayedFloatField(settings.IdleCloseMinutes, GUILayout.Width(60f));
-                if (EditorGUI.EndChangeCheck())
-                    settings.SetIdleCloseMinutes(minutes);
-                EditorGUILayout.LabelField("Idle time in minutes until Unity is closed");
-                EditorGUILayout.EndHorizontal();
-            }
-
-            EditorGUILayout.Space();
-            EditorGUI.BeginChangeCheck();
-            var includeBackgroundLogs = EditorGUILayout.ToggleLeft(
-                new GUIContent("Include logs between tool calls", "Adds a small, lossy summary to the next Unity tool reply. Messages may be merged or discarded. Resets on script reload. Development players always enable this."),
-                settings.IncludeBackgroundLogs
-            );
-            if (EditorGUI.EndChangeCheck())
-                settings.SetIncludeBackgroundLogs(includeBackgroundLogs);
-            EditorGUILayout.Space();
-
             EditorGUI.BeginChangeCheck();
             bool unfocusedGameView = EditorGUILayout.ToggleLeft(
                 "Hide game view in play mode",
@@ -91,6 +60,7 @@ namespace Conduit
             if (EditorGUI.EndChangeCheck())
                 settings.SetUnfocusedGameView(unfocusedGameView);
 
+            EditorGUILayout.Space();
             EditorGUILayout.HelpBox(UnfocusedGameViewDescription, MessageType.None);
 
             EditorGUILayout.Space();
@@ -114,6 +84,40 @@ namespace Conduit
                 settings.SetMuteAudioInPlayMode(muteAudioInPlayMode);
 
             EditorGUILayout.HelpBox(MuteAudioInPlayModeDescription, MessageType.None);
+        }
+
+        static void DrawOtherOptions(ConduitSettings settings)
+        {
+            EditorGUILayout.HelpBox(IdleCloseDescription, MessageType.None);
+            EditorGUI.BeginChangeCheck();
+            bool automaticallyClose = EditorGUILayout.ToggleLeft(
+                "Automatically close Unity when idle",
+                settings.AutomaticallyCloseWhenIdle
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetAutomaticallyCloseWhenIdle(automaticallyClose);
+
+            if (settings.AutomaticallyCloseWhenIdle)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(15f);
+                EditorGUI.BeginChangeCheck();
+                float minutes = EditorGUILayout.DelayedFloatField(settings.IdleCloseMinutes, GUILayout.Width(60f));
+                if (EditorGUI.EndChangeCheck())
+                    settings.SetIdleCloseMinutes(minutes);
+                EditorGUILayout.LabelField("Idle time in minutes before Unity is closed");
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EditorGUILayout.Space();
+            EditorGUI.BeginChangeCheck();
+            var includeBackgroundLogs = EditorGUILayout.ToggleLeft(
+                "Include logs between tool calls",
+                settings.IncludeBackgroundLogs
+            );
+            if (EditorGUI.EndChangeCheck())
+                settings.SetIncludeBackgroundLogs(includeBackgroundLogs);
+            EditorGUILayout.HelpBox(IncludeBackgroundLogsDescription, MessageType.None);
 
             EditorGUILayout.Space();
             EditorGUILayout.BeginHorizontal();
