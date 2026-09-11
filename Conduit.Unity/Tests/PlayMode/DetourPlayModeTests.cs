@@ -1,7 +1,6 @@
 #nullable enable
 
 using System;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using Conduit;
 using NUnit.Framework;
@@ -12,7 +11,7 @@ public sealed class DetourPlayModeTests
     static int replacementStorage = 29;
 
     [Test]
-    public void NativePatch_ReplacesAndRestoresPlayerMonoMethodEntry()
+    public void MethodDetour_ReplacesAndRestoresPlayerMonoMethodEntry()
     {
         Assert.That(Target(2), Is.EqualTo(3));
         WithPatch(nameof(Target), nameof(Replacement), () =>
@@ -22,7 +21,7 @@ public sealed class DetourPlayModeTests
     }
 
     [Test]
-    public void NativePatch_PreservesAdvancedPlayerAbi()
+    public void MethodDetour_PreservesAdvancedPlayerAbi()
     {
         var values = new[] { 3, 7 };
         WithPatch(nameof(SpanTarget), nameof(SpanReplacement), () =>
@@ -38,7 +37,7 @@ public sealed class DetourPlayModeTests
     }
 
     [Test]
-    public unsafe void NativePatch_PreservesPointerAndFunctionPointerPlayerAbi()
+    public unsafe void MethodDetour_PreservesPointerAndFunctionPointerPlayerAbi()
     {
         var first = 3;
         Assert.That(PointerTarget(&first), Is.EqualTo(3));
@@ -93,20 +92,7 @@ public sealed class DetourPlayModeTests
 
     static void WithPatch(string targetName, string replacementName, Action assertion)
     {
-        const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-        var target = MonoJit.GetCode(typeof(DetourPlayModeTests).GetMethod(targetName, flags)!);
-        var replacement = MonoJit.GetCode(typeof(DetourPlayModeTests).GetMethod(replacementName, flags)!);
-        var plan = NativePatch.Plan(target, replacement.Start);
-        var original = new PatchPlan(plan.Address, plan.Original, plan.Original, plan.Kind);
-        try
-        {
-            NativePatch.Install(original, plan);
-            assertion();
-        }
-        finally
-        {
-            if (NativePatch.IsInstalled(plan))
-                NativePatch.Restore(plan);
-        }
+        using var detour = new MethodDetour(typeof(DetourPlayModeTests), targetName, typeof(DetourPlayModeTests), replacementName);
+        assertion();
     }
 }

@@ -8,6 +8,9 @@ using System.Runtime.InteropServices;
 
 namespace Conduit
 {
+    /// <summary>Temporarily makes executable JIT pages writable and publishes changed instructions.</summary>
+    /// <remarks>Pages remain executable during the write because they may contain other live methods.
+    /// Callers must prevent concurrent execution of the method whose bytes are changing.</remarks>
     static class MemoryProtection
     {
         const uint PageExecuteReadWrite = 0x40;
@@ -32,6 +35,8 @@ namespace Conduit
                 return;
             }
 
+            // unity Mono can allocate writable JIT mappings. Preserve their permissions instead of
+            // assuming all executable memory started as read-only.
             int protection = ReadLinuxProtection(address);
             if ((protection & ProtWrite) != 0)
             {
@@ -39,6 +44,7 @@ namespace Conduit
                 return;
             }
 
+            // mprotect accepts page-aligned ranges; the prefix can straddle a page boundary.
             int pageSize = Environment.SystemPageSize;
             long start = address.ToInt64() & -pageSize;
             long end = (address.ToInt64() + length + pageSize - 1) & -pageSize;

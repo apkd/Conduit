@@ -2,23 +2,33 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace Conduit
 {
-    /// <summary>Describes intrinsic method-shape limitations shared by inspection and runtime detouring.</summary>
+    /// <summary>Rejects methods and replacement signatures that cannot share a native calling convention safely.</summary>
+    /// <remarks>
+    /// A native jump does no argument conversion and supplies no generic context. Matching managed signatures
+    /// before patching prevents the replacement from reading arguments or returning values in the wrong form.
+    /// Inspection also uses these rules when describing targets that the server can reproduce in generated C#.
+    /// </remarks>
     static class MethodDetourSupport
     {
-        public static string? GetUnsupportedReason(MethodBase method)
+        internal enum MethodRole { Target, Replacement }
+
+        public static string? GetUnsupportedReason(MethodBase method, MethodRole role = MethodRole.Target)
         {
-            if (RuntimeInformation.ProcessArchitecture != Architecture.X64
+            if (Type.GetType("Mono.Runtime") == null
+                || RuntimeInformation.ProcessArchitecture != Architecture.X64
                 || !RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 && !RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 return "runtime method detouring supports Unity Mono on Windows/Linux x64 only";
             if (method is ConstructorInfo)
                 return "constructors are not supported";
-            if (method.IsGenericMethod || method.DeclaringType?.ContainsGenericParameters == true)
+            // closed generic instantiations can share native code and the same module/token identity.
+            if (method.IsGenericMethod || method.DeclaringType?.IsGenericType == true)
                 return "generic methods and methods declared on generic types are not supported";
             if ((method.Attributes & MethodAttributes.PinvokeImpl) != 0)
                 return "P/Invoke methods are not supported";
@@ -30,7 +40,8 @@ namespace Conduit
                 return "the method has no managed implementation body";
             if ((method.CallingConvention & CallingConventions.VarArgs) != 0)
                 return "varargs methods are not supported";
-            if (method.Module.Assembly.IsDynamic || string.IsNullOrWhiteSpace(TryGetLocation(method.Module.Assembly)))
+            if (method.Module.Assembly.IsDynamic
+                || role == MethodRole.Target && string.IsNullOrWhiteSpace(TryGetLocation(method.Module.Assembly)))
                 return "methods from dynamic or locationless assemblies are not supported";
 
             if (method is not MethodInfo methodInfo)
@@ -69,6 +80,7 @@ namespace Conduit
 
             for (var current = type; current != null; current = current.DeclaringType)
             {
+                // metadata permits names that generated C# cannot spell, including compiler-generated types.
                 var name = current.Name;
                 var arity = name.IndexOf('`');
                 if (arity >= 0)
@@ -94,6 +106,66 @@ namespace Conduit
         {
             if (GetUnsupportedReason(method) is { } reason)
                 throw new NotSupportedException(reason);
+        }
+
+        internal static void ValidateReplacement(MethodInfo target, MethodInfo replacement)
+        {
+            if (replacement == null)
+                throw new ArgumentNullException(nameof(replacement));
+            if (target.Equals(replacement))
+                throw new ArgumentException("A method cannot replace itself.", nameof(replacement));
+            if (!replacement.IsStatic)
+                throw new ArgumentException("The replacement must be static, with an explicit receiver for instance targets.", nameof(replacement));
+            // generated MCP replacements are loaded from verified assembly bytes and have no file location.
+            if (GetUnsupportedReason(replacement, MethodRole.Replacement) is { } reason)
+                throw new NotSupportedException(reason);
+
+            var expected = target.GetParameters();
+            var actual = replacement.GetParameters();
+            int offset = target.IsStatic ? 0 : 1;
+            if (actual.Length != expected.Length + offset || !Matches(target.ReturnParameter, replacement.ReturnParameter))
+                throw Mismatch();
+            if (offset != 0)
+            {
+                var receiver = target.DeclaringType!;
+                if (receiver.IsValueType)
+                    receiver = receiver.MakeByRefType();
+                if (!TypesMatch(receiver, actual[0].ParameterType) || actual[0].IsIn || actual[0].IsOut
+                    || actual[0].GetRequiredCustomModifiers().Length != 0)
+                    throw Mismatch();
+            }
+            foreach (var parameter in expected)
+                if (!Matches(parameter, actual[parameter.Position + offset]))
+                    throw Mismatch();
+
+            ArgumentException Mismatch() => new(
+                $"Replacement '{replacement}' does not match '{target}', including its receiver and by-reference parameters.",
+                nameof(replacement)
+            );
+
+            // int& alone cannot distinguish ref, out, in, or a readonly return.
+            static bool Matches(ParameterInfo left, ParameterInfo right)
+                => TypesMatch(left.ParameterType, right.ParameterType)
+                   && left.IsIn == right.IsIn
+                   && left.IsOut == right.IsOut
+                   && left.GetRequiredCustomModifiers().SequenceEqual(right.GetRequiredCustomModifiers());
+        }
+
+        internal static bool TypesMatch(Type left, Type right)
+        {
+            if (left.HasElementType || right.HasElementType)
+                return left.HasElementType && right.HasElementType
+                       && left.IsByRef == right.IsByRef
+                       && left.IsPointer == right.IsPointer
+                       && left.IsArray == right.IsArray
+                       && (!left.IsArray || left == right)
+                       && TypesMatch(left.GetElementType()!, right.GetElementType()!);
+
+            // mono reports different function-pointer signatures through the same fake managed class.
+            if (MonoSignature.IsFunctionPointer(left) || MonoSignature.IsFunctionPointer(right))
+                return MonoSignature.IsFunctionPointer(left) && MonoSignature.IsFunctionPointer(right)
+                       && MonoSignature.FunctionPointersMatch(left, right);
+            return left == right;
         }
 
         static bool HasManagedBody(MethodBase method)

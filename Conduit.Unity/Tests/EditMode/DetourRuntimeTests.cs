@@ -10,7 +10,7 @@ using System.Runtime.CompilerServices;
 using Conduit;
 using NUnit.Framework;
 
-public sealed class DetourRuntimeTests
+public sealed partial class DetourRuntimeTests
 {
     static int targetStorage = 11;
     static int replacementStorage = 29;
@@ -153,11 +153,20 @@ public sealed class DetourRuntimeTests
             Assert.That(DetourRuntime.ActiveCount, Is.Zero);
             Assert.That(Target(1), Is.EqualTo(2));
 
+            using (var caller = new MethodDetour(target, Method(nameof(Replacement))))
+            {
+                Assert.Throws<InvalidOperationException>(() => Execute("apply"));
+                Assert.That(Target(1), Is.EqualTo(Replacement(1)));
+                Execute("restore");
+                Assert.That(Target(1), Is.EqualTo(2));
+            }
+
             var applied = Execute("apply");
             Assert.That(applied, Does.StartWith("Detoured "));
             Assert.That(DetourRuntime.ActiveCount, Is.EqualTo(1));
             Assert.That(DetourRuntime.ActiveMethodNames.Single(), Does.EndWith("." + nameof(Target)));
             Assert.That(Target(1), Is.EqualTo(201));
+            Assert.Throws<InvalidOperationException>(() => new MethodDetour(target, Method(nameof(Replacement))));
 
             var activeDiagnostic = Execute("test");
             Assert.That(activeDiagnostic, Does.Contain("Active detour: yes"));
@@ -166,9 +175,15 @@ public sealed class DetourRuntimeTests
             Assert.That(updated, Does.StartWith("Updated detour "));
             Assert.That(Target(1), Is.EqualTo(201));
 
+            using var receiverDetour = new MethodDetour(
+                typeof(ReferenceReceiver), nameof(ReferenceReceiver.Target), typeof(DetourRuntimeTests), nameof(ReferenceReceiverReplacement)
+            );
+            var receiver = new ReferenceReceiver(5);
+            Assert.That(receiver.Target(2), Is.EqualTo(ReferenceReceiverReplacement(receiver, 2)));
             var snapshot = DetourRuntime.GetSnapshots().Single();
-            Assert.That(DetourRuntime.RestoreAll(), Is.EqualTo(1));
+            Assert.That(DetourRuntime.RestoreAll(), Is.EqualTo(2));
             Assert.That(Target(1), Is.EqualTo(2));
+            Assert.That(receiver.Target(2), Is.EqualTo(7));
             DetourRuntime.Reapply(snapshot);
             Assert.That(Target(1), Is.EqualTo(201));
         }

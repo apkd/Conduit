@@ -5,6 +5,13 @@ using System.Reflection;
 
 namespace Conduit
 {
+    /// <summary>Allows server-generated replacements to access private members in other assemblies.</summary>
+    /// <remarks>
+    /// Mono enforces visibility when it JITs generated code, even when the compiler accepted the references.
+    /// This helper sets Mono's internal corlib_internal assembly flag to grant access. The flag has no managed
+    /// setter, so its address depends on Unity's native MonoAssembly layout. DetourAccessProbe verifies the
+    /// resulting access before DetourRuntime installs any replacement from the assembly.
+    /// </remarks>
     static unsafe class MonoAssemblyAccess
     {
         static readonly bool assemblyNameHasArchitecture = HasAssemblyNameArchitecture();
@@ -14,6 +21,7 @@ namespace Conduit
             if (Type.GetType("Mono.Runtime") == null)
                 throw new PlatformNotSupportedException("Runtime method detouring requires the Unity Mono runtime.");
 
+            // loaded assemblies and Reflection.Emit assemblies expose their native handle under different names.
             var runtimeType = assembly.GetType();
             var field = runtimeType.GetField(
                             "_mono_assembly",
@@ -46,6 +54,8 @@ namespace Conduit
                 (true, true, 4) => 20,
                 _ => 24,
             };
+            // include the embedded MonoAssemblyName and its alignment before the trailing assembly flags.
+            // these sizes describe Mono's private layout; they must be checked again when Unity changes it.
             int offset = IntPtr.Size * 6
                          + 20
                          + sizeof(uint) * 3
@@ -57,6 +67,7 @@ namespace Conduit
 
         static bool HasAssemblyNameArchitecture()
         {
+            // the managed architecture field distinguishes the native layouts without a Unity version table.
 #pragma warning disable 618
             return new AssemblyName("ConduitProbe, ProcessorArchitecture=MSIL").ProcessorArchitecture
                    == ProcessorArchitecture.MSIL;

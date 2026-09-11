@@ -7,6 +7,9 @@ using System.Runtime.InteropServices;
 
 namespace Conduit
 {
+    /// <summary>Obtains the actual compiled Mono method body and its native extent.</summary>
+    /// <remarks>A MethodHandle pointer can refer to an entry thunk. Mono's JIT table must identify it as the
+    /// start of the method body before NativePatch may overwrite it.</remarks>
     static class MonoJit
     {
         static readonly Lazy<Exports> exports = new(CreateExports);
@@ -16,7 +19,7 @@ namespace Conduit
             if (method.ContainsGenericParameters)
                 throw new NotSupportedException("Generic method code cannot be detoured.");
 
-            RuntimeHelpers.PrepareMethod(method.MethodHandle);
+            RuntimeHelpers.PrepareMethod(method.MethodHandle); // JIT the body before looking up its native address
             var pointer = method.MethodHandle.GetFunctionPointer();
             if (pointer == IntPtr.Zero)
                 throw new InvalidOperationException($"Mono did not return JIT code for '{method}'.");
@@ -28,7 +31,8 @@ namespace Conduit
                 throw new InvalidOperationException($"Mono JIT metadata was not found for '{method}'.");
 
             var start = api.JitInfoGetCodeStart(info);
-            var size = checked((int)api.JitInfoGetCodeSize(info));
+            int size = checked((int)api.JitInfoGetCodeSize(info));
+            // wrappers can have their own calling convention or lifetime; do not guess how to patch them.
             if (start != pointer)
                 throw new NotSupportedException(
                     $"Mono returned an alternate entry thunk for '{method}'; this call path cannot be patched safely."

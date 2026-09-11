@@ -11,14 +11,15 @@ namespace Conduit
         public static string Escape(string value)
             => IsKeyword(value) ? "@" + value : value;
 
+        /// <summary>Escapes each namespace or type segment so metadata keywords remain valid in generated C#.</summary>
         public static string EscapeQualified(string value)
         {
             if (value.IndexOf('.') < 0)
                 return Escape(value);
 
             var builder = new StringBuilder(value.Length);
-            var start = 0;
-            for (var index = 0; index <= value.Length; index++)
+            int start = 0;
+            for (int index = 0; index <= value.Length; index++)
             {
                 if (index < value.Length && value[index] != '.')
                     continue;
@@ -32,11 +33,12 @@ namespace Conduit
             return builder.ToString();
         }
 
+        /// <summary>Rejects metadata names that cannot be emitted as a C# identifier, even with an @ prefix.</summary>
         public static bool IsValid(string value)
         {
             if (value.Length == 0 || !IsStart(value[0]))
                 return false;
-            for (var index = 1; index < value.Length; index++)
+            for (int index = 1; index < value.Length; index++)
                 if (!IsPart(value[index]))
                     return false;
             return true;

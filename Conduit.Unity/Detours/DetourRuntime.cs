@@ -8,9 +8,17 @@ using System.Reflection;
 
 namespace Conduit
 {
+    /// <summary>Owns active method replacements shared by the C# API, MCP commands, and editor cleanup.</summary>
+    /// <remarks>
+    /// Registration and native writes share one lock. Each record retains the replacement method and the
+    /// original native bytes, so updating an MCP detour still restores the implementation from before the
+    /// first patch. Only MCP records contain a snapshot: caller-owned methods depend on their current domain.
+    /// The lock coordinates patch owners; it cannot stop other threads from executing the patched method.
+    /// </remarks>
     static partial class DetourRuntime
     {
         static readonly object gate = new();
+        // tokens identify methods within a module; the MVID keeps separately compiled modules distinct.
         static readonly Dictionary<(Guid ModuleVersionId, int MetadataToken), ActiveDetour> active = new();
         static string[] activeMethodNames = Array.Empty<string>();
 
@@ -23,6 +31,7 @@ namespace Conduit
             }
         }
 
+        // status polling reuses this array; callers must treat it as read-only.
         internal static string[] ActiveMethodNames
         {
             get
@@ -82,11 +91,12 @@ namespace Conduit
         {
             lock (gate)
             {
-                var snapshots = new DetourSnapshot[active.Count];
-                var index = 0;
+                var snapshots = new List<DetourSnapshot>();
                 foreach (var detour in active.Values)
-                    snapshots[index++] = detour.ToSnapshot();
-                return snapshots;
+                    // caller-owned replacements depend on state that is lost with their domain.
+                    if (detour.Snapshot is { } snapshot)
+                        snapshots.Add(snapshot);
+                return snapshots.ToArray();
             }
         }
 
@@ -114,6 +124,7 @@ namespace Conduit
                 List<Exception>? failures = null;
                 foreach (var pair in active.ToArray())
                 {
+                    // retain failed records so callers can retry without losing the original bytes.
                     try
                     {
                         NativePatch.Restore(pair.Value.Patch);
@@ -143,11 +154,11 @@ namespace Conduit
             }
 
             var names = new string[active.Count];
-            var index = 0;
+            int index = 0;
             foreach (var detour in active.Values)
                 names[index++] = detour.CanonicalName;
 
-            Array.Sort(names, StringComparer.Ordinal);
+            Array.Sort(names, StringComparer.Ordinal); // stable status output without sorting on each read
             activeMethodNames = names;
         }
 
@@ -157,56 +168,31 @@ namespace Conduit
                 return active.TryGetValue(key, out var detour) ? detour : null;
         }
 
-        sealed class ActiveDetour
+        /// <summary>Retains the installed code and acts as the ownership token held by a disposable handle.</summary>
+        internal sealed class ActiveDetour
         {
             internal ActiveDetour(
                 (Guid ModuleVersionId, int MetadataToken) key,
                 MethodInfo replacementMethod,
                 PatchPlan patch,
-                string signatureHash,
                 string canonicalName,
-                string declaration,
-                byte[] assemblyBytes,
-                byte[]? pdbBytes,
-                string generatedTypeName,
-                string displayName)
+                string displayName,
+                DetourSnapshot? snapshot = null)
             {
                 Key = key;
                 ReplacementMethod = replacementMethod; // keeps the generated JIT body alive
                 Patch = patch;
-                SignatureHash = signatureHash;
                 CanonicalName = canonicalName;
-                Declaration = declaration;
-                AssemblyBytes = assemblyBytes;
-                PdbBytes = pdbBytes;
-                GeneratedTypeName = generatedTypeName;
                 DisplayName = displayName;
+                Snapshot = snapshot;
             }
 
             internal (Guid ModuleVersionId, int MetadataToken) Key { get; }
             internal MethodInfo ReplacementMethod { get; }
             internal PatchPlan Patch { get; }
-            internal string SignatureHash { get; }
             internal string CanonicalName { get; }
-            internal string Declaration { get; }
-            internal byte[] AssemblyBytes { get; }
-            internal byte[]? PdbBytes { get; }
-            internal string GeneratedTypeName { get; }
             internal string DisplayName { get; }
-
-            internal DetourSnapshot ToSnapshot() =>
-                new()
-                {
-                    ModuleVersionId = Key.ModuleVersionId.ToString("N"),
-                    MetadataToken = Key.MetadataToken.ToString(CultureInfo.InvariantCulture),
-                    SignatureHash = SignatureHash,
-                    CanonicalName = CanonicalName,
-                    Declaration = Declaration,
-                    AssemblyBytes = AssemblyBytes,
-                    PdbBytes = PdbBytes,
-                    GeneratedTypeName = GeneratedTypeName,
-                    DisplayName = DisplayName,
-                };
+            internal DetourSnapshot? Snapshot { get; }
         }
     }
 }

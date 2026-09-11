@@ -5,6 +5,7 @@ using System.Reflection;
 
 namespace Conduit
 {
+    /// <summary>Loads server-compiled code, retaining debug symbols when this Mono version accepts them.</summary>
     static class CompiledAssembly
     {
         internal static Assembly Load(byte[] image, byte[]? symbols)

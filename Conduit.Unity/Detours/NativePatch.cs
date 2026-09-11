@@ -7,6 +7,12 @@ using System.Threading;
 
 namespace Conduit
 {
+    /// <summary>Redirects an x64 JIT entry point and restores its saved bytes without relocating instructions.</summary>
+    /// <remarks>
+    /// The replacement returns directly to the original caller. There is no trampoline through the overwritten
+    /// instructions, so their instruction boundaries do not need decoding. Every write compares the current
+    /// prefix with the expected prefix to avoid overwriting changes made outside this patch owner.
+    /// </remarks>
     static unsafe class NativePatch
     {
         internal static PatchPlan Plan(JitCode target, IntPtr replacement, byte[]? original = null)
@@ -18,12 +24,14 @@ namespace Conduit
                     $"The target JIT body is {target.Size} bytes; at least 5 bytes are required."
                 );
 
+            // reserve an absolute jump when space permits, otherwise an atomic word or the minimum jump.
+            // untouched bytes stay in the prefix so a relative jump can still use one aligned 8-byte write.
             int span = target.Size >= 14 ? 14 : target.Size >= 8 ? 8 : 5;
             var saved = original ?? Read(target.Start, span);
             if (saved.Length != span)
                 throw new InvalidOperationException("The saved target prefix no longer matches the JIT body size.");
             var desired = (byte[])saved.Clone();
-            long displacement = replacement.ToInt64() - (target.Start.ToInt64() + 5L);
+            long displacement = replacement.ToInt64() - (target.Start.ToInt64() + 5L); // relative to the instruction after E9 rel32
             if (displacement is >= int.MinValue and <= int.MaxValue)
             {
                 desired[0] = 0xe9;
@@ -35,6 +43,8 @@ namespace Conduit
                 throw new NotSupportedException(
                     $"The replacement is outside the ±2 GiB relative-jump range and the {target.Size}-byte target is too short for a 14-byte absolute jump."
                 );
+            // the FF 25 encoding with zero displacement jumps through the following 8-byte address without clobbering
+            // an argument register. This needs 14 bytes but can reach anywhere in the process.
             desired[0] = 0xff;
             desired[1] = 0x25;
             desired.AsSpan(2, 4).Clear();
@@ -63,6 +73,7 @@ namespace Conduit
                 desired.Length,
                 () =>
                 {
+                    // changing page permissions creates another opportunity for a competing patch.
                     if (!Read(address, expected.Length).AsSpan().SequenceEqual(expected))
                         throw new InvalidOperationException("The target code changed while installing the detour.");
 
@@ -90,6 +101,7 @@ namespace Conduit
         {
             if ((address.ToInt64() & 7) != 0 || expected.Length < 8)
                 return false;
+            // a saved prefix can be longer than the jump; only unchanged trailing bytes may be omitted.
             for (int index = 8; index < expected.Length; ++index)
                 if (expected[index] != desired[index])
                     return false;

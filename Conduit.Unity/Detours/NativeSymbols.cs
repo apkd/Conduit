@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace Conduit
 {
+    /// <summary>Resolves Mono exports from the Unity process without loading a second Mono runtime.</summary>
     static class NativeSymbols
     {
         internal static T Resolve<T>(string name) where T : Delegate

@@ -4,6 +4,9 @@ using System;
 
 namespace Conduit
 {
+    /// <summary>Retains an MCP replacement's compiled bytes and target identity so it can survive domain reload.</summary>
+    /// <remarks>Native pointers and MethodInfo instances belong to the old domain. Reapplication resolves the
+    /// recorded module version and token, then loads these bytes to create a new replacement in the new domain.</remarks>
     sealed class DetourSnapshot
     {
         internal string ModuleVersionId = string.Empty;

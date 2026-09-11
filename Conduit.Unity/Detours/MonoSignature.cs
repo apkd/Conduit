@@ -7,13 +7,30 @@ using System.Text;
 namespace Conduit
 {
     /// <summary>Recovers function-pointer signatures that Unity Mono hides behind MonoFNPtrFakeClass.</summary>
+    /// <remarks>
+    /// Managed reflection exposes these parameters as the same placeholder class, losing the distinctions
+    /// needed for generated C# and detour validation. Read the native MonoType signature to retain parameter
+    /// types, calling conventions, and by-reference modifiers. Native access stays in this helper.
+    /// </remarks>
     static class MonoSignature
     {
+        enum SignaturePosition { Parameter, Return }
+
         const int FunctionPointerTypeCode = 27;
         static readonly Lazy<Exports> exports = new(CreateExports);
 
         public static bool IsFunctionPointer(Type type)
             => type.FullName == "System.MonoFNPtrFakeClass";
+
+        internal static bool FunctionPointersMatch(Type left, Type right)
+        {
+            var api = exports.Value;
+            // compare native metadata, not formatted names that could hide distinct types from different assemblies.
+            return api.SignaturesEqual(
+                api.TypeGetSignature(left.TypeHandle.Value),
+                api.TypeGetSignature(right.TypeHandle.Value)
+            ) != 0;
+        }
 
         public static string FormatFunctionPointer(Type type)
         {
@@ -65,9 +82,9 @@ namespace Conduit
             AppendCallingConvention(builder, api.SignatureGetCallConvention(signature));
             builder.Append('<');
 
-            var parameterCount = api.SignatureGetParameterCount(signature);
+            uint parameterCount = api.SignatureGetParameterCount(signature);
             var iterator = IntPtr.Zero;
-            for (var index = 0; index < parameterCount; index++)
+            for (uint index = 0; index < parameterCount; index++)
             {
                 if (index > 0)
                     builder.Append(", ");
@@ -75,12 +92,12 @@ namespace Conduit
                 var parameter = api.SignatureGetParameters(signature, ref iterator);
                 if (parameter == IntPtr.Zero)
                     throw new InvalidOperationException("Mono returned an incomplete function-pointer signature.");
-                AppendSignatureType(builder, parameter, isReturn: false, api);
+                AppendSignatureType(builder, parameter, SignaturePosition.Parameter, api);
             }
 
             if (parameterCount > 0)
                 builder.Append(", ");
-            AppendSignatureType(builder, api.SignatureGetReturnType(signature), isReturn: true, api);
+            AppendSignatureType(builder, api.SignatureGetReturnType(signature), SignaturePosition.Return, api);
             return builder.Append('>').ToString();
         }
 
@@ -111,14 +128,14 @@ namespace Conduit
             }
         }
 
-        static void AppendSignatureType(StringBuilder builder, IntPtr monoType, bool isReturn, Exports api)
+        static void AppendSignatureType(StringBuilder builder, IntPtr monoType, SignaturePosition position, Exports api)
         {
             if (monoType == IntPtr.Zero)
                 throw new InvalidOperationException("Mono returned a null signature type.");
 
             if (api.TypeIsByRef(monoType) != 0)
                 builder.Append(HasReadOnlyModifier(monoType, api)
-                    ? isReturn ? "ref readonly " : "in "
+                    ? position == SignaturePosition.Return ? "ref readonly " : "in "
                     : "ref ");
 
             if (api.TypeGetType(monoType) == FunctionPointerTypeCode)
@@ -135,7 +152,7 @@ namespace Conduit
             var iterator = IntPtr.Zero;
             while (true)
             {
-                var required = 0;
+                int required = 0;
                 var modifier = api.TypeGetModifiers(monoType, ref required, ref iterator);
                 if (modifier == IntPtr.Zero)
                     return false;
@@ -152,17 +169,17 @@ namespace Conduit
 
         static string FormatManagedTypeName(string name)
         {
-            var index = 0;
+            int index = 0;
             return ParseType();
 
             string ParseType()
             {
-                var start = index;
+                int start = index;
                 while (index < name.Length && name[index] is not ('[' or ']' or ','))
                     index++;
 
                 var token = name.Substring(start, index - start).Replace('+', '.');
-                var tick = token.LastIndexOf('`');
+                int tick = token.LastIndexOf('`');
                 var suffix = string.Empty;
                 while (token.EndsWith("[]", StringComparison.Ordinal)
                        || token.EndsWith("*", StringComparison.Ordinal)
@@ -181,13 +198,15 @@ namespace Conduit
                     }
                 }
 
+                // mono writes constructed types with metadata arity and bracketed arguments.
+                // parse recursively so nested generic arguments become valid C# rather than string replacements.
                 var bareToken = tick < 0 ? token : token.Substring(0, tick);
                 var builder = new StringBuilder(Alias(bareToken));
                 if (tick >= 0 && index < name.Length && name[index] == '[')
                 {
                     index++;
                     builder.Append('<');
-                    var first = true;
+                    bool first = true;
                     while (index < name.Length && name[index] != ']')
                     {
                         if (!first)
@@ -239,6 +258,7 @@ namespace Conduit
         static Exports CreateExports()
             => new(
                 NativeSymbols.Resolve<MonoTypeGetSignature>("mono_type_get_signature"),
+                NativeSymbols.Resolve<MonoSignaturesEqual>("mono_metadata_signature_equal"),
                 NativeSymbols.Resolve<MonoSignatureGetReturnType>("mono_signature_get_return_type"),
                 NativeSymbols.Resolve<MonoSignatureGetParameters>("mono_signature_get_params"),
                 NativeSymbols.Resolve<MonoSignatureGetParameterCount>("mono_signature_get_param_count"),
@@ -254,6 +274,9 @@ namespace Conduit
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate IntPtr MonoTypeGetSignature(IntPtr type);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        delegate int MonoSignaturesEqual(IntPtr left, IntPtr right);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate IntPtr MonoSignatureGetReturnType(IntPtr signature);
@@ -295,6 +318,7 @@ namespace Conduit
 
             internal Exports(
                 MonoTypeGetSignature typeGetSignature,
+                MonoSignaturesEqual signaturesEqual,
                 MonoSignatureGetReturnType signatureGetReturnType,
                 MonoSignatureGetParameters signatureGetParameters,
                 MonoSignatureGetParameterCount signatureGetParameterCount,
@@ -308,6 +332,7 @@ namespace Conduit
                 MonoFree free)
             {
                 TypeGetSignature = typeGetSignature;
+                SignaturesEqual = signaturesEqual;
                 SignatureGetReturnType = signatureGetReturnType;
                 SignatureGetParameters = signatureGetParameters;
                 SignatureGetParameterCount = signatureGetParameterCount;
@@ -322,6 +347,7 @@ namespace Conduit
             }
 
             internal MonoTypeGetSignature TypeGetSignature { get; }
+            internal MonoSignaturesEqual SignaturesEqual { get; }
             internal MonoSignatureGetReturnType SignatureGetReturnType { get; }
             internal MonoSignatureGetParameters SignatureGetParameters { get; }
             internal MonoSignatureGetParameterCount SignatureGetParameterCount { get; }
@@ -344,7 +370,7 @@ namespace Conduit
                 }
                 finally
                 {
-                    free(pointer);
+                    free(pointer); // Mono owns the allocator for this returned UTF-8 name
                 }
             }
         }
