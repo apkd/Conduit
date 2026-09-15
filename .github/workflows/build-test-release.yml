@@ -1420,12 +1420,15 @@ jobs:
              history.
           2. Fetch `master` again. If its tip differs from the release commit, record a skipped
              release and leave the existing rolling release unchanged.
-          3. Force-move the `release` tag to the prepared commit, then create or edit its GitHub
-             Release and mark it Latest.
+          3. Validate the three assets, force-move the `release` tag to the prepared commit, then
+             edit its GitHub Release or create it as a draft.
           4. Replace the three named assets and remove every stale extra asset.
+          5. Briefly switch the release to draft and publish it as Latest. This refreshes the
+             displayed publication date while preserving the release and its reactions.
 
           > The branch comparison is a point-in-time freshness check. Publication is serialized,
           > but the tag push, release edit, uploads, and deletions are separate remote operations.
+          > The release is briefly hidden during republishing; on failure, publication is retried.
           > In particular, `--clobber` deletes an existing same-name asset before uploading its
           > replacement.
           EOF
@@ -1594,17 +1597,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           tag="release"
-          title="v${{ needs.prepare.outputs.version_new }} ($(date -u '+%d-%m-%Y'))"
+          title="v${{ needs.prepare.outputs.version_new }}"
           notes="release-notes.md"
-
-          git tag -fa "$tag" "${{ needs.prepare.outputs.sha }}" -m "Latest rolling release"
-          git push -f origin "refs/tags/$tag"
-
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$title" --notes-file "$notes" --latest
-          else
-            gh release create "$tag" --title "$title" --notes-file "$notes" --target "${{ needs.prepare.outputs.sha }}" --latest
-          fi
 
           files=(
             release-assets/conduit-linux-musl-x64
@@ -1617,6 +1611,16 @@ jobs:
               exit 1
             fi
           done
+
+          git tag -fa "$tag" "${{ needs.prepare.outputs.sha }}" -m "Latest rolling release"
+          git push -f origin "refs/tags/$tag"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file "$notes"
+          else
+            gh release create "$tag" --title "$title" --notes-file "$notes" --target "${{ needs.prepare.outputs.sha }}" --draft
+          fi
+
           gh release upload "$tag" "${files[@]}" --clobber
 
           mapfile -t published < <(gh release view "$tag" --json assets --jq '.assets[].name')
@@ -1626,3 +1630,20 @@ jobs:
               *) gh release delete-asset "$tag" "$asset" --yes ;;
             esac
           done
+
+          release_info="$(gh release view "$tag" --json apiUrl,publishedAt)"
+          release_api="$(jq -r '.apiUrl' <<< "$release_info")"
+          previous_date="$(jq -r '.publishedAt // ""' <<< "$release_info")"
+
+          # github refreshes published_at on draft -> published, not on ordinary edits.
+          # restore public visibility if either request fails, including a lost response.
+          trap 'echo "::warning::Release refresh failed; retrying publication."; gh api --method PATCH "$release_api" -F draft=false -f make_latest=true >/dev/null' EXIT
+          gh api --method PATCH "$release_api" -F draft=true >/dev/null
+          refreshed="$(gh api --method PATCH "$release_api" -F draft=false -f make_latest=true)"
+          trap - EXIT
+
+          if ! jq -e --arg previous "$previous_date" '.draft == false and .published_at > $previous' <<< "$refreshed" >/dev/null; then
+            echo "::error::Release publication date did not advance."
+            exit 1
+          fi
+          echo "Release publication date: $(jq -r '.published_at' <<< "$refreshed")" >> "$GITHUB_STEP_SUMMARY"

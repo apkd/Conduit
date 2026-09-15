@@ -13,9 +13,10 @@
 
 [![Latest version number](https://img.shields.io/github/package-json/v/apkd/Conduit?filename=Conduit.Unity%2Fpackage.json&labelColor=2C3439&label=Version&logo=unity)](https://github.com/apkd/Conduit/releases/tag/latest)
 [![MIT License](https://img.shields.io/github/license/apkd/Conduit?style=flat&label=License&logo=listmonk&labelColor=2C3439&color=fff)](https://github.com/apkd/Conduit/blob/master/LICENSE)
-[![Test status badge](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml/badge.svg?branch=master&event=push)](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml)
+[![CI workflow status](https://img.shields.io/github/actions/workflow/status/apkd/conduit/build-test-release.yml?logo=githubactions&logoColor=white&label=Tests&labelColor=2C3439)](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml)
 [![GitHub commit activity](https://img.shields.io/github/commit-activity/m/apkd/Conduit?label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
-[![GitHub last commit](https://img.shields.io/github/last-commit/apkd/Conduit?labelColor=2C3439&color=f97&logoColor=f96&logo=tinder&label=Last%20commit)](https://github.com/apkd/Conduit/commit/HEAD~1)
+[![GitHub last commit](https://img.shields.io/github/last-commit/apkd/Conduit?labelColor=2C3439&color=f97&logoColor=f96&logo=tinder&label=Committed)](https://github.com/apkd/Conduit/commit/HEAD~1)
+[![GitHub last release](https://img.shields.io/github/release-date/apkd/conduit?display_date=published_at&logo=hackthebox&logoColor=66DDFF&label=Released&labelColor=2C3439&color=66DDFF)](https://github.com/apkd/Conduit/releases/tag/release)
 
 A Unity MCP server that stays out of the way of your coding agent.
 
