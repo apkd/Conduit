@@ -136,9 +136,11 @@ public sealed class DetourMetadataTests
     }
 
     [Test]
-    [Arguments(false)]
-    [Arguments(true)]
-    public async Task GeneratedProbeReplacementsSupportRequiredAbiShapes(bool publicizeAll)
+    [Arguments(false, false)]
+    [Arguments(true, false)]
+    [Arguments(false, true)]
+    [Arguments(true, true)]
+    public async Task GeneratedReplacementsSupportRequiredAbiShapes(bool publicizeAll, bool callOriginal)
     {
         var path = typeof(DetourMetadataTests).Assembly.Location;
         var catalog = MethodCatalog.Create([path]);
@@ -181,7 +183,7 @@ public sealed class DetourMetadataTests
                 target,
                 "Generated_" + methodName,
                 methodName + ".cs",
-                ConduitCodeParser.Parse(DetourSourceBuilder.BuildProbeBody(target)),
+                ConduitCodeParser.Parse(callOriginal ? OriginalBody(methodName) : DetourSourceBuilder.BuildProbeBody(target)),
                 [],
                 [],
                 async: false
@@ -209,9 +211,30 @@ public sealed class DetourMetadataTests
                 var replacement = System.Reflection.Assembly.Load(assemblyStream.ToArray())
                     .GetType(DetourSourceBuilder.GeneratedNamespace + ".Generated_" + methodName)!
                     .GetMethod("Replace")!;
-                replacement.Invoke(null, [1, 2, null]);
+                if (callOriginal)
+                {
+                    var original = typeof(DetourSignatureFixture).GetMethod(methodName)!;
+                    var field = replacement.DeclaringType!.GetField("__ConduitOriginal")!;
+                    field.SetValue(null, original.CreateDelegate(field.FieldType));
+                    object?[] expected = [1, 2, null];
+                    object?[] actual = [1, 2, null];
+                    await Assert.That(replacement.Invoke(null, actual)).IsEqualTo(original.Invoke(null, expected));
+                    await Assert.That(actual.SequenceEqual(expected)).IsTrue();
+                }
+                else
+                    replacement.Invoke(null, [1, 2, null]);
             }
         }
+
+        static string OriginalBody(string name) => name switch
+        {
+            "RefReadonly" => "return ref @base(arg0);",
+            "Instance" => "return @base(@this, arg0);",
+            "RefParameters" => "@base(ref arg0, in arg1, out arg2);",
+            "RefReadonlyParameter" => "@base(in arg0);",
+            "OutParameters" => "return @base(arg0, out arg1, out arg2);",
+            _ => "return @base(arg0);"
+        };
     }
 
     unsafe sealed class DetourSignatureFixture

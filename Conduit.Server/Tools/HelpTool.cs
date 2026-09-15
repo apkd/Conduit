@@ -69,12 +69,15 @@ static class HelpTool
                 - inspect support and get the canonical selector: `detour("Game.Player.TakeDamage", "test")`
                 - replace an instance method: `detour("Game.Player.TakeDamage", "@this.health -= arg0 * 2;")`
                 - replace a returning method: `detour("Game.Player.GetHealth", "return 100;")`
+                - wrap the original: `detour("Game.Player.GetHealth", "return @base(@this) * 2;")`
                 - apply any saved Conduit script: `detour("Game.Player.GetHealth", "MyReplacement.cs")`
                 - restore the original method: `detour("Game.Player.GetHealth", "restore")`
 
                 You can use `detour` with most managed methods loaded from any assembly, including packages and UnityEngine/UnityEditor.
                 Run `test` first to check whether the method is compatible.
                 Replacement bodies use `@this` for the instance and `arg0`, `arg1`, etc. for parameters.
+                `@base` calls the original loaded method body, even after updating the replacement.
+                Pass `@this` first for instances, `ref @this` for structs, and only arguments for static methods.
                 Does not support generic methods and small/inlined methods.
 
                 # `project_settings`

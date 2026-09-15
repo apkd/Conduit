@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -120,6 +121,12 @@ namespace Conduit
             if (GetUnsupportedReason(replacement, MethodRole.Replacement) is { } reason)
                 throw new NotSupportedException(reason);
 
+            ValidateSignature(target, replacement);
+        }
+
+        internal static void ValidateSignature(MethodInfo target, MethodInfo replacement)
+        {
+            bool delegateSignature = typeof(MulticastDelegate).IsAssignableFrom(replacement.DeclaringType);
             var expected = target.GetParameters();
             var actual = replacement.GetParameters();
             int offset = target.IsStatic ? 0 : 1;
@@ -144,11 +151,16 @@ namespace Conduit
             );
 
             // int& alone cannot distinguish ref, out, in, or a readonly return.
-            static bool Matches(ParameterInfo left, ParameterInfo right)
+            bool Matches(ParameterInfo left, ParameterInfo right)
                 => TypesMatch(left.ParameterType, right.ParameterType)
                    && left.IsIn == right.IsIn
                    && left.IsOut == right.IsOut
-                   && left.GetRequiredCustomModifiers().SequenceEqual(right.GetRequiredCustomModifiers());
+                   && Modifiers(left).SequenceEqual(Modifiers(right));
+
+            // C# adds modreq(InAttribute) to delegate in parameters, but not to ordinary method in parameters.
+            IEnumerable<Type> Modifiers(ParameterInfo parameter)
+                => parameter.GetRequiredCustomModifiers().Where(modifier => !delegateSignature || !parameter.IsIn
+                    || modifier.FullName != "System.Runtime.InteropServices.InAttribute");
         }
 
         internal static bool TypesMatch(Type left, Type right)

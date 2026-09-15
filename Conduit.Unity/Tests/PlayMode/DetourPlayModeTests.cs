@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Conduit;
 using NUnit.Framework;
@@ -9,6 +10,22 @@ public sealed class DetourPlayModeTests
 {
     static int targetStorage = 11;
     static int replacementStorage = 29;
+    static Func<int, int> original = null!;
+
+    [Test]
+    public void MethodDetour_CallsOriginalAndRetainsItAfterDisposal()
+    {
+        int expected = Target(4);
+        var flags = BindingFlags.Static | BindingFlags.NonPublic;
+        using (MethodDetour.Create(typeof(DetourPlayModeTests).GetMethod(nameof(Target), flags)!,
+                   typeof(DetourPlayModeTests).GetMethod(nameof(WrapOriginal), flags)!, out original))
+            Assert.That(Target(4), Is.EqualTo(expected * 2));
+        Assert.That(original(4), Is.EqualTo(expected));
+        Assert.That(Target(4), Is.EqualTo(expected));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int WrapOriginal(int value) => original(value) * 2;
 
     [Test]
     public void MethodDetour_ReplacesAndRestoresPlayerMonoMethodEntry()

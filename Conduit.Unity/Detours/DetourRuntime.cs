@@ -69,7 +69,7 @@ namespace Conduit
                     target,
                     canonicalName,
                     declaration,
-                    LoadReplacement(assemblyBytes, pdbBytes, generatedTypeName)
+                    LoadReplacement(target, assemblyBytes, pdbBytes, generatedTypeName)
                 ),
                 "apply" => Apply(
                     key,
@@ -77,7 +77,7 @@ namespace Conduit
                     signatureHash,
                     canonicalName,
                     declaration,
-                    LoadReplacement(assemblyBytes, pdbBytes, generatedTypeName),
+                    LoadReplacement(target, assemblyBytes, pdbBytes, generatedTypeName),
                     assemblyBytes!,
                     pdbBytes,
                     generatedTypeName!,

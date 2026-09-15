@@ -85,6 +85,24 @@ namespace Conduit
     {
         readonly DetourRuntime.ActiveDetour detour;
 
+        /// <summary>Applies a detour and binds a delegate to the target's original managed body.</summary>
+        /// <remarks>
+        /// Pass the replacement's delegate field as <paramref name="original"/> so it is bound before patching.
+        /// The delegate uses the replacement signature, including an explicit receiver for instance methods.
+        /// It remains callable after disposal. Recursive calls inside the original still enter the detour.
+        /// Cloning is opt-in and can reject IL that ordinary detours support. Call while the target is quiescent.
+        /// </remarks>
+        public static MethodDetour Create<TDelegate>(MethodInfo target, MethodInfo replacement, out TDelegate original)
+            where TDelegate : Delegate
+        {
+            if (target == null)
+                throw new ArgumentNullException(nameof(target));
+            MethodDetourSupport.Validate(target);
+            MethodDetourSupport.ValidateReplacement(target, replacement);
+            original = (TDelegate)OriginalMethod.CreateDelegate(target, typeof(TDelegate));
+            return new MethodDetour(target, replacement);
+        }
+
         /// <summary>Applies a replacement to a method that has no active detour.</summary>
         /// <param name="target">The managed method whose implementation will be replaced.</param>
         /// <param name="replacement">A different static method with the matching signature and, for instance targets,

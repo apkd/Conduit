@@ -69,6 +69,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         try
         {
             parsed = ConduitCodeParser.Parse(artifact.Source);
+            DetourOriginalCall.Analyze(parsed);
         }
         catch (SnippetParseException exception)
         {

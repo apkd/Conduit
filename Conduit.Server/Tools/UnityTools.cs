@@ -330,9 +330,13 @@ public sealed class UnityTools
         """
         Replaces a managed C# method implementation at runtime.
         The replacement is a method-body snippet whose instance receiver is `@this` and parameters are `arg0`, `arg1`, etc.
+        Call the original with `@base(arg0)` for static methods, `@base(@this, arg0)` for instances, or `@base(ref @this, arg0)` for structs.
+        Forward ref/in/out arguments explicitly. Original calls can be repeated, skipped, returned by reference, or awaited.
+        Only bodies using `@base` clone the original IL; unsupported IL fails before patching. Recursive original calls enter the detour again.
         Pass exactly `test` to inspect support and print the replacement signature, or `restore` to revert changes.
         Supports managed, non-generic static and instance methods, including ref/ref readonly returns, Span, pointers, and function pointers.
         Constructors, abstract/runtime/native methods, varargs, and signatures that C# cannot represent exactly are unsupported.
+        Original calls additionally reject calli, jmp, synchronized methods, function-pointer signatures/locals, local custom modifiers, and unrepresentable exception layouts.
         Runtime patching requires Windows or Linux x64 Unity Mono.
         Use this for testing bugfixes, prototyping features, and any other scenario where changing a method's behavior is useful.
         Use the `reflect` tool with `mode=methods` to find methods that you can replace.

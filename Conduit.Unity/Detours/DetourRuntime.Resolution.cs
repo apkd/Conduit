@@ -97,6 +97,7 @@ namespace Conduit
         }
 
         static MethodInfo LoadReplacement(
+            MethodInfo target,
             byte[]? assemblyBytes,
             byte[]? pdbBytes,
             string? generatedTypeName)
@@ -118,6 +119,9 @@ namespace Conduit
             var probeValue = accessProbe.Invoke(null, null);
             if (!Equals(probeValue, DetourAccessProbe.ExpectedValue))
                 throw new MethodAccessException("The generated detour assembly failed its private-access probe.");
+            var original = type.GetField("__ConduitOriginal", BindingFlags.Public | BindingFlags.Static);
+            if (original != null)
+                original.SetValue(null, OriginalMethod.CreateDelegate(target, original.FieldType));
             return method;
         }
 

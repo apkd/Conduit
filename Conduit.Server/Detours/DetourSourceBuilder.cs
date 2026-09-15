@@ -50,29 +50,21 @@ static class DetourSourceBuilder
             SnippetSourceBuilder.AppendChunk(builder, declaration, sourceFileName);
         builder.Append("public static class ").AppendLine(typeName);
         builder.AppendLine("{");
+        if (DetourOriginalCall.Analyze(parsed))
+        {
+            builder.Append("public unsafe delegate ").Append(method.ReturnType.ReturnDeclaration).Append(" OriginalDelegate(");
+            AppendParameters();
+            builder.AppendLine(");");
+            builder.AppendLine("public static OriginalDelegate __ConduitOriginal = null!;");
+            builder.AppendLine("static OriginalDelegate @base => __ConduitOriginal;");
+        }
         foreach (var field in parsed.StaticFields)
             SnippetSourceBuilder.AppendChunk(builder, field, sourceFileName);
         builder.AppendLine("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]");
-        builder.Append("public static unsafe ");
-        if (async)
-            builder.Append("async ");
+        builder.Append(async ? "public static async " : "public static unsafe ");
         builder.Append(method.ReturnType.ReturnDeclaration)
             .Append(" Replace(");
-        var hasParameter = false;
-        if (!method.IsStatic)
-        {
-            if (method.DeclaringType.IsValueType)
-                builder.Append("ref ");
-            builder.Append(method.DeclaringType.Source).Append(" @this");
-            hasParameter = true;
-        }
-        for (int index = 0; index < method.Parameters.Length; ++index)
-        {
-            if (hasParameter)
-                builder.Append(", ");
-            builder.Append(method.Parameters[index].Declaration("arg" + index));
-            hasParameter = true;
-        }
+        AppendParameters();
         builder.AppendLine(")");
         builder.AppendLine("{");
         SnippetSourceBuilder.AppendChunk(builder, parsed.Body, sourceFileName);
@@ -82,5 +74,24 @@ static class DetourSourceBuilder
         builder.AppendLine("}");
         builder.AppendLine("#pragma warning restore CS0162, CS1998");
         return builder.ToString();
+
+        void AppendParameters()
+        {
+            bool hasParameter = false;
+            if (!method.IsStatic)
+            {
+                if (method.DeclaringType.IsValueType)
+                    builder.Append("ref ");
+                builder.Append(method.DeclaringType.Source).Append(" @this");
+                hasParameter = true;
+            }
+            foreach (var (index, parameter) in method.Parameters.Index())
+            {
+                if (hasParameter)
+                    builder.Append(", ");
+                builder.Append(parameter.Declaration("arg" + index));
+                hasParameter = true;
+            }
+        }
     }
 }
