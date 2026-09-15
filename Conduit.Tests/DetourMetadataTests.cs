@@ -1,7 +1,5 @@
-using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Metadata;
-using System.Reflection.PortableExecutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -115,11 +113,9 @@ public sealed class DetourMetadataTests
     public async Task PublicizerChangesVisibilityWithoutChangingModuleIdentity()
     {
         var path = typeof(DetourMetadataTests).Assembly.Location;
-        var originalMvid = ReadMvid(File.ReadAllBytes(path));
-        var bytes = MetadataPublicizer.Publicize(path);
-        using var stream = new MemoryStream(bytes, writable: false);
-        using var pe = new PEReader(stream);
-        var reader = pe.GetMetadataReader();
+        var reference = MetadataPublicizer.CreateReference(path);
+        var metadata = (Microsoft.CodeAnalysis.AssemblyMetadata)reference.GetMetadata();
+        var reader = metadata.GetModules()[0].GetMetadataReader();
         var fixture = reader.TypeDefinitions
             .Select(reader.GetTypeDefinition)
             .Single(definition => reader.GetString(definition.Name) == nameof(DetourSignatureFixture));
@@ -135,33 +131,36 @@ public sealed class DetourMetadataTests
             var field = reader.GetFieldDefinition(fieldHandle);
             await Assert.That(field.Attributes & FieldAttributes.FieldAccessMask).IsEqualTo(FieldAttributes.Public);
         }
-        await Assert.That(ReadMvid(bytes)).IsEqualTo(originalMvid);
-
-        static Guid ReadMvid(byte[] image)
-        {
-            using var stream = new MemoryStream(image, writable: false);
-            using var pe = new PEReader(stream);
-            var reader = pe.GetMetadataReader();
-            return reader.GetGuid(reader.GetModuleDefinition().Mvid);
-        }
+        await Assert.That(reader.GetGuid(reader.GetModuleDefinition().Mvid))
+            .IsEqualTo(typeof(DetourMetadataTests).Module.ModuleVersionId);
     }
 
     [Test]
-    public async Task GeneratedProbeReplacementsSupportRequiredAbiShapes()
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task GeneratedProbeReplacementsSupportRequiredAbiShapes(bool publicizeAll)
     {
         var path = typeof(DetourMetadataTests).Assembly.Location;
         var catalog = MethodCatalog.Create([path]);
-        var references = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")
+        var referencePaths = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")
                           ?? throw new InvalidOperationException("Trusted platform assemblies were not provided."))
             .Split(Path.PathSeparator)
-            .Select(static referencePath => MetadataReference.CreateFromFile(referencePath))
-            .ToList();
-        references.Add(
-            MetadataReference.CreateFromImage(
-                ImmutableArray.Create(MetadataPublicizer.Publicize(path)),
-                filePath: path
-            )
+            .Append(path)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var session = new DetourSessionCache(
+            "test-session",
+            referencePaths
+                .Select(static path => (MetadataReference)CompilationMetadata.CreateReference(path))
+                .ToArray(),
+            referencePaths
         );
+        var references = publicizeAll
+            ? session.GetFullyPublicizedReferences()
+            : session.GetCompilationReferences(path);
+
+        // compilation must remain safe after collections move ordinary managed buffers.
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
 
         foreach (var methodName in new[]
                  {

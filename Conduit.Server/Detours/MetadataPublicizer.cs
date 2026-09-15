@@ -3,38 +3,45 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
-using System.Runtime.InteropServices;
+using Microsoft.CodeAnalysis;
 
 namespace Conduit;
 
 static class MetadataPublicizer
 {
-    internal static byte[] Publicize(string path)
+    internal static unsafe PortableExecutableReference CreateReference(string path)
     {
-        var bytes = File.ReadAllBytes(path);
-        using var pe = new PEReader(
-            ImmutableCollectionsMarshal.AsImmutableArray(bytes)
-        );
-        if (!pe.HasMetadata)
+        using var stream = File.OpenRead(path);
+        var headers = new PEHeaders(stream);
+        if (headers.MetadataSize == 0)
             throw new BadImageFormatException($"'{path}' has no managed metadata.");
 
-        var reader = pe.GetMetadataReader();
-        var metadataOffset = pe.PEHeaders.MetadataStartOffset;
-        RewriteTable(TableIndex.TypeDef, 0, RewriteTypeAttributes);
-        RewriteTable(TableIndex.Field, 0, RewriteFieldAttributes);
-        RewriteTable(TableIndex.MethodDef, sizeof(uint) + sizeof(ushort), RewriteMethodAttributes);
-        return bytes;
+        // method bodies and resources are never needed for binding, even when granting private access.
+        var bytes = GC.AllocateUninitializedArray<byte>(headers.MetadataSize, pinned: true);
+        stream.Position = headers.MetadataStartOffset;
+        stream.ReadExactly(bytes);
+        fixed (byte* pointer = bytes)
+        {
+            var reader = new MetadataReader(pointer, bytes.Length);
+            RewriteTable(reader, TableIndex.TypeDef, 0, RewriteTypeAttributes);
+            RewriteTable(reader, TableIndex.Field, 0, RewriteFieldAttributes);
+            RewriteTable(reader, TableIndex.MethodDef, sizeof(uint) + sizeof(ushort), RewriteMethodAttributes);
+
+            // the pinned object heap keeps the address stable; the callback retains the bytes for roslyn's lifetime.
+            var module = ModuleMetadata.CreateFromMetadata((IntPtr)pointer, bytes.Length, () => GC.KeepAlive(bytes));
+            return AssemblyMetadata.Create(module).GetReference(filePath: path);
+        }
 
         // roslyn only needs a reference image. Rewriting table flags in a copy preserves assembly
         // identity and signatures while allowing generated source to bind private target symbols.
-        void RewriteTable(TableIndex table, int flagsOffset, Func<uint, uint> rewrite)
+        void RewriteTable(MetadataReader reader, TableIndex table, int flagsOffset, Func<uint, uint> rewrite)
         {
             int rowCount = reader.GetTableRowCount(table);
             if (rowCount == 0)
                 return;
 
             int rowSize = reader.GetTableRowSize(table);
-            int tableOffset = metadataOffset + reader.GetTableMetadataOffset(table);
+            int tableOffset = reader.GetTableMetadataOffset(table);
             int width = table == TableIndex.TypeDef ? sizeof(uint) : sizeof(ushort);
             for (int row = 0; row < rowCount; ++row)
             {

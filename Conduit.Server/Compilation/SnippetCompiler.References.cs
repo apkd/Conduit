@@ -149,7 +149,7 @@ public sealed partial class SnippetCompiler
 
                     try
                     {
-                        metadataReferences.Add(MetadataReference.CreateFromFile(path));
+                        metadataReferences.Add(CompilationMetadata.CreateReference(path));
                         referencePaths.Add(path);
                     }
                     catch (Exception exception) when (exception is BadImageFormatException or IOException)

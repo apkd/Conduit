@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
-using System.Runtime.InteropServices;
 using Microsoft.CodeAnalysis;
 
 namespace Conduit;
@@ -45,7 +44,7 @@ sealed class DetourSessionCache(
                     ))
                     continue;
 
-                references[index] = CreatePublicReference(targetAssemblyPath);
+                references[index] = MetadataPublicizer.CreateReference(targetAssemblyPath);
                 targetedReferences.Add(targetAssemblyPath, references);
                 return references;
             }
@@ -71,7 +70,7 @@ sealed class DetourSessionCache(
                     references[index] = targeted[index];
 
             if (referencePaths.Length == 1 && references[0] == null)
-                references[0] = CreatePublicReference(referencePaths[0]);
+                references[0] = MetadataPublicizer.CreateReference(referencePaths[0]);
             else if (referencePaths.Length > 1)
             {
                 var errors = new ExceptionDispatchInfo?[referencePaths.Length];
@@ -82,7 +81,7 @@ sealed class DetourSessionCache(
 
                     try
                     {
-                        references[index] = CreatePublicReference(referencePaths[index]);
+                        references[index] = MetadataPublicizer.CreateReference(referencePaths[index]);
                     }
                     catch (Exception exception)
                     {
@@ -109,12 +108,4 @@ sealed class DetourSessionCache(
                     fullyPublicizedReferences = null; // invalid snippets must not pin every publicized assembly
             }
     }
-
-    static PortableExecutableReference CreatePublicReference(string path)
-        => MetadataReference.CreateFromImage(
-            ImmutableCollectionsMarshal.AsImmutableArray(
-                MetadataPublicizer.Publicize(path)
-            ),
-            filePath: path
-        );
 }
