@@ -32,7 +32,7 @@ static class UnityProjectStatusFormatter
             builder.AppendLine(snapshot.RunningUnityProcessCount);
             if (!string.IsNullOrWhiteSpace(bridgeResult?.Diagnostic))
             {
-                builder.Append("Diagnostic: ");
+                builder.Append(bridgeResult.Diagnostic == BridgeIdleCloseMarker.Diagnostic ? "Status: " : "Diagnostic: ");
                 builder.AppendLine(bridgeResult.Diagnostic);
             }
 

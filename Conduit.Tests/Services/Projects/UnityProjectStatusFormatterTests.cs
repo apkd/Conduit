@@ -110,4 +110,35 @@ public sealed class UnityProjectStatusFormatterTests
 
         await Assert.That(report).Contains("Editor log: /tmp/Unity/Editor.log");
     }
+
+    [Test]
+    [Arguments(BridgeIdleCloseMarker.Diagnostic, "Status")]
+    [Arguments(UnityProjectOfflinePreflight.OfflineDiagnostic, "Diagnostic")]
+    public async Task PingFailureIncludesReasonWithoutReplacingReport(string diagnostic, string field)
+    {
+        var snapshot = new UnityProjectEnvironmentSnapshot(
+            "/tmp/SampleProject",
+            isUnityProject: true,
+            editorVersion: "6000.5.0f1",
+            lockfileState: UnityProjectLockfileState.Missing,
+            runningUnityProcessCount: 0,
+            matchedProcess: null
+        );
+        const string editorLogPath = "/tmp/Unity/Editor.log";
+        const string compilationError = "Script compilation failed.";
+
+        var report = UnityProjectStatusFormatter.FormatPingFailure(
+            snapshot,
+            ToolExecutionResult.NotConnected(snapshot.ProjectPath, diagnostic),
+            processRuntime: null,
+            compilationDiagnostics: new(1, 0, compilationError, null),
+            editorLogPath
+        );
+
+        await Assert.That(report).Contains($"Project: {snapshot.ProjectPath}");
+        await Assert.That(report).Contains($"Editor log: {editorLogPath}");
+        await Assert.That(report).Contains(compilationError);
+        await Assert.That(report).Contains($"{field}: {diagnostic}");
+        await Assert.That(report.Split('\n').Count(line => line.Contains(diagnostic, StringComparison.Ordinal))).IsEqualTo(1);
+    }
 }

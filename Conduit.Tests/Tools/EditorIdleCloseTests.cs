@@ -6,7 +6,7 @@ namespace Conduit;
 public sealed class EditorIdleCloseTests
 {
     [Test]
-    public async Task IdleCloseBlocksToolsBeforeExecutionAndSurvivesServerRestart()
+    public async Task IdleClosePreservesStatusReportAndBlocksOtherToolsAcrossServerRestarts()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), $"conduit-idle-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(projectPath, "ProjectSettings"));
@@ -16,7 +16,7 @@ public sealed class EditorIdleCloseTests
         {
             await using (var client = await StartServer())
             {
-                await AssertBlocked(client, "status", new());
+                await AssertStatusReport(client);
                 await AssertBlocked(client, "show", new() { ["query"] = "*" });
                 await AssertBlocked(client, "execute_code", new() { ["snippet"] = "this is not C#" });
                 await AssertBlocked(client, "detour", new() { ["methodName"] = "missing", ["replacementBody"] = "this is not C#" });
@@ -33,7 +33,8 @@ public sealed class EditorIdleCloseTests
 
             await using (var client = await StartServer())
             {
-                await AssertBlocked(client, "status", new());
+                await AssertStatusReport(client);
+                await AssertBlocked(client, "show", new() { ["query"] = "*" });
                 BridgeIdleCloseMarker.Clear(projectPath);
                 var help = await client.CallToolAsync("help", new Dictionary<string, object?> { ["projectPath"] = projectPath });
                 await Assert.That(GetText(help)).IsNotEqualTo(BridgeIdleCloseMarker.Diagnostic);
@@ -42,6 +43,17 @@ public sealed class EditorIdleCloseTests
         finally
         {
             Directory.Delete(projectPath, recursive: true);
+        }
+
+        async Task AssertStatusReport(McpClient client)
+        {
+            var result = await client.CallToolAsync("status", new Dictionary<string, object?> { ["projectPath"] = projectPath });
+            var report = GetText(result);
+            await Assert.That(report).Contains($"Project: {ProjectPathNormalizer.Normalize(projectPath)}");
+            await Assert.That(report).Contains("Bridge: unreachable");
+            await Assert.That(report).Contains($"Status: {BridgeIdleCloseMarker.Diagnostic}");
+            await Assert.That(report).DoesNotContain($"Diagnostic: {BridgeIdleCloseMarker.Diagnostic}");
+            await Assert.That(BridgeIdleCloseMarker.Exists(projectPath)).IsTrue();
         }
 
         async Task AssertBlocked(McpClient client, string tool, Dictionary<string, object?> arguments)
