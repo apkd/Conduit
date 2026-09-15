@@ -18,7 +18,7 @@ namespace Conduit.Runtime
         readonly Stream output;
         readonly Func<bool> isConnected;
         readonly SemaphoreSlim writeGate = new(1, 1);
-        bool disposed;
+        int disposed;
 
         internal RuntimeDuplexConnection(
             Stream input,
@@ -34,7 +34,7 @@ namespace Conduit.Runtime
 
         internal RuntimeLineReader Reader { get; }
 
-        internal bool IsConnected => !disposed && isConnected();
+        internal bool IsConnected => Volatile.Read(ref disposed) == 0 && isConnected();
 
         internal static RuntimeDuplexConnection FromSingleStream(Stream stream, Func<bool> connected)
             => new(stream, stream, connected);
@@ -70,15 +70,15 @@ namespace Conduit.Runtime
 
         public void Dispose()
         {
-            if (disposed)
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
                 return;
 
-            disposed = true;
+            // stop native I/O before joining the reader or disposing its text buffers
+            input.Dispose();
             Reader.Dispose();
             if (!ReferenceEquals(input, output))
-                input.Dispose();
-            output.Dispose();
-            writeGate.Dispose();
+                output.Dispose();
+            // an in-flight write still releases this gate after its stream is closed
         }
 
         internal sealed class RuntimeLineReader : IDisposable
@@ -87,17 +87,21 @@ namespace Conduit.Runtime
             readonly ConcurrentQueue<ReadResult> results = new();
             readonly SemaphoreSlim resultAvailable = new(0);
             readonly bool readSynchronously;
+            readonly Thread? readThread;
 
             internal RuntimeLineReader(Stream stream, bool readSynchronously)
             {
                 reader = new(stream, utf8NoBom, false, 1024, true);
                 this.readSynchronously = readSynchronously;
                 if (readSynchronously)
-                    new Thread(ReadLines)
+                {
+                    readThread = new Thread(ReadLines)
                     {
                         IsBackground = true,
                         Name = "Conduit FIFO reader",
-                    }.Start();
+                    };
+                    readThread.Start();
+                }
             }
 
             internal Task<string?> ReadLineAsync()
@@ -133,7 +137,12 @@ namespace Conduit.Runtime
                 }
             }
 
-            public void Dispose() => reader.Dispose();
+            public void Dispose()
+            {
+                if (readThread != Thread.CurrentThread)
+                    readThread?.Join();
+                reader.Dispose();
+            }
 
             readonly struct ReadResult
             {

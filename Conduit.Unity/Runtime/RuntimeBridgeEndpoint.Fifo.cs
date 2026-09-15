@@ -37,14 +37,14 @@ namespace Conduit.Runtime
                             continue;
                         }
 
-                        FileStream? input = null;
+                        Stream? input = null;
                         FileStream? output = null;
                         try
                         {
-                            input = BridgeFifoStreams.OpenRead(
-                                Path.Combine(clientDirectory, "to-unity.fifo"),
-                                asynchronous: !readFifoSynchronously
-                            );
+                            var inputPath = Path.Combine(clientDirectory, "to-unity.fifo");
+                            input = readFifoSynchronously
+                                ? new RuntimeWineFifoStream(inputPath)
+                                : BridgeFifoStreams.OpenRead(inputPath);
                             output = new(
                                 Path.Combine(clientDirectory, "from-unity.fifo"),
                                 FileMode.Open,

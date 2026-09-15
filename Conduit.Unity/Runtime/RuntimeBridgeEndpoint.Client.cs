@@ -12,6 +12,8 @@ namespace Conduit.Runtime
     {
         async Task RunClientAsync(RuntimeDuplexConnection connection, CancellationToken endpointToken)
         {
+            // register before the handshake so every accepted connection closes during endpoint shutdown
+            using var shutdown = endpointToken.Register(connection.Dispose);
             RuntimeBridgeSession? session = null;
             try
             {
@@ -93,7 +95,8 @@ namespace Conduit.Runtime
             catch (OperationCanceledException) when (endpointToken.IsCancellationRequested) { }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
             {
-                Debug.LogWarning($"Conduit player client disconnected: {exception.Message}");
+                if (!endpointToken.IsCancellationRequested)
+                    Debug.LogWarning($"Conduit player client disconnected: {exception.Message}");
             }
             catch (Exception exception)
             {
@@ -102,10 +105,12 @@ namespace Conduit.Runtime
             finally
             {
                 if (session != null)
+                {
                     sessions.TryRemove(session.Id, out _);
+                    session.Dispose();
+                }
                 connection.Dispose();
             }
         }
     }
 }
-

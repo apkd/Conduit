@@ -35,10 +35,15 @@ namespace Conduit.Runtime
                 Application.Quit();
         }
 
-        void OnDestroy()
+        void OnApplicationQuit() => StopEndpoint();
+
+        void OnDestroy() => StopEndpoint();
+
+        void StopEndpoint()
         {
-            endpoint?.Dispose();
+            var stopping = endpoint;
             endpoint = null;
+            stopping?.Dispose();
         }
 
         internal void RequestQuit() => quitAt = Time.realtimeSinceStartup + 0.5f;
