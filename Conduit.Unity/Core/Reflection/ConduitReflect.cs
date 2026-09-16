@@ -20,7 +20,7 @@ namespace Conduit
         /// <param name="type">
         /// Type-name query. Type modes use it to filter returned types. Member modes resolve it to one containing type first,
         /// then search that type's declared, inherited, and interface members. Short names, full names, substrings, and
-        /// <c>Full.Type.Name, AssemblyName</c> are accepted.
+        /// <c>Full.Type.Name, AssemblyName</c> are accepted, as are C# aliases such as <c>int</c>.
         /// </param>
         /// <param name="member">
         /// Member-name query. Member modes use it to filter fields, properties, methods, or constructors by name. Type modes
@@ -32,6 +32,9 @@ namespace Conduit
         /// Provide at least one of <paramref name="type"/> or <paramref name="member"/>. Use the convenience methods such as
         /// <see cref="Type(string?, string?)"/>, <see cref="Methods(string?, string?)"/>, and <see cref="Fields(string?, string?)"/>
         /// when the mode is known at compile time.
+        /// Exact member names win over prefixes, then substrings. Exact spelling breaks case-only ties.
+        /// Equally ranked matches remain ambiguous;
+        /// use a signature such as <c>Update(float)</c> or <c>op_Implicit(Value) -> int</c> to choose an overload.
         /// </remarks>
         public static T Find<T>(string mode = "types", string? type = null, string? member = null) where T : class
             => FindOneCore<T>(mode, type, member);
@@ -41,6 +44,7 @@ namespace Conduit
         /// <exception cref="InvalidOperationException">Thrown when the mode is invalid, the query is empty, or the containing type is ambiguous.</exception>
         /// <remarks>
         /// This keeps the same filtering and result typing rules as <see cref="Find{T}"/>, but accepts any number of matches.
+        /// Partial name matches remain in the results even when an exact match exists.
         /// A member-mode query with a <paramref name="type"/> value still requires that type query to resolve unambiguously.
         /// </remarks>
         public static T[] FindMany<T>(string mode = "types", string? type = null, string? member = null) where T : class

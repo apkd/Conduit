@@ -1,12 +1,9 @@
 #nullable enable
 
 using System;
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Reflection;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -14,6 +11,37 @@ namespace Conduit
 {
     static partial class ReflectionQueryEngine
     {
+        static readonly ConcurrentDictionary<Type, MemberInfo[]> searchMemberCache = new();
+        static readonly ConcurrentDictionary<Type, MemberInfo[]> searchMemberWithoutAccessorsCache = new();
+
+        static MemberInfo[] GetSearchMembers(Type type, ReflectMemberKind kind, MemberQuery memberQuery)
+        {
+            bool includeAccessors = memberQuery.IncludesAccessors;
+            return kind switch
+            {
+                ReflectMemberKind.Field => GetFields(type),
+                ReflectMemberKind.Property => GetProperties(type),
+                ReflectMemberKind.Method => GetMethods(type, includeAccessors),
+                ReflectMemberKind.Constructor => GetConstructors(type),
+                _ => includeAccessors
+                    ? searchMemberCache.GetOrAdd(type, static value => CreateMembers(value, GetMethods(value, includeAccessors: true)))
+                    : searchMemberWithoutAccessorsCache.GetOrAdd(type, static value => CreateMembers(value, GetMethods(value))),
+            };
+
+            static MemberInfo[] CreateMembers(Type value, MethodInfo[] methods)
+            {
+                var fields = GetFields(value);
+                var properties = GetProperties(value);
+                var constructors = GetConstructors(value);
+                var members = new MemberInfo[fields.Length + properties.Length + methods.Length + constructors.Length];
+                fields.CopyTo(members, 0);
+                properties.CopyTo(members, fields.Length);
+                methods.CopyTo(members, fields.Length + properties.Length);
+                constructors.CopyTo(members, fields.Length + properties.Length + methods.Length);
+                return members;
+            }
+        }
+
         internal static FieldInfo[] GetFields(Type type)
             => fieldCache.GetOrAdd(type, static value =>
                 value.GetFields(DeclaredMembers)
@@ -24,12 +52,12 @@ namespace Conduit
                 value.GetProperties(DeclaredMembers)
             );
 
-        internal static MethodInfo[] GetMethods(Type type, string memberQuery = "")
+        internal static MethodInfo[] GetMethods(Type type, bool includeAccessors = false)
         {
             var methods = methodCache.GetOrAdd(type, static value =>
                 value.GetMethods(DeclaredMembers)
             );
-            if (IsAccessorQuery(memberQuery))
+            if (includeAccessors)
                 return methods;
 
             if (methodWithoutAccessorsCache.TryGetValue(type, out var filtered))
@@ -42,57 +70,29 @@ namespace Conduit
             return methodWithoutAccessorsCache.GetOrAdd(type, filtered);
         }
 
-        internal static MethodInfo[] GetMethods(Type type, bool includeAccessors)
-            => includeAccessors ? methodCache.GetOrAdd(type, static value =>
-                value.GetMethods(DeclaredMembers)
-            ) : GetMethods(type);
-
-        internal static bool IsAccessorQuery(string memberQuery)
-            => memberQuery.StartsWith("get_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("set_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("add_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("remove_", StringComparison.OrdinalIgnoreCase)
-               || memberQuery.StartsWith("raise_", StringComparison.OrdinalIgnoreCase);
-
         internal static ConstructorInfo[] GetConstructors(Type type)
             => constructorCache.GetOrAdd(type, static value =>
                 value.GetConstructors(DeclaredMembers)
             );
 
-        internal static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, string memberQuery)
+        internal static bool TypeDeclaresMatchingMember(Type type, ReflectMemberKind kind, MemberQuery memberQuery)
         {
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
-                foreach (var field in GetFields(type))
-                    if (MatchesMember(field, memberQuery))
-                        return true;
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
-                foreach (var property in GetProperties(type))
-                    if (MatchesMember(property, memberQuery))
-                        return true;
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type, memberQuery))
-                    if (MatchesMember(method, memberQuery))
-                        return true;
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
-                foreach (var constructor in GetConstructors(type))
-                    if (MatchesMember(constructor, memberQuery))
-                        return true;
+            foreach (var member in GetSearchMembers(type, kind, memberQuery))
+                if (MatchesMember(member, memberQuery))
+                    return true;
 
             return false;
         }
 
         internal static HashSet<Type> FindTypesDeclaringMatchingMember(
             IReadOnlyList<Type> types,
-            string memberQuery)
+            MemberQuery memberQuery)
         {
             var matches = new HashSet<Type>();
             Append(ReflectMemberKind.Field);
             Append(ReflectMemberKind.Property);
             Append(ReflectMemberKind.Method);
-            if (IsAccessorQuery(memberQuery))
+            if (memberQuery.IncludesAccessors)
                 Append(ReflectMemberKind.Method, accessorsOnly: true);
             Append(ReflectMemberKind.Constructor);
             return matches;
@@ -100,12 +100,12 @@ namespace Conduit
             void Append(ReflectMemberKind kind, bool accessorsOnly = false)
             {
                 var segments = GetWideMemberIndex(types, kind, accessorsOnly).Segments;
-                var entryCount = 0;
+                int entryCount = 0;
                 foreach (var segment in segments)
                     entryCount += segment.Entries.Length;
 
                 // metadata and search strings are immutable; partition large scans to reduce the editor stall.
-                var workerCount = GetParallelScanWorkerCount(entryCount);
+                int workerCount = GetParallelScanWorkerCount(entryCount);
                 if (workerCount == 1)
                 {
                     foreach (var segment in segments)
@@ -114,7 +114,7 @@ namespace Conduit
                 }
 
                 var workerResults = new HashSet<Type>[workerCount];
-                var nextSegment = -1;
+                int nextSegment = -1;
                 Parallel.For(0, workerCount, workerIndex =>
                 {
                     var localMatches = new HashSet<Type>();
@@ -131,47 +131,43 @@ namespace Conduit
                 void AppendSegment(HashSet<Type> destination, WideMemberIndexSegment segment)
                 {
                     foreach (var entry in segment.Entries)
-                        if (TryGetMemberMatchRank(
-                                entry.Name,
-                                entry.DeclaringType,
-                                kind == ReflectMemberKind.Constructor,
-                                memberQuery,
-                                out _
-                            ))
+                        if (TryGetMemberMatchRank(entry, memberQuery, out _))
                             destination.Add(entry.DeclaringType);
                 }
             }
         }
 
-        static bool MatchesMember(MemberInfo member, string query)
+        static bool MatchesMember(MemberInfo member, MemberQuery query)
             => MemberMatchRank(member, query) < int.MaxValue;
 
-        static bool TryGetMemberMatchRank(MemberInfo member, string query, out int rank)
+        static bool TryGetMemberMatchRank(MemberInfo member, MemberQuery query, out int rank)
         {
             rank = MemberMatchRank(member, query);
             return rank < int.MaxValue;
         }
 
         static bool TryGetMemberMatchRank(
-            string memberName,
-            Type declaringType,
-            bool isConstructor,
-            string query,
+            WideMemberIndexEntry member,
+            MemberQuery query,
             out int rank)
         {
-            rank = MemberMatchRank(memberName, declaringType, isConstructor, query);
+            rank = query.HasSignature
+                ? query.SignatureMatchRank(member.Member)
+                : MemberNameMatchRank(member.Name, member.DeclaringType, member.Member is ConstructorInfo, query.Text);
             return rank < int.MaxValue;
         }
 
-        internal static int MemberMatchRank(MemberInfo member, string query)
-            => MemberMatchRank(
-                member.Name,
-                member.DeclaringType ?? typeof(object),
-                member is ConstructorInfo,
-                query
-            );
+        internal static int MemberMatchRank(MemberInfo member, MemberQuery query)
+            => query.HasSignature
+                ? query.SignatureMatchRank(member)
+                : MemberNameMatchRank(
+                    member.Name,
+                    member.DeclaringType ?? typeof(object),
+                    member is ConstructorInfo,
+                    query.Text
+                );
 
-        internal static int MemberMatchRank(
+        static int MemberNameMatchRank(
             string memberName,
             Type declaringType,
             bool isConstructor,
@@ -180,31 +176,27 @@ namespace Conduit
             if (query.Length == 0)
                 return 0;
 
-            var nameRank = TextMatchRank(memberName, query);
+            if (isConstructor)
+            {
+                if (string.Equals(query, "ctor", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(query, ".ctor", StringComparison.OrdinalIgnoreCase))
+                    return memberName == ".ctor" ? NameMatching.Exact : NameMatching.None;
+                if (string.Equals(query, "cctor", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(query, ".cctor", StringComparison.OrdinalIgnoreCase))
+                    return memberName == ".cctor" ? NameMatching.Exact : NameMatching.None;
+            }
+
+            var nameRank = NameMatching.Rank(memberName, query);
             if (nameRank < int.MaxValue)
                 return nameRank;
 
             if (isConstructor)
             {
-                if (string.Equals(query, "ctor", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(query, ".ctor", StringComparison.OrdinalIgnoreCase))
-                    return 0;
-
                 var shortName = ShortTypeName(declaringType);
-                return TextMatchRank(shortName, query);
+                return NameMatching.Rank(shortName, query);
             }
 
             return int.MaxValue;
-        }
-
-        static int TextMatchRank(string value, string query)
-        {
-            var offset = value.IndexOf(query, StringComparison.OrdinalIgnoreCase);
-            if (offset < 0)
-                return int.MaxValue;
-            if (offset > 0)
-                return 2;
-            return value.Length == query.Length ? 0 : 1;
         }
 
     }

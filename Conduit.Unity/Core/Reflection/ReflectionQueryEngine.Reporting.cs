@@ -27,7 +27,7 @@ namespace Conduit
             StringBuilder builder,
             Type target,
             ReflectMemberKind kind,
-            string memberQuery)
+            MemberQuery memberQuery)
         {
             var containers = new List<(string Label, List<MemberDisplay> Members)>();
             var allMembers = new List<MemberDisplay>();
@@ -250,52 +250,13 @@ namespace Conduit
             builder.AppendLine(" omitted. Narrow the query.");
         }
 
-        static List<MemberDisplay> GetDisplayMembers(Type type, ReflectMemberKind kind, string memberQuery)
+        static List<MemberDisplay> GetDisplayMembers(Type type, ReflectMemberKind kind, MemberQuery memberQuery)
         {
             var members = new List<MemberDisplay>();
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
-                foreach (var field in GetFields(type))
-                    if (TryGetMemberMatchRank(field, memberQuery, out var rank))
-                        members.Add(ReflectionMemberFormatter.FormatMemberMatch(new(
-                            type,
-                            ReflectMemberKind.Field,
-                            field.Name,
-                            field,
-                            rank
-                        )));
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
-                foreach (var property in GetProperties(type))
-                    if (TryGetMemberMatchRank(property, memberQuery, out var rank))
-                        members.Add(ReflectionMemberFormatter.FormatMemberMatch(new(
-                            type,
-                            ReflectMemberKind.Property,
-                            property.Name,
-                            property,
-                            rank
-                        )));
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type, memberQuery))
-                    if (TryGetMemberMatchRank(method, memberQuery, out var rank))
-                        members.Add(ReflectionMemberFormatter.FormatMemberMatch(new(
-                            type,
-                            ReflectMemberKind.Method,
-                            method.Name,
-                            method,
-                            rank
-                        )));
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
-                foreach (var constructor in GetConstructors(type))
-                    if (TryGetMemberMatchRank(constructor, memberQuery, out var rank))
-                        members.Add(ReflectionMemberFormatter.FormatMemberMatch(new(
-                            type,
-                            ReflectMemberKind.Constructor,
-                            constructor.Name,
-                            constructor,
-                            rank
-                        )));
+            foreach (var member in GetSearchMembers(type, kind, memberQuery))
+                if (TryGetMemberMatchRank(member, memberQuery, out var rank))
+                    members.Add(ReflectionMemberFormatter.FormatMemberMatch(new(
+                        type, GetMemberKind(member), member.Name, member, rank)));
 
             return members;
         }
@@ -304,9 +265,9 @@ namespace Conduit
             WideMemberCollector matches,
             IReadOnlyList<Type> types,
             ReflectMemberKind kind,
-            string memberQuery)
+            MemberQuery memberQuery)
         {
-            var includeAccessors = IsAccessorQuery(memberQuery);
+            var includeAccessors = memberQuery.IncludesAccessors;
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
                 Append(GetWideMemberIndex(types, ReflectMemberKind.Field), ReflectMemberKind.Field);
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
@@ -358,13 +319,7 @@ namespace Conduit
                 {
                     foreach (var entry in segment.Entries)
                     {
-                        if (TryGetMemberMatchRank(
-                                entry.Name,
-                                entry.DeclaringType,
-                                memberKind == ReflectMemberKind.Constructor,
-                                memberQuery,
-                                out var rank
-                            ))
+                        if (TryGetMemberMatchRank(entry, memberQuery, out var rank))
                             destination.Add(new(
                                 entry.DeclaringType,
                                 memberKind,

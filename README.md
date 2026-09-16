@@ -349,6 +349,7 @@ tools.show.approval_mode = "approve"
 tools.status.approval_mode = "approve"
 tools.to_json.approval_mode = "approve"
 tools.view_burst_asm.approval_mode = "approve"
+tools.view_il.approval_mode = "approve"
 ```
 
 </details>
@@ -1379,6 +1380,7 @@ Agents are very proficient at using it for interacting with Unity and debugging 
 - ***`execute_code`***: runs ad hoc C# code
 - ***`detour`***: replaces managed C# method implementations at runtime
 - ***`reflect`***: searches loaded C# types and members
+- ***`view_il`***: inspects managed IL
 - ***`restart`***: starts or restarts Unity Editor
 
 #### Object search, reading, and editing:

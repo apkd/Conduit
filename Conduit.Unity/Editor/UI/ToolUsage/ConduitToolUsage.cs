@@ -52,6 +52,7 @@ namespace Conduit
             BridgeCommandTypes.Status,
             BridgeCommandTypes.ToJson,
             BridgeCommandTypes.ViewBurstAsm,
+            BridgeCommandTypes.ViewIl,
         };
 
         static readonly PendingSamples pendingProjectSamples = new(ToolNames.Length);

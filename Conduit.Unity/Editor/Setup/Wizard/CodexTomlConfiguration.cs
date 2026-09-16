@@ -38,6 +38,7 @@ namespace Conduit
             BridgeCommandTypes.Status,
             BridgeCommandTypes.ToJson,
             BridgeCommandTypes.ViewBurstAsm,
+            BridgeCommandTypes.ViewIl,
         };
 
         internal static void WriteServer(string configPath, string serverExecutablePath)

@@ -44,6 +44,32 @@ public sealed partial class ConduitMcpToolsTests
     }
 
     [Test]
+    public void ViewBurstAsmMatch_PrefersExactNamesThenPrefixesAndKeepsEqualMatchesAmbiguous()
+    {
+        var targets = new[]
+        {
+            new BurstTarget("Game.First.UpdateCache", "UpdateCache", "Game.First", ""),
+            new BurstTarget("Game.Second.Update", "Update", "Game.Second", ""),
+            new BurstTarget("Game.Third.FixedUpdate", "FixedUpdate", "Game.Third", ""),
+        };
+
+        var exact = BurstTargetMatcher.MatchTarget("update", targets);
+        Assert.That(exact.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
+        Assert.That(targets[exact.SelectedIndex].MethodName, Is.EqualTo("Update"));
+
+        var prefix = BurstTargetMatcher.MatchTarget("Upd", targets);
+        Assert.That(prefix.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Ambiguous));
+        Assert.That(prefix.CandidateIndexes.Select(index => targets[index].MethodName),
+            Is.EquivalentTo(new[] { "Update", "UpdateCache" }));
+
+        targets[0] = new BurstTarget("Game.First.Update", "Update", "Game.First", "");
+        var ambiguous = BurstTargetMatcher.MatchTarget("Update", targets);
+        Assert.That(ambiguous.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Ambiguous));
+        Assert.That(ambiguous.CandidateIndexes.Select(index => targets[index].DeclaringTypeName),
+            Is.EquivalentTo(new[] { "Game.First", "Game.Second" }));
+    }
+
+    [Test]
     public void ViewBurstAsmMatch_UsesTokenScoringForFuzzyNames()
     {
         var targets = CreateBurstAsmTargets();
@@ -52,6 +78,24 @@ public sealed partial class ConduitMcpToolsTests
 
         Assert.That(match.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
         Assert.That(match.SelectedIndex, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ViewBurstAsmMatch_UsesExactCaseToBreakNameTies()
+    {
+        var targets = new[]
+        {
+            new BurstTarget("Game.First.Execute", "Execute", "Game.First", ""),
+            new BurstTarget("Game.Second.execute", "execute", "Game.Second", ""),
+        };
+        foreach (var target in targets)
+        {
+            var match = BurstTargetMatcher.MatchTarget(target.MethodName, targets);
+            Assert.That(match.Kind, Is.EqualTo(BurstAsmTargetMatchKind.Matched));
+            Assert.That(targets[match.SelectedIndex].MethodName, Is.EqualTo(target.MethodName));
+        }
+        Assert.That(BurstTargetMatcher.MatchTarget("EXECUTE", targets).Kind,
+            Is.EqualTo(BurstAsmTargetMatchKind.Ambiguous));
     }
 
     [Test]

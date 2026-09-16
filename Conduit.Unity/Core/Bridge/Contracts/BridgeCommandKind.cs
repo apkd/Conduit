@@ -27,6 +27,7 @@ namespace Conduit
         Detour,
         ViewBurstAsm,
         Reflect,
+        ViewIl,
         ProjectSettings,
         RunTestsEditMode,
         RunTestsPlayMode,

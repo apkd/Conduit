@@ -60,6 +60,15 @@ static class HelpTool
                 Use `return <value>;` to print the value in the tool response. `return;` exits without a result.
                 Pass a prior snippet's filename, such as `7.cs` instead of source code to run it again.
 
+                # `view_il`
+
+                Inspect managed method IL. Works in the Editor and Mono players.
+                - method: `view_il(target: "Game.Agent.Update")`
+                - overload: `view_il(target: "Game.Agent::Update(float)")`
+                - operator: `view_il(target: "Game.Value::op_Implicit(Game.Value) -> int")`
+                - constructors: `view_il(target: "Game.Agent::.ctor")` or `"Game.Agent::.cctor"`
+                - property: `view_il(target: "Game.Agent::get_Equipment")`
+
                 # `detour`
 
                 Replace a managed method body at runtime without recompiling the Unity project.

@@ -8,17 +8,25 @@ namespace Conduit
 {
     static partial class ReflectionQueryEngine
     {
+        const int PartialTypeRank = 4;
+
         internal static TypeMatch MatchSingleType(
             IReadOnlyList<Type> index,
             string query,
-            ReflectTypeKind kind = ReflectTypeKind.Any)
+            ReflectTypeKind kind = ReflectTypeKind.Any,
+            int maxCandidates = MaxCandidates)
         {
+            var alias = ReflectionTypeAliases.Resolve(query);
             lock (IndexLock)
-                if (ReferenceEquals(index, cachedIndex)
-                    && GetExactTypeLookup().TryGetValue(query, out var indexed)
-                    && indexed is { } indexedType
-                    && MatchesTypeKind(indexedType, kind))
-                    return TypeMatch.Matched(indexedType);
+                if (ReferenceEquals(index, cachedIndex))
+                {
+                    if (alias != null)
+                        return MatchesTypeKind(alias, kind) ? TypeMatch.Matched(alias) : TypeMatch.None();
+                    if (GetExactTypeLookup().TryGetValue(query, out var indexed)
+                        && indexed is { } indexedType
+                        && MatchesTypeKind(indexedType, kind))
+                        return TypeMatch.Matched(indexedType);
+                }
 
             var hasAssemblyQuery = query.IndexOf(',') >= 0;
             var hasGenericDisplayQuery = query.IndexOf('<') >= 0;
@@ -62,7 +70,7 @@ namespace Conduit
 
                     matchCount += workerCounts[workerIndex];
                     var localMatches = workerMatches[workerIndex];
-                    var toCopy = Math.Min(MaxCandidates - matches.Count, localMatches.Count);
+                    var toCopy = Math.Min(maxCandidates - matches.Count, localMatches.Count);
                     for (var matchIndex = 0; matchIndex < toCopy; matchIndex++)
                         matches.Add(localMatches[matchIndex]);
                 }
@@ -71,7 +79,7 @@ namespace Conduit
             if (matchCount == 0)
                 return TypeMatch.None();
 
-            return SelectTypeMatch(matches, matchCount);
+            return SelectTypeMatch(matches, matchCount, bestRank < PartialTypeRank);
 
             void Scan(
                 int start,
@@ -99,13 +107,15 @@ namespace Conduit
                     }
 
                     destinationCount++;
-                    if (destination.Count < MaxCandidates)
+                    if (destination.Count < maxCandidates)
                         destination.Add(type);
                 }
             }
 
             int MatchRank(Type type, TypeSearchInfo info)
             {
+                if (alias != null)
+                    return type == alias ? 0 : int.MaxValue;
                 var needsDisplayName = hasGenericDisplayQuery && info.IsGenericType
                                        || hasNestedDisplayQuery && info.IsNested;
                 var shortDisplayName = needsDisplayName
@@ -137,15 +147,15 @@ namespace Conduit
                     && (Contains(shortDisplayName, query) || Contains(fullDisplayName!, query))
                     || Contains(info.AssemblyName, query)
                     || qualifiedName != null && Contains(qualifiedName, query))
-                    return 4;
+                    return PartialTypeRank;
                 return int.MaxValue;
             }
         }
 
-        static TypeMatch SelectTypeMatch(List<Type> matches, int matchCount)
+        static TypeMatch SelectTypeMatch(List<Type> matches, int matchCount, bool isExact)
             => matchCount == 1
-                ? TypeMatch.Matched(matches[0])
-                : TypeMatch.Ambiguous(matches, matchCount);
+                ? TypeMatch.Matched(matches[0], isExact)
+                : TypeMatch.Ambiguous(matches, matchCount, isExact);
 
         internal static bool MatchesTypeKind(Type type, ReflectTypeKind kind)
             => kind == ReflectTypeKind.Any || GetTypeSearchInfo(type).Kind == kind;
@@ -202,10 +212,10 @@ namespace Conduit
         static string InvalidModeDiagnostic(string mode)
             => $"Unsupported reflect mode '{mode}'. Valid modes: {ValidModes}.";
 
-        static string NormalizeQuery(string value)
+        static string NormalizeQuery(string? value)
             => value?.Trim() ?? string.Empty;
 
         static bool Contains(string value, string query)
-            => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+            => NameMatching.Rank(value, query) != NameMatching.None;
     }
 }

@@ -6,6 +6,8 @@ using System.Globalization;
 
 namespace Conduit
 {
+    enum TypeNameFormat { Short, Qualified }
+
     static class ReflectionTypeFormatter
     {
         internal static string FormatType(Type type, bool includeNamespace = false)
@@ -19,7 +21,7 @@ namespace Conduit
             if (type.IsPointer)
                 return FormatType(type.GetElementType() ?? typeof(void), includeNamespace) + "*";
 
-            if (TryBuiltInAlias(type, out var alias))
+            if (ReflectionTypeAliases.TryGetName(type, out var alias))
                 return alias;
 
             if (type.IsArray)
@@ -77,28 +79,6 @@ namespace Conduit
             }
 
             return builder.ToString();
-        }
-
-        static bool TryBuiltInAlias(Type type, out string alias)
-        {
-            alias = type == typeof(void) ? "void"
-                : type == typeof(bool) ? "bool"
-                : type == typeof(byte) ? "byte"
-                : type == typeof(sbyte) ? "sbyte"
-                : type == typeof(char) ? "char"
-                : type == typeof(decimal) ? "decimal"
-                : type == typeof(double) ? "double"
-                : type == typeof(float) ? "float"
-                : type == typeof(int) ? "int"
-                : type == typeof(uint) ? "uint"
-                : type == typeof(long) ? "long"
-                : type == typeof(ulong) ? "ulong"
-                : type == typeof(object) ? "object"
-                : type == typeof(short) ? "short"
-                : type == typeof(ushort) ? "ushort"
-                : type == typeof(string) ? "string"
-                : string.Empty;
-            return alias.Length > 0;
         }
 
         internal static string JoinTypes(Type[] types, int max)

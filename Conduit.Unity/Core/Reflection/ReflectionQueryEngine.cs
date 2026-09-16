@@ -43,15 +43,15 @@ namespace Conduit
         )
         {
             var normalizedType = NormalizeQuery(typeQuery);
-            var normalizedMember = NormalizeQuery(memberQuery);
-            if (normalizedType.Length == 0 && normalizedMember.Length == 0)
+            var normalizedMember = new MemberQuery(memberQuery);
+            if (normalizedType.Length == 0 && normalizedMember.Text.Length == 0)
                 return BridgeCommandResult.Error(
                     "reflect type modes require `type` or `member`. Examples: "
                     + "reflect(\"types\", type: \"Camera\") or reflect(\"types\", member: \"Awake\")."
                 );
 
             var typeNameQuery = new TypeNameQuery(normalizedType);
-            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Length > 0
+            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Text.Length > 0
                 ? FindTypesDeclaringMatchingMember(index, normalizedMember)
                 : null;
             var matches = new List<Type>(MaxTypeRows);
@@ -98,7 +98,7 @@ namespace Conduit
                         && !MatchesTypeName(index, indexPosition, typeNameQuery))
                         continue;
 
-                    if (normalizedMember.Length > 0
+                    if (normalizedMember.Text.Length > 0
                         && !(declaringTypes?.Contains(type)
                              ?? TypeDeclaresMatchingMember(type, mode.MemberKind, normalizedMember)))
                         continue;
@@ -137,8 +137,8 @@ namespace Conduit
         )
         {
             var normalizedType = NormalizeQuery(typeQuery);
-            var normalizedMember = NormalizeQuery(memberQuery);
-            if (normalizedType.Length == 0 && normalizedMember.Length == 0)
+            var normalizedMember = new MemberQuery(memberQuery);
+            if (normalizedType.Length == 0 && normalizedMember.Text.Length == 0)
                 return BridgeCommandResult.Error(
                     "reflect member modes require `type` or `member`. Examples: "
                     + "reflect(\"members\", type: \"Camera\") or reflect(\"methods\", member: \"Awake\")."
@@ -154,7 +154,7 @@ namespace Conduit
             IReadOnlyList<Type> index,
             ReflectMode mode,
             string typeQuery,
-            string memberQuery,
+            MemberQuery memberQuery,
             string loadWarning
         )
         {
@@ -170,7 +170,6 @@ namespace Conduit
                 ));
 
             var target = match.Type!;
-            var normalizedMember = NormalizeQuery(memberQuery);
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendLoadWarning(builder, loadWarning);
             builder.AppendLine(
@@ -180,7 +179,7 @@ namespace Conduit
             AppendTypeHierarchy(builder, target);
             builder.AppendLine();
 
-            var appendedAny = AppendTypeScopedMembers(builder, target, mode.MemberKind, normalizedMember);
+            var appendedAny = AppendTypeScopedMembers(builder, target, mode.MemberKind, memberQuery);
 
             if (!appendedAny)
                 builder.Append("No members matched.");
@@ -191,7 +190,7 @@ namespace Conduit
         static BridgeCommandResult SearchWideMembers(
             IReadOnlyList<Type> index,
             ReflectMode mode,
-            string memberQuery,
+            MemberQuery memberQuery,
             string loadWarning
         )
         {

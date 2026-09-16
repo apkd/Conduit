@@ -11,13 +11,9 @@ namespace Conduit
     /// <summary>Decodes IL in its source module before emitting equivalent instructions in another module.</summary>
     static class OriginalMethodIL
     {
-        static readonly Dictionary<short, OpCode> opcodes = typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static)
-            .Where(f => f.FieldType == typeof(OpCode))
-            .Select(f => (OpCode)f.GetValue(null)!)
-            .ToDictionary(op => op.Value);
-        static readonly Dictionary<short, OpCode> longBranches = opcodes.Values
+        static readonly Dictionary<short, OpCode> longBranches = MethodIL.Opcodes.Values
             .Where(op => op.OperandType == OperandType.ShortInlineBrTarget)
-            .ToDictionary(op => op.Value, op => opcodes.Values.Single(longOp => longOp.Name == op.Name!.Replace(".s", "")));
+            .ToDictionary(op => op.Value, op => MethodIL.Opcodes.Values.Single(longOp => longOp.Name == op.Name!.Replace(".s", "")));
 
         internal readonly struct Instruction
         {
@@ -31,60 +27,21 @@ namespace Conduit
 
         internal static List<Instruction> Read(MethodInfo method, MethodBody body)
         {
-            var bytes = body.GetILAsByteArray()!;
             var result = new List<Instruction>();
-            var module = method.Module;
-            int position = 0;
-            while (position < bytes.Length)
+            var resolver = new MethodIL.Resolver(method);
+            foreach (var instruction in MethodIL.Read(body.GetILAsByteArray()!))
             {
-                int offset = position;
+                int offset = instruction.Offset;
                 try
                 {
-                    short code = bytes[position++];
-                    if (code == 0xfe)
-                        code = (short)(0xfe00 | bytes[position++]);
-                    if (!opcodes.TryGetValue(code, out var op))
-                        throw new NotSupportedException("unknown opcode");
+                    var op = instruction.OpCode;
                     if (op == OpCodes.Calli || op == OpCodes.Jmp)
                         throw new NotSupportedException(op.Name);
-
-                    object? operand;
-                    switch (op.OperandType)
-                    {
-                        case OperandType.InlineNone: operand = null; break;
-                        case OperandType.ShortInlineI: operand = (sbyte)bytes[position++]; break;
-                        case OperandType.InlineI: operand = Int32(); break;
-                        case OperandType.InlineI8: operand = BitConverter.ToInt64(bytes, position); position += 8; break;
-                        case OperandType.ShortInlineR: operand = BitConverter.ToSingle(bytes, position); position += 4; break;
-                        case OperandType.InlineR: operand = BitConverter.ToDouble(bytes, position); position += 8; break;
-                        case OperandType.ShortInlineVar: operand = bytes[position++]; break;
-                        case OperandType.InlineVar: operand = BitConverter.ToInt16(bytes, position); position += 2; break;
-                        case OperandType.ShortInlineBrTarget:
-                            int delta = (sbyte)bytes[position++];
-                            operand = position + delta;
-                            op = longBranches[op.Value];
-                            break;
-                        case OperandType.InlineBrTarget:
-                            int displacement = Int32();
-                            operand = position + displacement;
-                            break;
-                        case OperandType.InlineSwitch:
-                            int count = Int32();
-                            if (count < 0 || count > (bytes.Length - position) / 4)
-                                throw new NotSupportedException("invalid switch table");
-                            int end = position + count * 4;
-                            var targets = new int[count];
-                            for (int index = 0; index < count; index++)
-                                targets[index] = end + Int32();
-                            operand = targets;
-                            break;
-                        case OperandType.InlineString: operand = module.ResolveString(Int32()); break;
-                        case OperandType.InlineType: operand = module.ResolveType(Int32()); break;
-                        case OperandType.InlineField: operand = module.ResolveField(Int32()); break;
-                        case OperandType.InlineMethod: operand = module.ResolveMethod(Int32()); break;
-                        case OperandType.InlineTok: operand = module.ResolveMember(Int32()); break;
-                        default: throw new NotSupportedException($"operand {op.OperandType}");
-                    }
+                    var operand = resolver.Resolve(instruction);
+                    if (op.OperandType == OperandType.ShortInlineBrTarget)
+                        op = longBranches[op.Value]; // cloned instructions can grow when metadata tokens change
+                    if (operand is ushort variable)
+                        operand = unchecked((short)variable);
                     if (operand is Type type)
                         OriginalMethod.ValidateType(type);
                     if (operand is FieldInfo field)
@@ -105,26 +62,7 @@ namespace Conduit
                     throw new NotSupportedException($"{exception.Message} at IL_{offset:x4}", exception);
                 }
             }
-            var boundaries = new HashSet<int>(result.Select(i => i.Offset)) { bytes.Length };
-            foreach (var instruction in result)
-            {
-                var targets = instruction.OpCode.OperandType switch
-                {
-                    OperandType.InlineBrTarget => new[] { (int)instruction.Operand! },
-                    OperandType.InlineSwitch => (int[])instruction.Operand!,
-                    _ => Array.Empty<int>()
-                };
-                if (targets.Any(t => !boundaries.Contains(t)))
-                    throw new NotSupportedException($"invalid branch destination at IL_{instruction.Offset:x4}");
-            }
             return result;
-
-            int Int32()
-            {
-                int value = BitConverter.ToInt32(bytes, position);
-                position += 4;
-                return value;
-            }
         }
 
         internal static void Emit(ILGenerator il, Instruction instruction, Dictionary<int, Label> labels)

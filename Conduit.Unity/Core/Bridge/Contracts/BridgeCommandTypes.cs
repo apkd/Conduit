@@ -26,6 +26,7 @@ namespace Conduit
         public const string Detour = "detour";
         public const string ViewBurstAsm = "view_burst_asm";
         public const string Reflect = "reflect";
+        public const string ViewIl = "view_il";
         public const string ProjectSettings = "project_settings";
         public const string RunTestsEditMode = "run_tests_editmode";
         public const string RunTestsPlayMode = "run_tests_playmode";

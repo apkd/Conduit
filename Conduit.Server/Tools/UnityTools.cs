@@ -390,6 +390,20 @@ public sealed class UnityTools
         CancellationToken ct = default
     ) => ToPlainTextToolResponseAsync(operations.ReflectAsync(projectPath, mode, type, member, ct));
 
+    /// <summary>Inspects a loaded type or member without invoking it; ambiguous targets return reusable selectors.</summary>
+    [McpServerTool(Name = CMD.ViewIl, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description(
+        """
+        Inspects managed method IL in the Editor or Mono players.
+        """
+    )]
+    public static Task<string> ViewIl(
+        [Description("Project path or player selector")] string projectPath,
+        [Description("Type or member, e.g. Game.Agent, int::GetHashCode(), Game.Agent::Update(float), Game.Agent::.cctor.")] string target,
+        UnityProjectOperations operations,
+        CancellationToken ct = default
+    ) => ToPlainTextToolResponseAsync(operations.ViewIlAsync(projectPath, target, ct));
+
     [McpServerTool(Name = CMD.ProjectSettings, ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         """

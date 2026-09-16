@@ -8,14 +8,7 @@ namespace Conduit
     static partial class ReflectionQueryEngine
     {
         internal static Type? ResolveTypeName(string query)
-        {
-            var index = LoadIndex(out _);
-            lock (IndexLock)
-                if (GetExactTypeLookup().TryGetValue(query, out var exact))
-                    return exact;
-
-            return ResolveUniqueType(index, query);
-        }
+            => MatchSingleType(LoadIndex(out _), query).Type;
 
         internal static bool MatchesTypeName(Type type, string query)
             => MatchesTypeName(type, GetTypeSearchInfo(type), new(query));
@@ -32,7 +25,7 @@ namespace Conduit
         static bool MatchesTypeName(Type type, TypeSearchInfo info, TypeNameQuery query)
         {
             // FullName falls back to Name and always contains the unqualified runtime name.
-            if (Contains(info.FullName, query.Text))
+            if (type == query.Alias || Contains(info.FullName, query.Text))
                 return true;
 
             if ((query.HasGenericDisplay && info.IsGenericType || query.HasNestedDisplay && info.IsNested)
@@ -57,25 +50,6 @@ namespace Conduit
                    && Contains($"{info.FullName}, {info.AssemblyName}", query.Text);
         }
 
-        static Type? ResolveUniqueType(IReadOnlyList<Type> index, string query)
-        {
-            var typeNameQuery = new TypeNameQuery(query);
-            Type? match = null;
-            for (var position = 0; position < index.Count; position++)
-            {
-                var type = index[position];
-                if (!MatchesTypeName(index, position, typeNameQuery))
-                    continue;
-
-                if (match != null)
-                    return default;
-
-                match = type;
-            }
-
-            return match;
-        }
-
         static TypeSearchInfo GetTypeSearchInfo(IReadOnlyList<Type> index, int position)
             => index is TypeIndex typeIndex
                 ? typeIndex.SearchInfos[position]
@@ -84,7 +58,7 @@ namespace Conduit
         static Dictionary<string, Type?> BuildExactTypeLookup(IReadOnlyList<Type> types)
         {
             var lookup = new Dictionary<string, Type?>(
-                types.Count * 2,
+                types.Count * 3,
                 StringComparer.OrdinalIgnoreCase
             );
             AddExactTypes(lookup, types);
@@ -116,6 +90,14 @@ namespace Conduit
                 Add(info.Name);
                 if (!string.Equals(info.FullName, info.Name, StringComparison.Ordinal))
                     Add(info.FullName);
+                Add($"{info.FullName}, {info.AssemblyName}");
+
+                // copied generic and nested selectors should use the same fast path as CLR type names.
+                if (info.IsGenericType || info.IsNested)
+                {
+                    Add(info.ShortDisplayName ??= ReflectionTypeFormatter.DisplayTypeName(type, includeNamespace: false));
+                    Add(ReflectionTypeFormatter.DisplayTypeName(type, includeNamespace: true));
+                }
 
                 void Add(string name)
                 {

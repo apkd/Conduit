@@ -81,6 +81,9 @@ namespace Conduit
                     case BridgeCommandKind.Reflect:
                         await ExecuteReflectAsync(operation);
                         break;
+                    case BridgeCommandKind.ViewIl:
+                        await CompleteCurrentAsync(ViewIlTool.Execute(operation.Target ?? string.Empty));
+                        break;
                     case BridgeCommandKind.ProjectSettings:
                         await ExecuteProjectSettingsAsync(operation);
                         break;

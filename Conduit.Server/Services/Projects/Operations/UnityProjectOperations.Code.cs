@@ -151,4 +151,15 @@ public sealed partial class UnityProjectOperations
                 Diagnostic = ReflectMissingModeDiagnostic,
             }
             : null;
+
+    /// <summary>Requests a metadata outline or managed method IL from the Editor or a Mono player.</summary>
+    /// <param name="projectPath">Project path or connected player selector.</param>
+    /// <param name="target">Type or member selector, such as Game.Agent::Update(float) or int::GetHashCode().</param>
+    /// <param name="ct">Cancellation for the queued request.</param>
+    public Task<ToolExecutionResult> ViewIlAsync(string projectPath, string target, CT ct)
+        => EnqueueAsync(
+            projectPath: projectPath,
+            command: new() { CommandType = BridgeCommandTypes.ViewIl, Target = target },
+            ct: ct
+        );
 }

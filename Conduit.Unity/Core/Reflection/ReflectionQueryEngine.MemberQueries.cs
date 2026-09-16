@@ -3,39 +3,36 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace Conduit
 {
-    public static partial class ConduitReflect
+    static partial class ReflectionQueryEngine
     {
-        static T[] FindMembers<T>(IReadOnlyList<Type> index, ReflectMode mode, string? typeQuery, string? memberQuery) where T : class
+        internal static MemberInfo[] FindMembers(IReadOnlyList<Type> index, ReflectMemberKind kind, string? typeQuery, MemberQuery memberQuery)
         {
             var normalizedType = NormalizeQuery(typeQuery);
-            var normalizedMember = NormalizeQuery(memberQuery);
-            if (normalizedType.Length == 0 && normalizedMember.Length == 0)
+            if (normalizedType.Length == 0 && memberQuery.Text.Length == 0)
                 throw new InvalidOperationException("reflect member modes require `type` or `member`.");
 
-            var effectiveKind = GetEffectiveMemberKind<T>(mode.MemberKind);
             if (normalizedType.Length == 0)
-                return CollectWideMembers<T>(index, normalizedMember, effectiveKind);
+                return CollectWideMembers(index, memberQuery, kind);
 
             var matches = new List<MemberInfo>();
-            CollectTypeScopedMembers(index, normalizedType, normalizedMember, effectiveKind, matches);
-            SortMembers(matches);
-            return CastResults<T, MemberInfo>(matches);
+            CollectTypeScopedMembers(index, normalizedType, memberQuery, kind, matches);
+            matches.Sort(CompareMembers);
+            return matches.ToArray();
         }
 
         static void CollectTypeScopedMembers(
             IReadOnlyList<Type> index,
             string typeQuery,
-            string memberQuery,
+            MemberQuery memberQuery,
             ReflectMemberKind kind,
             List<MemberInfo> matches
         )
         {
-            var match = ReflectionQueryEngine.MatchSingleType(index, typeQuery);
+            var match = MatchSingleType(index, typeQuery);
             if (match.Kind == TypeMatchKind.None)
                 throw new InvalidOperationException($"No type matched '{typeQuery}'.");
 
@@ -47,27 +44,33 @@ namespace Conduit
                 ));
 
             var target = match.Type!;
-            CollectDeclaredMembers(target, kind, memberQuery, matches);
+            Append(target);
 
             // type-scoped reflection mirrors the report tool: once a target type is selected,
             // inherited and interface members are usually what the snippet author needs next.
             for (var baseType = target.BaseType; baseType != null && baseType != typeof(object); baseType = baseType.BaseType)
-                CollectDeclaredMembers(baseType, kind, memberQuery, matches);
+                Append(baseType);
 
             var interfaces = target.GetInterfaces();
             Array.Sort(interfaces, CompareTypes);
             foreach (var interfaceType in interfaces)
-                CollectDeclaredMembers(interfaceType, kind, memberQuery, matches);
+                Append(interfaceType);
+
+            void Append(Type type)
+            {
+                foreach (var member in GetSearchMembers(type, kind, memberQuery))
+                    if (MatchesMember(member, memberQuery))
+                        matches.Add(member);
+            }
         }
 
-        static T[] CollectWideMembers<T>(
+        static MemberInfo[] CollectWideMembers(
             IReadOnlyList<Type> index,
-            string memberQuery,
+            MemberQuery memberQuery,
             ReflectMemberKind kind)
-            where T : class
         {
             // wide searches stay declared-only so the same inherited method is reported once per declaring type.
-            var includeAccessors = ReflectionQueryEngine.IsAccessorQuery(memberQuery);
+            bool includeAccessors = memberQuery.IncludesAccessors;
             var matches = new List<WideMemberIndexEntry>();
             var matchesByKind = kind == ReflectMemberKind.None
                 ? new[]
@@ -104,17 +107,17 @@ namespace Conduit
             if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
                 Append(ReflectMemberKind.Constructor, matchesByKind?[3] ?? matches);
 
-            var matchCount = matches.Count;
+            int matchCount = matches.Count;
             if (matchesByKind != null)
                 foreach (var values in matchesByKind)
                     matchCount += values.Count;
             if (matchCount == 0)
-                return Array.Empty<T>();
+                return Array.Empty<MemberInfo>();
 
-            var results = new T[matchCount];
+            var results = new MemberInfo[matchCount];
             if (matchesByKind == null)
-                for (var resultIndex = 0; resultIndex < matches.Count; ++resultIndex)
-                    results[resultIndex] = (T)(object)matches[resultIndex].Member;
+                for (int resultIndex = 0; resultIndex < matches.Count; ++resultIndex)
+                    results[resultIndex] = matches[resultIndex].Member;
             else
                 MergeMatches(results, matchesByKind);
             return results;
@@ -124,13 +127,13 @@ namespace Conduit
                 List<WideMemberIndexEntry> destination,
                 bool accessorsOnly = false)
             {
-                var members = ReflectionQueryEngine.GetWideMemberIndex(index, memberKind, accessorsOnly);
+                var members = GetWideMemberIndex(index, memberKind, accessorsOnly);
                 var segments = members.Segments;
-                var entryCount = 0;
+                int entryCount = 0;
                 foreach (var segment in segments)
                     entryCount += segment.Entries.Length;
 
-                var workerCount = ReflectionQueryEngine.GetParallelScanWorkerCount(entryCount);
+                int workerCount = GetParallelScanWorkerCount(entryCount);
                 if (workerCount == 1)
                 {
                     AppendRange(0, entryCount, destination);
@@ -142,13 +145,13 @@ namespace Conduit
                 Parallel.For(0, workerCount, workerIndex =>
                 {
                     var localMatches = new List<WideMemberIndexEntry>();
-                    var start = (int)((long)entryCount * workerIndex / workerCount);
-                    var end = (int)((long)entryCount * (workerIndex + 1) / workerCount);
+                    int start = (int)((long)entryCount * workerIndex / workerCount);
+                    int end = (int)((long)entryCount * (workerIndex + 1) / workerCount);
                     AppendRange(start, end, localMatches);
                     workerMatches[workerIndex] = localMatches;
                 });
 
-                var matchCount = destination.Count;
+                int matchCount = destination.Count;
                 foreach (var workerResult in workerMatches)
                     matchCount += workerResult.Count;
                 if (destination.Capacity < matchCount)
@@ -161,10 +164,10 @@ namespace Conduit
                     int end,
                     List<WideMemberIndexEntry> rangeMatches)
                 {
-                    var segmentStart = 0;
+                    int segmentStart = 0;
                     foreach (var segment in segments)
                     {
-                        var segmentEnd = segmentStart + segment.Entries.Length;
+                        int segmentEnd = segmentStart + segment.Entries.Length;
                         if (segmentEnd <= start)
                         {
                             segmentStart = segmentEnd;
@@ -173,12 +176,12 @@ namespace Conduit
                         if (segmentStart >= end)
                             return;
 
-                        var first = Math.Max(0, start - segmentStart);
-                        var last = Math.Min(segment.Entries.Length, end - segmentStart);
-                        for (var entryIndex = first; entryIndex < last; entryIndex++)
+                        int first = Math.Max(0, start - segmentStart);
+                        int last = Math.Min(segment.Entries.Length, end - segmentStart);
+                        for (int entryIndex = first; entryIndex < last; entryIndex++)
                         {
                             var member = segment.Entries[entryIndex];
-                            if (MatchesMember(member, memberQuery))
+                            if (TryGetMemberMatchRank(member, memberQuery, out _))
                                 rangeMatches.Add(member);
                         }
 
@@ -197,10 +200,10 @@ namespace Conduit
                     return left;
 
                 var merged = new List<WideMemberIndexEntry>(left.Count + right.Count);
-                var leftIndex = 0;
-                var rightIndex = 0;
+                int leftIndex = 0;
+                int rightIndex = 0;
                 while (leftIndex < left.Count && rightIndex < right.Count)
-                    merged.Add(ReflectionQueryEngine.CompareWideMemberEntries(
+                    merged.Add(CompareWideMemberEntries(
                         left[leftIndex],
                         right[rightIndex]
                     ) <= 0
@@ -214,34 +217,35 @@ namespace Conduit
                 return merged;
             }
 
-            static void MergeMatches(T[] destination, List<WideMemberIndexEntry>[] sources)
+            static void MergeMatches(MemberInfo[] destination, List<WideMemberIndexEntry>[] sources)
             {
+                // each member kind is already sorted by declaring type; merge those groups without sorting all matches again.
                 var positions = new int[sources.Length];
-                var destinationIndex = 0;
+                int destinationIndex = 0;
                 while (destinationIndex < destination.Length)
                 {
                     Type? nextType = null;
-                    for (var sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
+                    for (int sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
                     {
                         if (positions[sourceIndex] == sources[sourceIndex].Count)
                             continue;
 
                         var declaringType = sources[sourceIndex][positions[sourceIndex]].DeclaringType;
-                        if (nextType == null || ReflectionQueryEngine.CompareTypes(declaringType, nextType) < 0)
+                        if (nextType == null || CompareTypes(declaringType, nextType) < 0)
                             nextType = declaringType;
                     }
 
-                    for (var sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
+                    for (int sourceIndex = 0; sourceIndex < sources.Length; ++sourceIndex)
                     {
                         var source = sources[sourceIndex];
                         while (positions[sourceIndex] < source.Count)
                         {
                             var entry = source[positions[sourceIndex]];
                             if (!ReferenceEquals(entry.DeclaringType, nextType)
-                                && ReflectionQueryEngine.CompareTypes(entry.DeclaringType, nextType) != 0)
+                                && CompareTypes(entry.DeclaringType, nextType) != 0)
                                 break;
 
-                            destination[destinationIndex++] = (T)(object)entry.Member;
+                            destination[destinationIndex++] = entry.Member;
                             positions[sourceIndex]++;
                         }
                     }
@@ -249,29 +253,30 @@ namespace Conduit
             }
         }
 
-        static void CollectDeclaredMembers(Type type, ReflectMemberKind kind, string memberQuery, List<MemberInfo> matches)
+        static int CompareMembers(MemberInfo left, MemberInfo right)
         {
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Field)
-                foreach (var field in GetFields(type))
-                    if (MatchesMember(field, memberQuery))
-                        matches.Add(field);
+            var type = CompareTypes(left.DeclaringType, right.DeclaringType);
+            if (type != 0)
+                return type;
 
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Property)
-                foreach (var property in GetProperties(type))
-                    if (MatchesMember(property, memberQuery))
-                        matches.Add(property);
+            var kind = GetMemberKind(left).CompareTo(GetMemberKind(right));
+            if (kind != 0)
+                return kind;
 
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Method)
-                foreach (var method in GetMethods(type, memberQuery))
-                    if (MatchesMember(method, memberQuery))
-                        matches.Add(method);
-
-            if (kind is ReflectMemberKind.None or ReflectMemberKind.Constructor)
-                foreach (var constructor in GetConstructors(type))
-                    if (MatchesMember(constructor, memberQuery))
-                        matches.Add(constructor);
+            var name = string.Compare(left.Name, right.Name, StringComparison.Ordinal);
+            return name != 0
+                ? name
+                : string.Compare(left.ToString(), right.ToString(), StringComparison.Ordinal);
         }
 
+        static ReflectMemberKind GetMemberKind(MemberInfo member)
+            => member switch
+            {
+                FieldInfo       => ReflectMemberKind.Field,
+                PropertyInfo    => ReflectMemberKind.Property,
+                MethodInfo      => ReflectMemberKind.Method,
+                ConstructorInfo => ReflectMemberKind.Constructor,
+                _               => ReflectMemberKind.None,
+            };
     }
 }
-

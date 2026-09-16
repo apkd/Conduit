@@ -21,7 +21,7 @@ namespace Conduit
                     return BridgeCommandResult.Error($"Unknown Burst output target '{cpu}'. Expected x86, wasm32, armv8, armv9, cil, or llvmir.");
 
                 var targets = LoadTargets();
-                if (targets.Count == 0)
+                if (targets.Length == 0)
                     return BridgeCommandResult.Error("No Burst compile targets were found in the current editor domain.");
 
                 var match = BurstTargetMatcher.MatchTarget(targetName, targets);
@@ -47,12 +47,12 @@ namespace Conduit
 
 #if MODULE_BURST
         // discovery scans every candidate assembly; a domain reload invalidates this assembly-bound target set.
-        static List<BurstTarget>? cachedTargets;
+        static BurstTarget[]? cachedTargets;
 
-        static List<BurstTarget> LoadTargets()
+        static BurstTarget[] LoadTargets()
             => cachedTargets ??= DiscoverTargets();
 
-        static List<BurstTarget> DiscoverTargets()
+        static BurstTarget[] DiscoverTargets()
         {
             var reflectionType = Type.GetType("Unity.Burst.Editor.BurstReflection, Unity.Burst", true)!;
             reflectionType.GetMethod("EnsureInitialized", BindingFlags.Public | BindingFlags.Static)?.Invoke(null, null);
@@ -75,7 +75,7 @@ namespace Conduit
                     targets.Add(ReadTarget(target));
 
             targets.Sort((left, right) => string.Compare(left.DisplayName, right.DisplayName, StringComparison.Ordinal));
-            return targets;
+            return targets.ToArray();
         }
 
         static BurstTarget ReadTarget(object target)

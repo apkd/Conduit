@@ -10,19 +10,16 @@ namespace Conduit
         const int MaxCandidates = 10;
         const int ClearMatchGap = 25;
 
-        internal static BurstAsmTargetMatch MatchTarget(string? query, IReadOnlyList<BurstTarget> targets)
+        internal static BurstAsmTargetMatch MatchTarget(string? query, BurstTarget[] targets)
         {
             var text = query?.Trim() ?? string.Empty;
             if (text.Length == 0)
-                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Count);
+                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Length);
 
-            var matches = Find(targets, target => EqualsAny(target, text));
-            if (matches.Count == 1)
-                return BurstAsmTargetMatch.Matched(matches[0]);
-            if (matches.Count > 1)
-                return BurstAsmTargetMatch.Ambiguous(matches);
-
-            matches = Find(targets, target => ContainsAny(target, text));
+            var matches = new List<int>();
+            int bestRank = NameMatching.None;
+            for (int index = 0; index < targets.Length; index++)
+                NameMatching.AddBest(matches, index, Rank(targets[index], text), ref bestRank);
             if (matches.Count == 1)
                 return BurstAsmTargetMatch.Matched(matches[0]);
             if (matches.Count > 1)
@@ -30,7 +27,7 @@ namespace Conduit
 
             var scored = Score(text, targets);
             if (scored.Count == 0)
-                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Count);
+                return BurstAsmTargetMatch.None(FirstIndexes(targets), targets.Length);
 
             scored.Sort((left, right) =>
             {
@@ -56,21 +53,11 @@ namespace Conduit
             return BurstAsmTargetMatch.Ambiguous(candidates);
         }
 
-        static List<int> Find(IReadOnlyList<BurstTarget> targets, Func<BurstTarget, bool> predicate)
-        {
-            var matches = new List<int>();
-            for (var i = 0; i < targets.Count; i++)
-                if (predicate(targets[i]))
-                    matches.Add(i);
-
-            return matches;
-        }
-
-        static List<ScoredTarget> Score(string query, IReadOnlyList<BurstTarget> targets)
+        static List<ScoredTarget> Score(string query, BurstTarget[] targets)
         {
             var tokens = Tokens(query);
             var matches = new List<ScoredTarget>();
-            for (var i = 0; i < targets.Count; i++)
+            for (var i = 0; i < targets.Length; i++)
             {
                 var score = Score(tokens, query, targets[i]);
                 if (score > 0)
@@ -136,24 +123,24 @@ namespace Conduit
             }
         }
 
-        static bool EqualsAny(BurstTarget target, string text) =>
-            string.Equals(target.DisplayName, text, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(target.MethodName, text, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(target.DeclaringTypeName, text, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(target.JobTypeName, text, StringComparison.OrdinalIgnoreCase);
-
-        static bool ContainsAny(BurstTarget target, string text) =>
-            Contains(target.DisplayName, text)
-            || Contains(target.MethodName, text)
-            || Contains(target.DeclaringTypeName, text)
-            || Contains(target.JobTypeName, text);
+        static int Rank(BurstTarget target, string query)
+        {
+            int rank = NameMatching.Rank(target.DisplayName, query);
+            if (rank == NameMatching.Exact)
+                return rank;
+            rank = Math.Min(rank, NameMatching.Rank(target.MethodName, query));
+            if (rank == NameMatching.Exact)
+                return rank;
+            rank = Math.Min(rank, NameMatching.Rank(target.DeclaringTypeName, query));
+            return rank == NameMatching.Exact ? rank : Math.Min(rank, NameMatching.Rank(target.JobTypeName, query));
+        }
 
         static bool Contains(string value, string text) =>
-            value.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+            NameMatching.Rank(value, text) != NameMatching.None;
 
-        static int[] FirstIndexes(IReadOnlyList<BurstTarget> targets)
+        static int[] FirstIndexes(BurstTarget[] targets)
         {
-            var indexes = new int[Math.Min(targets.Count, MaxCandidates)];
+            var indexes = new int[Math.Min(targets.Length, MaxCandidates)];
             for (var i = 0; i < indexes.Length; i++)
                 indexes[i] = i;
 

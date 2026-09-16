@@ -28,6 +28,7 @@ namespace Conduit.Runtime
                 ),
                 BridgeCommandTypes.Screenshot => await RuntimeScreenshotCommand.ExecuteAsync(command.target, ct),
                 BridgeCommandTypes.Reflect => ReflectionTool.Reflect(command.args),
+                BridgeCommandTypes.ViewIl => ViewIlTool.Execute(command.target),
                 BridgeCommandTypes.ExecuteCode => await RuntimeCommandHandlers.ExecuteCodeAsync(command, ct),
                 BridgeCommandTypes.Detour => RuntimeCommandHandlers.Detour(command),
                 BridgeCommandTypes.CompilationReferences => AssemblyReferences.GetManifest(),

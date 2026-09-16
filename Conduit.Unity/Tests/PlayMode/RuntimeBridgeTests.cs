@@ -417,6 +417,20 @@ public sealed class RuntimeBridgeTests
     }
 
     [Test]
+    public async Task ViewIlDispatchesThroughTheRuntimeBridge()
+    {
+        var result = await RuntimeToolDispatcher.ExecuteAsync(new BridgeCommand
+        {
+            command_type = BridgeCommandTypes.ViewIl,
+            target = nameof(RuntimeBridgeTests) + "::SynchronousRuntimeReaderAvoidsAsyncStreamIo",
+        }, CancellationToken.None);
+
+        Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success), result.diagnostic);
+        Assert.That(result.return_value, Does.Contain("stack="));
+        Assert.That(result.return_value, Does.Contain("ret"));
+    }
+
+    [Test]
     public void RuntimeJsonRoundTripsGameObjectAndBuiltInComponentProperties()
     {
         var gameObject = new GameObject("Conduit Runtime JSON");

@@ -73,6 +73,8 @@ namespace Conduit
             where T : class
             where TSource : class
         {
+            if (matches is T[] typed)
+                return typed;
             if (matches.Count == 0)
                 return Array.Empty<T>();
 
@@ -85,4 +87,3 @@ namespace Conduit
 
     }
 }
-

@@ -35,19 +35,9 @@ namespace Conduit
                 Type type =>
                     $"{ReflectionTypeFormatter.DisplayTypeName(type, includeNamespace: true)}, "
                     + type.Assembly.GetName().Name,
-                MemberInfo member => FormatMemberCandidate(member),
+                MemberInfo member => ReflectionMemberFormatter.Selector(member, SelectorFormat.AssemblyQualified),
                 _                 => candidate.ToString() ?? string.Empty,
             };
-
-            static string FormatMemberCandidate(MemberInfo member)
-            {
-                var declaringType = ReflectionTypeFormatter.DisplayTypeName(
-                    member.DeclaringType ?? typeof(object),
-                    includeNamespace: true
-                );
-                return $"{declaringType}.{member.Name} | {member.MemberType} | "
-                       + member.Module.Assembly.GetName().Name;
-            }
         }
 
         static string TypeCandidates(
@@ -119,11 +109,6 @@ namespace Conduit
 
         static string NormalizeQuery(string? value)
             => value?.Trim() ?? string.Empty;
-
-        static bool Contains(string value, string query)
-            => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
-
-        static string ShortTypeName(Type type) => ReflectionQueryEngine.GetShortTypeName(type);
 
     }
 }

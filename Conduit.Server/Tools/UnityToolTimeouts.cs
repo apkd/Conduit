@@ -42,6 +42,7 @@ static class UnityToolTimeouts
             Detour              => TimeSpan.FromMinutes(10),
             ViewBurstAsm         => TimeSpan.FromMinutes(5),
             Reflect              => TimeSpan.FromSeconds(90),
+            ViewIl               => TimeSpan.FromSeconds(90),
             ProjectSettings      => TimeSpan.FromMinutes(20),
             RunTestsEditMode     => TimeSpan.FromMinutes(10),
             RunTestsPlayMode     => TimeSpan.FromMinutes(20),

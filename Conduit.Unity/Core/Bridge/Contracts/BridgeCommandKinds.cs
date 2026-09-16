@@ -29,6 +29,7 @@ namespace Conduit
                 BridgeCommandTypes.Detour                => BridgeCommandKind.Detour,
                 BridgeCommandTypes.ViewBurstAsm          => BridgeCommandKind.ViewBurstAsm,
                 BridgeCommandTypes.Reflect               => BridgeCommandKind.Reflect,
+                BridgeCommandTypes.ViewIl                => BridgeCommandKind.ViewIl,
                 BridgeCommandTypes.ProjectSettings       => BridgeCommandKind.ProjectSettings,
                 BridgeCommandTypes.RunTestsEditMode      => BridgeCommandKind.RunTestsEditMode,
                 BridgeCommandTypes.RunTestsPlayMode      => BridgeCommandKind.RunTestsPlayMode,

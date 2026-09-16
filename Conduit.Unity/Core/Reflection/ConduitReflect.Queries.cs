@@ -15,19 +15,19 @@ namespace Conduit
 
         static T[] FindManyCore<T>(string mode, string? type, string? member) where T : class
         {
-            if (!TryParseMode(mode, out var queryMode))
+            if (!ReflectionQueryEngine.TryParseMode(mode, out var queryMode))
                 throw new InvalidOperationException(InvalidModeDiagnostic(mode));
 
             ValidateResultType<T>(queryMode);
             var index = ReflectionQueryEngine.LoadIndexForHelpers();
             return queryMode.Category == ReflectCategory.Types
                 ? FindTypes<T>(index, queryMode, type, member)
-                : FindMembers<T>(index, queryMode, type, member);
+                : FindMembers<T>(index, queryMode, type, new MemberQuery(member));
         }
 
         static T FindOneCore<T>(string mode, string? type, string? member) where T : class
         {
-            if (!TryParseMode(mode, out var queryMode))
+            if (!ReflectionQueryEngine.TryParseMode(mode, out var queryMode))
                 throw new InvalidOperationException(InvalidModeDiagnostic(mode));
 
             ValidateResultType<T>(queryMode);
@@ -36,14 +36,28 @@ namespace Conduit
             if (queryMode.Category == ReflectCategory.Types && normalizedType.Length > 0)
                 return FindSingleType<T>(index, queryMode, normalizedType, member);
 
-            return SelectSingle(mode, type, member, queryMode.Category == ReflectCategory.Types
+            var normalizedMember = new MemberQuery(member);
+            var matches = queryMode.Category == ReflectCategory.Types
                 ? FindTypes<T>(index, queryMode, type, member)
-                : FindMembers<T>(index, queryMode, type, member));
+                : FindMembers<T>(index, queryMode, type, normalizedMember);
+            if (queryMode.Category == ReflectCategory.Types || matches.Length < 2)
+                return SelectSingle(mode, type, member, matches);
+
+            var best = new List<T>();
+            int bestRank = NameMatching.None;
+            foreach (var value in matches)
+                NameMatching.AddBest(best, value,
+                    ReflectionQueryEngine.MemberMatchRank((MemberInfo)(object)value, normalizedMember), ref bestRank);
+            return SelectSingle(mode, type, member, best);
         }
+
+        static T[] FindMembers<T>(IReadOnlyList<Type> index, ReflectMode mode, string? type, MemberQuery member) where T : class
+            => CastResults<T, MemberInfo>(ReflectionQueryEngine.FindMembers(
+                index, GetEffectiveMemberKind<T>(mode.MemberKind), type, member));
 
         static T FindSingleType<T>(IReadOnlyList<Type> index, ReflectMode mode, string typeQuery, string? memberQuery) where T : class
         {
-            var normalizedMember = NormalizeQuery(memberQuery);
+            var normalizedMember = new MemberQuery(memberQuery);
             // singular type lookup keeps the report tool's exact-name precedence before substring matches.
             var match = ReflectionQueryEngine.MatchSingleType(index, typeQuery, mode.TypeKind);
 
@@ -58,8 +72,8 @@ namespace Conduit
                 throw new InvalidOperationException($"No reflected result matched {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.");
 
             var type = match.Type!;
-            if (normalizedMember.Length > 0
-                && !TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember))
+            if (normalizedMember.Text.Length > 0
+                && !ReflectionQueryEngine.TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember))
                 throw new InvalidOperationException($"No reflected result matched {FormatQuery(FormatMode(mode), typeQuery, memberQuery)}.");
 
             return (T)(object)type;
@@ -68,12 +82,12 @@ namespace Conduit
         static T[] FindTypes<T>(IReadOnlyList<Type> index, ReflectMode mode, string? typeQuery, string? memberQuery) where T : class
         {
             var normalizedType = NormalizeQuery(typeQuery);
-            var normalizedMember = NormalizeQuery(memberQuery);
-            if (normalizedType.Length == 0 && normalizedMember.Length == 0)
+            var normalizedMember = new MemberQuery(memberQuery);
+            if (normalizedType.Length == 0 && normalizedMember.Text.Length == 0)
                 throw new InvalidOperationException("reflect type modes require `type` or `member`.");
 
             var typeNameQuery = new TypeNameQuery(normalizedType);
-            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Length > 0
+            var declaringTypes = normalizedType.Length == 0 && normalizedMember.Text.Length > 0
                 ? ReflectionQueryEngine.FindTypesDeclaringMatchingMember(index, normalizedMember)
                 : null;
             var matches = new List<Type>();
@@ -116,9 +130,9 @@ namespace Conduit
                         && !ReflectionQueryEngine.MatchesTypeName(index, position, typeNameQuery))
                         continue;
 
-                    if (normalizedMember.Length > 0
+                    if (normalizedMember.Text.Length > 0
                         && !(declaringTypes?.Contains(type)
-                             ?? TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember)))
+                             ?? ReflectionQueryEngine.TypeDeclaresMatchingMember(type, ReflectMemberKind.None, normalizedMember)))
                         continue;
 
                     destination.Add(type);
@@ -128,4 +142,3 @@ namespace Conduit
 
     }
 }
-

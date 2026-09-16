@@ -30,27 +30,32 @@ namespace Conduit
             => FormatMemberSignature(match.Member);
 
         internal static string FormatMemberSignature(MemberInfo member)
-            => memberSignatureCache.GetOrAdd(member, static value => value switch
-            {
-                FieldInfo field             => FormatField(field),
-                PropertyInfo property       => FormatProperty(property),
-                MethodInfo method           => FormatMethod(method),
-                ConstructorInfo constructor => FormatConstructor(constructor),
-                _                           => value.ToString() ?? value.Name,
-            });
+            => memberSignatureCache.GetOrAdd(member, static value =>
+                FormatMemberSignature(value, static type => ReflectionTypeFormatter.FormatType(type)));
 
-        static string FormatField(FieldInfo field)
+        internal static string FormatMemberSignature(MemberInfo member, Func<Type, string> formatType)
+            => member switch
+            {
+                FieldInfo field             => FormatField(field, formatType),
+                PropertyInfo property       => FormatProperty(property, formatType),
+                MethodInfo method           => FormatMethod(method, formatType),
+                ConstructorInfo constructor => FormatConstructor(constructor, formatType),
+                EventInfo @event            => FormatEvent(@event, formatType),
+                _                           => member.ToString() ?? member.Name,
+            };
+
+        static string FormatField(FieldInfo field, Func<Type, string> formatType)
         {
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendFieldAccess(builder, field);
             AppendFieldModifiers(builder, field);
-            builder.Append(ReflectionTypeFormatter.FormatType(field.FieldType));
+            builder.Append(formatType(field.FieldType));
             builder.Append(' ');
             builder.Append(CSharpIdentifier.Escape(field.Name));
             return builder.ToString();
         }
 
-        static string FormatProperty(PropertyInfo property)
+        static string FormatProperty(PropertyInfo property, Func<Type, string> formatType)
         {
             var accessor = PrimaryAccessor(property);
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
@@ -77,9 +82,9 @@ namespace Conduit
                 propertyType = propertyType.GetElementType() ?? propertyType;
             }
 
-            builder.Append(ReflectionTypeFormatter.FormatType(propertyType));
+            builder.Append(formatType(propertyType));
             builder.Append(' ');
-            builder.Append(FormatPropertyName(property));
+            builder.Append(FormatPropertyName(property, formatType));
             builder.Append(" { ");
             AppendPropertyAccessor(builder, "get", property.GetMethod, accessor);
             if (property.GetMethod != null && property.SetMethod != null)
@@ -101,13 +106,26 @@ namespace Conduit
                 : property.SetMethod;
         }
 
-        static string FormatPropertyName(PropertyInfo property)
+        static string FormatPropertyName(PropertyInfo property, Func<Type, string> formatType)
         {
             var parameters = property.GetIndexParameters();
             if (parameters.Length == 0)
                 return CSharpIdentifier.Escape(property.Name);
 
-            return "this[" + FormatParameters(parameters) + "]";
+            return "this[" + FormatParameters(parameters, formatType) + "]";
+        }
+
+        static string FormatEvent(EventInfo @event, Func<Type, string> formatType)
+        {
+            using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
+            if (@event.AddMethod is { } accessor)
+            {
+                AppendAccess(builder, accessor);
+                if (accessor.IsStatic)
+                    builder.Append("static ");
+            }
+            return builder.Append("event ").Append(formatType(@event.EventHandlerType!))
+                .Append(' ').Append(CSharpIdentifier.EscapeQualified(@event.Name)).ToString();
         }
 
         static void AppendPropertyAccessor(StringBuilder builder, string name, MethodInfo? accessor, MethodInfo? primaryAccessor)
@@ -124,22 +142,22 @@ namespace Conduit
             builder.Append(';');
         }
 
-        static string FormatMethod(MethodInfo method)
+        static string FormatMethod(MethodInfo method, Func<Type, string> formatType)
         {
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             AppendAccess(builder, method);
             AppendMethodModifiers(builder, method);
-            AppendReturnType(builder, method);
+            AppendReturnType(builder, method, formatType);
             builder.Append(' ');
             builder.Append(CSharpIdentifier.EscapeQualified(method.Name));
             AppendGenericArguments(builder, method.GetGenericArguments());
             builder.Append('(');
-            builder.Append(FormatParameters(method.GetParameters()));
+            builder.Append(FormatParameters(method.GetParameters(), formatType));
             builder.Append(')');
             return builder.ToString();
         }
 
-        static string FormatConstructor(ConstructorInfo constructor)
+        static string FormatConstructor(ConstructorInfo constructor, Func<Type, string> formatType)
         {
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             if (constructor.IsStatic)
@@ -156,12 +174,12 @@ namespace Conduit
                     )
             );
             builder.Append('(');
-            builder.Append(FormatParameters(constructor.GetParameters()));
+            builder.Append(FormatParameters(constructor.GetParameters(), formatType));
             builder.Append(')');
             return builder.ToString();
         }
 
-        static void AppendReturnType(StringBuilder builder, MethodInfo method)
+        static void AppendReturnType(StringBuilder builder, MethodInfo method, Func<Type, string> formatType)
         {
             var returnType = method.ReturnType;
             if (returnType.IsByRef)
@@ -170,10 +188,10 @@ namespace Conduit
                 returnType = returnType.GetElementType() ?? returnType;
             }
 
-            builder.Append(ReflectionTypeFormatter.FormatType(returnType));
+            builder.Append(formatType(returnType));
         }
 
-        static string FormatParameters(ParameterInfo[] parameters)
+        static string FormatParameters(ParameterInfo[] parameters, Func<Type, string> formatType)
         {
             using var pooledBuilder = BridgeStringBuilderPool.Rent(out var builder);
             for (var index = 0; index < parameters.Length; index++)
@@ -181,13 +199,13 @@ namespace Conduit
                 if (index > 0)
                     builder.Append(", ");
 
-                AppendParameter(builder, parameters[index]);
+                AppendParameter(builder, parameters[index], formatType);
             }
 
             return builder.ToString();
         }
 
-        static void AppendParameter(StringBuilder builder, ParameterInfo parameter)
+        static void AppendParameter(StringBuilder builder, ParameterInfo parameter, Func<Type, string> formatType)
         {
             if (parameter.GetCustomAttribute<ParamArrayAttribute>() != null)
                 builder.Append("params ");
@@ -207,7 +225,7 @@ namespace Conduit
                 parameterType = parameterType.GetElementType() ?? parameterType;
             }
 
-            builder.Append(ReflectionTypeFormatter.FormatType(parameterType));
+            builder.Append(formatType(parameterType));
             builder.Append(' ');
             builder.Append(CSharpIdentifier.Escape(parameter.Name ?? "arg"));
             if (parameter.HasDefaultValue)
