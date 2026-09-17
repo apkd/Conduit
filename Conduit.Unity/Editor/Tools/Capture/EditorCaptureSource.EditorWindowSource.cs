@@ -41,8 +41,15 @@ namespace Conduit
                 this.grabPixels = grabPixels;
                 this.previousTab = previousTab;
                 this.ownsWindow = ownsWindow;
-                grabTarget = GpuCapture.CreateStagingTexture(width, height, depth: 24);
+                grabTarget = GpuCapture.CreateStagingTexture(
+                    width,
+                    height,
+                    depth: 24,
+                    readWrite: RenderTextureReadWrite.Linear
+                );
             }
+
+            internal override RenderTextureReadWrite CaptureReadWrite => RenderTextureReadWrite.Linear;
 
             public override bool TryCapture(RenderTexture destination, out string diagnostic)
             {
@@ -74,7 +81,7 @@ namespace Conduit
                 {
                     // unity's wrapper makes this same backing-buffer capture conditional on window focus
                     grabPixels(grabTarget, new(0f, 0f, window.position.width, window.position.height));
-                    Graphics.Blit(grabTarget, destination, captureMaterial);
+                    BlitWithoutColorConversion(grabTarget, destination, captureMaterial);
                     diagnostic = string.Empty;
                     return true;
                 }

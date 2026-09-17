@@ -93,7 +93,26 @@ namespace Conduit
         public string Target { get; }
         public int Width { get; }
         public int Height { get; }
+        internal virtual RenderTextureReadWrite CaptureReadWrite => RenderTextureReadWrite.sRGB;
         public abstract bool IsValid { get; }
+
+        // editor GUI pixels are already display-encoded; keep GPU copies byte-stable
+        internal static void BlitWithoutColorConversion(
+            Texture source,
+            RenderTexture destination,
+            Material material)
+        {
+            var previousSrgbWrite = GL.sRGBWrite;
+            try
+            {
+                GL.sRGBWrite = false;
+                Graphics.Blit(source, destination, material);
+            }
+            finally
+            {
+                GL.sRGBWrite = previousSrgbWrite;
+            }
+        }
 
         /// <summary>Copies the latest view into an already-created destination render texture.</summary>
         public abstract bool TryCapture(RenderTexture destination, out string diagnostic);

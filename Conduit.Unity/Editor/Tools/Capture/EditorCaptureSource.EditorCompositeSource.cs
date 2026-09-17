@@ -33,6 +33,8 @@ namespace Conduit
                 this.views = views;
             }
 
+            internal override RenderTextureReadWrite CaptureReadWrite => RenderTextureReadWrite.Linear;
+
             public override bool TryCapture(RenderTexture destination, out string diagnostic)
             {
                 if (rootView == null)
@@ -60,19 +62,19 @@ namespace Conduit
                             view.Pixels.height,
                             24,
                             RenderTextureFormat.ARGB32,
-                            RenderTextureReadWrite.sRGB
+                            RenderTextureReadWrite.Linear
                         );
                         var corrected = RenderTexture.GetTemporary(
                             view.Pixels.width,
                             view.Pixels.height,
                             0,
                             RenderTextureFormat.ARGB32,
-                            RenderTextureReadWrite.sRGB
+                            RenderTextureReadWrite.Linear
                         );
                         try
                         {
                             view.GrabPixels(raw, view.Region);
-                            Graphics.Blit(raw, corrected, captureMaterial);
+                            BlitWithoutColorConversion(raw, corrected, captureMaterial);
                             Graphics.CopyTexture(
                                 corrected,
                                 0,

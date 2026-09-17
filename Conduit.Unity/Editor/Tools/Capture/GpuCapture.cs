@@ -15,15 +15,19 @@ namespace Conduit
     /// <summary>Stages, reads back, and encodes GPU images without managed pixel copies.</summary>
     static class GpuCapture
     {
-        /// <summary>Allocates a valid sRGB render target for capture staging.</summary>
-        internal static RenderTexture CreateStagingTexture(int width, int height, int depth = 0)
+        /// <summary>Allocates a render target for capture staging.</summary>
+        internal static RenderTexture CreateStagingTexture(
+            int width,
+            int height,
+            int depth = 0,
+            RenderTextureReadWrite readWrite = RenderTextureReadWrite.sRGB)
         {
             var texture = new RenderTexture(
                 width,
                 height,
                 depth,
                 RenderTextureFormat.ARGB32,
-                RenderTextureReadWrite.sRGB
+                readWrite
             )
             {
                 hideFlags = HideFlags.HideAndDontSave,

@@ -32,7 +32,11 @@ namespace Conduit
             EditorCaptureSource source,
             string prefix)
         {
-            var staging = GpuCapture.CreateStagingTexture(source.Width, source.Height);
+            var staging = GpuCapture.CreateStagingTexture(
+                source.Width,
+                source.Height,
+                readWrite: source.CaptureReadWrite
+            );
             try
             {
                 if (!source.TryCapture(staging, out var diagnostic))

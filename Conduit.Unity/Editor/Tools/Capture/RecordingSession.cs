@@ -103,7 +103,11 @@ namespace Conduit
                     settings.Format
                 );
                 encoder = FfmpegVideoEncoder.Start(settings, outputPath, width, height);
-                staging = GpuCapture.CreateStagingTexture(width, height);
+                staging = GpuCapture.CreateStagingTexture(
+                    width,
+                    height,
+                    readWrite: source.CaptureReadWrite
+                );
                 slots = CreateSlots(checked(width * height * 4));
                 var session = new RecordingSession(
                     settings,
