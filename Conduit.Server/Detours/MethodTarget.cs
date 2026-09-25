@@ -87,8 +87,8 @@ sealed class MethodTarget
 
             var canonical =
                 $"{AssemblyName}::{DeclaringTypeName}.{MethodName}("
-                + string.Join(",", state.Parameters.Select(static parameter => parameter.Display))
-                + $")->{state.ReturnType.ReturnDisplay}";
+                + string.Join(", ", state.Parameters.Select(static parameter => parameter.Display))
+                + $") -> {state.ReturnType.ReturnDisplay}";
             return Interlocked.CompareExchange(ref state.CanonicalSelector, canonical, null)
                    ?? canonical;
         }

@@ -67,6 +67,9 @@ public sealed class DetourMetadataTests
 
         var modifiers = catalog.Resolve("DetourSignatureFixture.RefParameters").Target;
         await Assert.That(modifiers).IsNotNull();
+        await Assert.That(catalog.Resolve(modifiers!.CanonicalSelector).Target).IsSameReferenceAs(modifiers);
+        await Assert.That(catalog.Resolve(modifiers.CanonicalSelector.Replace(", ", ",").Replace(" -> ", "->")).Target)
+            .IsSameReferenceAs(modifiers);
         await Assert.That(modifiers!.ReplacementDeclaration)
             .Contains("void Replace(ref int arg0, in int arg1, out int arg2)");
 
@@ -78,17 +81,17 @@ public sealed class DetourMetadataTests
         var ambiguous = catalog.Resolve("DetourSignatureFixture.Overload");
         await Assert.That(ambiguous.Target).IsNull();
         await Assert.That(ambiguous.Outcome).IsEqualTo(ToolOutcome.AmbiguousTarget);
-        await Assert.That(ambiguous.Diagnostic).Contains("(int)->int");
-        await Assert.That(ambiguous.Diagnostic).Contains("(string)->string");
+        await Assert.That(ambiguous.Diagnostic).Contains("(int) -> int");
+        await Assert.That(ambiguous.Diagnostic).Contains("(string) -> string");
 
         var canonical = ambiguous.Diagnostic!
             .Split('\n')
-            .Single(static line => line.EndsWith("(int)->int", StringComparison.Ordinal));
+            .Single(static line => line.EndsWith("(int) -> int", StringComparison.Ordinal));
         var canonicalTarget = catalog.Resolve(canonical).Target;
         await Assert.That(canonicalTarget).IsNotNull();
 
         var clrStyle = canonical.Replace(
-            "(int)->int",
+            "(int) -> int",
             "(global::System.Int32) -> System.Int32",
             StringComparison.Ordinal
         );

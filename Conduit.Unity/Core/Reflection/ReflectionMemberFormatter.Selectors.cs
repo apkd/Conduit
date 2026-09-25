@@ -46,7 +46,7 @@ namespace Conduit
         {
             var name = member.Name;
             if (member is MethodInfo method && method.IsGenericMethod)
-                name += "<" + string.Join(",", method.GetGenericArguments().Select(type => type.Name)) + ">";
+                name += "<" + string.Join(", ", method.GetGenericArguments().Select(type => type.Name)) + ">";
             var parameters = member switch
             {
                 MethodBase callable => callable.GetParameters(),
@@ -55,7 +55,7 @@ namespace Conduit
             };
             if (parameters == null || member is PropertyInfo && parameters.Length == 0)
                 return name;
-            return name + "(" + string.Join(",", parameters.Select(parameter =>
+            return name + "(" + string.Join(", ", parameters.Select(parameter =>
                 (parameter.ParameterType.IsByRef ? parameter.IsOut ? "out " : parameter.IsIn ? "in " : "ref " : "")
                 + ReflectionTypeFormatter.FormatType(parameter.ParameterType, format == TypeNameFormat.Qualified))) + ")";
         }
