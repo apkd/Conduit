@@ -215,6 +215,50 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task DirectLaunchPassesRestartTrackingToChildProcess(bool trackUsage)
+    {
+        var executable = OperatingSystem.IsWindows()
+            ? Path.Combine(Environment.SystemDirectory, "cmd.exe")
+            : "/bin/sh";
+        var startInfo = UnityEditorProcessController.CreateLaunchStartInfo(
+            executable,
+            Path.GetTempPath(),
+            Path.Combine(Path.GetTempPath(), "Editor.log"),
+            isLinux: false,
+            isNixOs: false,
+            findExecutableOnPath: static _ => null,
+            readTextFile: static _ => null
+        );
+        var variable = UnityEditorLaunchEnvironment.RestartStartedUtcTicksEnvironmentVariable;
+        startInfo.Environment[variable] = "stale";
+        var ticks = trackUsage ? DateTime.UtcNow.Ticks : (long?)null;
+        UnityEditorLaunchEnvironment.ApplyRestartUsageTracking(startInfo, ticks);
+
+        // substitute a command that checks its environment for the Unity executable.
+        startInfo.ArgumentList.Clear();
+        if (OperatingSystem.IsWindows())
+        {
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/c");
+            startInfo.ArgumentList.Add(ticks is { } value
+                ? $"if x%{variable}%==x{value} (exit /b 0) else (exit /b 1)"
+                : $"if defined {variable} (exit /b 1) else (exit /b 0)");
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add($"test \"${variable}\" = \"{ticks}\"");
+        }
+
+        using var process = Process.Start(startInfo)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await process.WaitForExitAsync(timeout.Token);
+        await Assert.That(process.ExitCode).IsEqualTo(0);
+    }
+
+    [Test]
     public async Task SystemdServiceLaunchMovesEditorIntoManagerOwnedService()
     {
         var workingDirectory = Path.Combine(Path.GetTempPath(), "Unity", "Editor");
