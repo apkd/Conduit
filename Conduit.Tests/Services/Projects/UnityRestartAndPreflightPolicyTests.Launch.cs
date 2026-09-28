@@ -188,7 +188,7 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
     }
 
     [Test]
-    public async Task NonLinuxLaunchUsesEditorDirectlyThroughShellExecute()
+    public async Task NonLinuxLaunchUsesEditorDirectly()
     {
         var editorPath = Path.Combine(Path.GetTempPath(), "Unity", "Editor", "Unity");
         var projectPath = Path.Combine(Path.GetTempPath(), "project");
@@ -211,7 +211,7 @@ public sealed partial class UnityRestartAndPreflightPolicyTests
                 ["-projectPath", projectPath, "-logFile", logPath]
             )
         ).IsTrue();
-        await Assert.That(startInfo.UseShellExecute).IsTrue();
+        await Assert.That(startInfo.UseShellExecute).IsFalse();
     }
 
     [Test]

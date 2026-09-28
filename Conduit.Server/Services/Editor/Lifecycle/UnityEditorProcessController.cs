@@ -119,7 +119,8 @@ public sealed partial class UnityEditorProcessController(
                 restartLogPath,
                 editorArguments
             );
-            UnityEditorLaunchEnvironment.ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
+            if (OperatingSystem.IsLinux())
+                UnityEditorLaunchEnvironment.ApplyRestartProcessEnvironment(startInfo, editorEnvironment);
             // apply caller state last so null entries can remove inherited editor and service variables.
             UnityEditorLaunchEnvironment.ApplyRestartEnvironmentOverrides(startInfo, environmentVariables);
             UnityEditorLaunchEnvironment.ApplyRestartUsageTracking(startInfo, restartStartedUtcTicks);

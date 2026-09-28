@@ -70,7 +70,7 @@ public sealed partial class UnityEditorProcessController
         var startInfo = new ProcessStartInfo(editorPath)
         {
             WorkingDirectory = Path.GetDirectoryName(editorPath) ?? AppContext.BaseDirectory,
-            UseShellExecute = true,
+            UseShellExecute = false, // restart tracking requires a custom process environment
         };
         AppendLaunchArguments(
             startInfo,
