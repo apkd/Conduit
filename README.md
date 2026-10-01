@@ -1,14 +1,14 @@
 ```
-                    ▄████████  ▄██████▄  ███▄▄▄▄   ████████▄  ███    █▄   ▄█      ███    
-                   ███    ███ ███    ███ ███▀▀▀██▄ ███   ▀███ ███    ███ ███  ▀█████████▄
-                   ███    █▀  ███    ███ ███   ███ ███    ███ ███    ███ ███▌    ▀███▀▀██
-                   ███        ███    ███ ███   ███ ███    ███ ███    ███ ███▌     ███   ▀
-                   ███        ███    ███ ███   ███ ███    ███ ███    ███ ███▌     ███    
-                   ███    █▄  ███    ███ ███   ███ ███    ███ ███    ███ ███      ███    
-                   ███    ███ ███    ███ ███   ███ ███   ▄███ ███    ███ ███      ███    
-                   ████████▀   ▀██████▀   ▀█   █▀  ████████▀  ████████▀  █▀      ▄████▀  
+                   ▄████████  ▄██████▄  ███▄▄▄▄   ████████▄  ███    █▄   ▄█      ███    
+                  ███    ███ ███    ███ ███▀▀▀██▄ ███   ▀███ ███    ███ ███  ▀█████████▄
+                  ███    █▀  ███    ███ ███   ███ ███    ███ ███    ███ ███▌    ▀███▀▀██
+                  ███        ███    ███ ███   ███ ███    ███ ███    ███ ███▌     ███   ▀
+                  ███        ███    ███ ███   ███ ███    ███ ███    ███ ███▌     ███    
+                  ███    █▄  ███    ███ ███   ███ ███    ███ ███    ███ ███      ███    
+                  ███    ███ ███    ███ ███   ███ ███   ▄███ ███    ███ ███      ███    
+                  ████████▀   ▀██████▀   ▀█   █▀  ████████▀  ████████▀  █▀      ▄████▀  
 
-                                 A simple and fast MCP server for Unity.
+                                A simple and fast MCP server for Unity.
 ```
 
 [![Latest version number](https://img.shields.io/github/package-json/v/apkd/Conduit?filename=Conduit.Unity%2Fpackage.json&labelColor=2C3439&label=Version&logo=unity)](https://github.com/apkd/Conduit/releases/tag/latest)
@@ -16,7 +16,7 @@
 [![CI workflow status](https://img.shields.io/github/actions/workflow/status/apkd/conduit/build-test-release.yml?logo=githubactions&logoColor=white&label=Tests&labelColor=2C3439)](https://github.com/apkd/Conduit/actions/workflows/build-test-release.yml)
 [![GitHub commit activity](https://img.shields.io/github/commit-activity/m/apkd/Conduit?label=Commits&labelColor=2C3439&color=EBFF65&logo=git)](https://github.com/apkd/Conduit/commits/master)
 [![GitHub last commit](https://img.shields.io/github/last-commit/apkd/Conduit?labelColor=2C3439&color=f97&logoColor=f96&logo=tinder&label=Committed)](https://github.com/apkd/Conduit/commit/HEAD~1)
-[![GitHub last release](https://img.shields.io/github/release-date/apkd/conduit?display_date=published_at&logo=hackthebox&logoColor=66DDFF&label=Released&labelColor=2C3439&color=66DDFF)](https://github.com/apkd/Conduit/releases/tag/release)
+[![GitHub last release](https://img.shields.io/github/release-date/apkd/conduit?display_date=published_at&logo=hackthebox&logoColor=66DDFF&label=Updated&labelColor=2C3439&color=66DDFF)](https://github.com/apkd/Conduit/releases/tag/release)
 
 A Unity MCP server that stays out of the way of your coding agent.
 
@@ -1416,6 +1416,45 @@ These inspect runtime performance and Burst output.
 - ***`profiler_browse`***: browses profiler sample hierarchy
 - ***`view_burst_asm`***: Burst assembly and optimization stats
 
+## Connecting to player builds
+
+Conduit supports local player builds on Linux and Windows, including Windows builds running under Wine or Proton on Linux.
+
+1. In Unity, navigate to **Edit → Preferences... → Conduit**, and enable **Enable Conduit in development player builds**. This sets `CONDUIT_INCLUDE_IN_DEBUG_BUILDS` for the active build target.
+2. Use the **Mono** scripting backend and enable **Development Build**, then build the player.
+3. Launch the player and run the MCP server on the same machine, under the same user account.
+4. When your agent calls `status` with the Unity project path, its output will list the matching build as `Live player detected: player:<id>`. The agent can use this ID to target the running build.
+
+> [!NOTE]
+> Conduit is excluded from:
+> - Non-development builds
+> - IL2CPP builds
+> - Builds without `CONDUIT_INCLUDE_IN_DEBUG_BUILDS` (see *step 1.* above)
+
+### Steam + Proton on Linux
+
+Run the Linux MCP server on the host. In Steam, open the game's **Properties → General → Launch Options** and set an explicit host IPC directory:
+
+```text
+CONDUIT_IPC_ROOT=/home/you/.local/state/conduit/ipc/v1 %command%
+```
+
+Use an absolute Linux path; Conduit translates it to a Wine path inside the Windows player.
+
+`CONDUIT_IPC_ROOT` makes the player advertise its connection in a directory the host server can find. Wine/Proton connections use filesystem FIFOs, so both processes must be able to access the same directory.
+
+### IPC paths and troubleshooting
+
+Default player IPC directories are:
+
+| Player environment | Directory |
+| --- | --- |
+| Native Windows | `%LOCALAPPDATA%\Conduit\ipc\v1` |
+| Native Linux | `$XDG_RUNTIME_DIR/conduit/v1`, or `<temp>/conduit-<uid>/v1` if unset |
+| Wine / Proton | `<WINE_HOST_HOME or HOME>/.local/state/conduit/ipc/v1` |
+
+The Linux server searches its runtime and temporary directories, `~/.local/state/conduit/ipc/v1`, and `~/.var/app/*/.local/state/conduit/ipc/v1` for Flatpak applications. The Steam examples above use a directory it already searches, so the server normally needs no override.
+
 ## Agent instructions
 
 The tool descriptions themselves should be enough to get started. Your coding agent should be able to use Unity out-of-the-box.
@@ -1429,4 +1468,14 @@ Don't build the Unity solution manually; simply call `refresh_asset_database` af
 When dealing with assets and GameObjects, `search`, `show`, `to_json`, `from_json_overwrite`, `find_missing_scripts`, `get_dependencies`, `find_references_to` and `reimport_assets` are your friends.
 When working with code, you can use `reflect` to browse types and members, and `view_burst_asm` to validate Burst-compiled code.
 Use `help` once to get instructions about the common query format used in `search`, `show`, `Search<T>` calls in `execute_code`, etc.
+```
+
+Extra note useful for `detour` workflows:
+
+```
+Use `detour` to replace a method's implementation at runtime. You can *patch a method without reloading the domain*, and then `execute_code` to check whether the intended behavior works.
+This is extremely useful for prototyping, validating ideas without committing to them, and debugging.
+Try to use the `detour` tool as often as possible; look for opportunities to save time by using `detour` instead of making code changes and reloading.
+With `detour`, if you're creative, you can iterate and test ideas much more quickly.
+Always consider whether there is an opportunity to use `detour` before making changes to Unity projects.
 ```
