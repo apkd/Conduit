@@ -66,18 +66,9 @@ static class SelfUpdater
             return "conduit-win-x64.exe";
 
         if (OperatingSystem.IsLinux())
-            return GetLinuxReleaseAssetName();
+            return "conduit-linux-x64";
 
         throw new PlatformNotSupportedException($"Self-update is not supported on {RuntimeInformation.OSDescription}.");
-    }
-
-    static string GetLinuxReleaseAssetName()
-    {
-#if CONDUIT_LINUX_MUSL
-        return "conduit-linux-musl-x64";
-#else
-        return "conduit-linux-x64";
-#endif
     }
 
     internal static ReleaseAsset? FindAsset(JsonElement release, string assetName)

@@ -96,73 +96,14 @@ chmod +x "$HOME/.local/bin/conduit"
 <details>
   <summary><b>NixOS</b></summary>
 
-When upgrading these packages, update `version` and `hash` together.
+Use the glibc release for both stdio and HTTP. `autoPatchelfHook` patches its ELF interpreter
+and runtime library paths for NixOS. OpenSSL is included for HTTP sessions.
+
+When upgrading this package, update `version` and `hash` together.
 Setting `hash = pkgs.lib.fakeHash;` makes Nix print the current hash during the next build.
 
-##### stdio
-
-Use the static musl release for stdio. It runs directly on NixOS.
-
 ```nix
-# conduit-stdio.nix
-{ pkgs }:
-
-pkgs.stdenvNoCC.mkDerivation rec {
-  pname = "conduit";
-  version = "0.3.74";
-
-  src = pkgs.fetchurl {
-    url = "https://github.com/apkd/Conduit/releases/download/release/conduit-linux-musl-x64";
-    hash = "sha256-XBqpjtEXiitdRN7EPCmW1fg2nB63EdwjG2eEAv3L/7Q=";
-  };
-
-  dontUnpack = true;
-
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 "$src" "$out/bin/conduit"
-    runHook postInstall
-  '';
-}
-```
-
-Add Conduit and its Unity launch tools to the system profile:
-
-```nix
-# configuration.nix
-{ lib, pkgs, ... }:
-
-let
-  conduit = import ./conduit-stdio.nix { inherit pkgs; };
-in
-{
-  environment.systemPackages = with pkgs; [
-    bash
-    conduit
-    unityhub
-    util-linux
-  ];
-
-  nixpkgs.config.allowUnfreePredicate = package:
-    lib.getName package == "unityhub";
-}
-```
-
-Configure your editor to use the `conduit` executable (see the editor configuration sections below for more details).
-
-```toml
-[mcp_servers.unity]
-command = "conduit"
-```
-
-##### http
-
-The HTTP server loads OpenSSL when it creates an MCP session.
-Streamable HTTP mode needs a patch because the static executable cannot dynamically load OpenSSL on NixOS.
-Patch the glibc artifact's ELF interpreter and add OpenSSL to its runtime search path:
-
-```nix
-# conduit-http.nix
+# conduit.nix
 { pkgs }:
 
 pkgs.stdenvNoCC.mkDerivation rec {
@@ -188,14 +129,50 @@ pkgs.stdenvNoCC.mkDerivation rec {
 }
 ```
 
-Run one server in the graphical user session:
+These examples also work with flakes. Place `conduit.nix` beside your `configuration.nix`,
+include that module in your flake's `nixosSystem.modules`, and Git-track the new file.
+
+##### stdio
+
+Add Conduit and its Unity launch tools to the system profile:
 
 ```nix
 # configuration.nix
 { lib, pkgs, ... }:
 
 let
-  conduit = import ./conduit-http.nix { inherit pkgs; };
+  conduit = import ./conduit.nix { inherit pkgs; };
+in
+{
+  environment.systemPackages = with pkgs; [
+    bash
+    conduit
+    unityhub
+    util-linux
+  ];
+
+  nixpkgs.config.allowUnfreePredicate = package:
+    lib.getName package == "unityhub";
+}
+```
+
+Configure your editor to use the `conduit` executable (see the editor configuration sections below for more details).
+
+```toml
+[mcp_servers.unity]
+command = "conduit"
+```
+
+##### http
+
+Use the same `conduit.nix` package to run one server in the graphical user session:
+
+```nix
+# configuration.nix
+{ lib, pkgs, ... }:
+
+let
+  conduit = import ./conduit.nix { inherit pkgs; };
   conduitUser = "bob";
 in
 {

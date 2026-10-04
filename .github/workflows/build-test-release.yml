@@ -158,11 +158,6 @@ jobs:
             publish_name: conduit-linux-x64
             publish_source: Conduit.Server/publish/linux-x64/conduit
             publish_target: conduit-linux-x64
-          - os: ubuntu-latest
-            rid: linux-musl-x64
-            publish_name: conduit-linux-musl-x64
-            publish_source: Conduit.Server/publish/linux-musl-x64/conduit
-            publish_target: conduit-linux-musl-x64
           - os: windows-latest
             rid: win-x64
             publish_name: conduit-win-x64
@@ -183,8 +178,7 @@ jobs:
           | Publish mode      | `Release`, self-contained, single file          |
           | Version metadata  | values fixed by `version` for this workflow run |
 
-          The native Linux build is invoked on the runner. The musl build is invoked in Alpine
-          3.22 with its runtime libraries installed. Windows execution is deferred to the Windows
+          The Linux build is invoked on the runner. Windows execution is deferred to the Windows
           smoke job, where the downloaded artifact runs on its target OS.
 
           This job establishes that the target can be published and packages the result for every
@@ -215,13 +209,6 @@ jobs:
           if [[ "${{ matrix.rid }}" == "linux-x64" ]]; then
             chmod +x "$RUNNER_TEMP/release/${{ matrix.publish_target }}"
             "$RUNNER_TEMP/release/${{ matrix.publish_target }}" --version
-          fi
-
-          if [[ "${{ matrix.rid }}" == "linux-musl-x64" ]]; then
-            docker run --rm \
-              -v "$RUNNER_TEMP/release:/release:ro" \
-              alpine:3.22 \
-              sh -c 'apk add --no-cache libgcc libstdc++ zlib >/dev/null && /release/${{ matrix.publish_target }} --version'
           fi
 
       - uses: actions/upload-artifact@v6
@@ -281,7 +268,7 @@ jobs:
           broken exchange, invalid sequence or unexpected response fails the matrix case.
 
           The fake bridge keeps this check focused on the packaged server and transport boundary.
-          Real Unity Editor integration, broader tool coverage, musl, and sustained-load behavior
+          Real Unity Editor integration, broader tool coverage, and sustained-load behavior
           have dedicated jobs or remain outside this smoke test.
           EOF
 
@@ -305,77 +292,6 @@ jobs:
           dotnet run --file run-conduit-binary-smoke.cs -- \
             --transport "${{ matrix.transport }}" \
             "$executable"
-
-  test-server-binary-musl:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Describe job
-        shell: bash
-        run: |
-          cat <<'EOF'
-          ### Alpine is the test boundary
-
-          ```text
-          Ubuntu runner
-          ├─ publish smoke harness for linux-musl-x64
-          └─ Alpine 3.22 container
-             ├─ musl smoke harness
-             └─ conduit-linux-musl-x64
-                └─ stdio: initialize → tools/list → status
-          ```
-
-          Both the harness and downloaded server execute inside Alpine. This avoids treating a
-          successful build on the runner's glibc host as evidence that the musl executable can
-          start. The build matrix has already invoked `--version` in Alpine; this job advances the
-          check through the MCP exchange.
-
-          A pass covers x64 startup and the minimal stdio MCP exchange on Alpine 3.22. HTTP,
-          other distributions and architectures, and the remaining tools are outside this case.
-          EOF
-
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: 10.0.201
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: conduit-linux-musl-x64
-          path: ${{ runner.temp }}/conduit-server
-
-      - name: Run musl binary smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/musl-smoke"
-          mkdir -p "$work"
-          cp "$RUNNER_TEMP/conduit-server/conduit-linux-musl-x64" "$work/"
-          chmod +x "$work/conduit-linux-musl-x64"
-
-          dotnet publish run-conduit-binary-smoke.cs \
-            -c Release \
-            -r linux-musl-x64 \
-            --self-contained \
-            -p:PublishAot=false \
-            -p:PublishSingleFile=true \
-            -p:InvariantGlobalization=true \
-            -p:DebugType=none \
-            -p:DebugSymbols=false \
-            -o "$work/runner"
-
-          docker run --rm \
-            -v "$work:/work" \
-            -w /work \
-            alpine:3.22 \
-            sh -c \
-              'apk add --no-cache libgcc libstdc++ zlib >/dev/null && \
-               /work/runner/run-conduit-binary-smoke \
-                 --transport stdio \
-                 /work/conduit-linux-musl-x64'
 
   test-server:
     needs: version
@@ -1302,7 +1218,6 @@ jobs:
       - build
       - test-server
       - test-server-binary
-      - test-server-binary-musl
       - test-unity
       - test-unity-consumer
       - test-unity-editor-windows
@@ -1412,17 +1327,17 @@ jobs:
           cat <<'EOF'
           ### Rolling stable release update
 
-          The inputs are the exact commit emitted by `prepare` and the three x64 server artifacts
-          built and tested earlier in this run: `conduit-linux-musl-x64`, `conduit-linux-x64`, and
+          The inputs are the exact commit emitted by `prepare` and the two x64 server artifacts
+          built and tested earlier in this run: `conduit-linux-x64` and
           `conduit-win-x64.exe`. No rebuild occurs during publication.
 
           1. Generate installation, Unity-compatibility, and recent-commit notes from repository
              history.
           2. Fetch `master` again. If its tip differs from the release commit, record a skipped
              release and leave the existing rolling release unchanged.
-          3. Validate the three assets, force-move the `release` tag to the prepared commit, then
+          3. Validate the two assets, force-move the `release` tag to the prepared commit, then
              edit its GitHub Release or create it as a draft.
-          4. Replace the three named assets and remove every stale extra asset.
+          4. Replace the two named assets and remove every stale extra asset.
           5. Briefly switch the release to draft and publish it as Latest. This refreshes the
              displayed publication date while preserving the release and its reactions.
 
@@ -1601,7 +1516,6 @@ jobs:
           notes="release-notes.md"
 
           files=(
-            release-assets/conduit-linux-musl-x64
             release-assets/conduit-linux-x64
             release-assets/conduit-win-x64.exe
           )
@@ -1626,7 +1540,7 @@ jobs:
           mapfile -t published < <(gh release view "$tag" --json assets --jq '.assets[].name')
           for asset in "${published[@]}"; do
             case "$asset" in
-              conduit-linux-musl-x64|conduit-linux-x64|conduit-win-x64.exe) ;;
+              conduit-linux-x64|conduit-win-x64.exe) ;;
               *) gh release delete-asset "$tag" "$asset" --yes ;;
             esac
           done

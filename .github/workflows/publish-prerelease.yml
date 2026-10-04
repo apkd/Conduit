@@ -39,7 +39,7 @@ jobs:
           - the selected ref is a non-default branch;
           - a successful push or manual `build-test-release.yml` run exists for the exact dispatch
             branch and SHA; and
-          - that run still owns all three unexpired server artifacts.
+          - that run still owns both unexpired server artifacts.
 
           The artifacts are downloaded by source run ID. Before any remote write, the job validates
           the package SemVer, requires each asset to be non-empty, and resolves the branch again.
@@ -51,7 +51,6 @@ jobs:
           tag         prerelease → selected branch SHA
           release     prerelease=true, draft=false, latest=false
           assets      conduit-linux-x64
-                      conduit-linux-musl-x64
                       conduit-win-x64.exe
           ```
 
@@ -104,9 +103,9 @@ jobs:
               gh api -X GET \
                 "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
                 -F per_page=100 \
-                --jq '[.artifacts[] | select(.expired == false and (.name == "conduit-linux-x64" or .name == "conduit-linux-musl-x64" or .name == "conduit-win-x64")) | .name] | unique | length'
+                --jq '[.artifacts[] | select(.expired == false and (.name == "conduit-linux-x64" or .name == "conduit-win-x64")) | .name] | unique | length'
             )"
-            [[ "$artifact_count" == "3" ]] || continue
+            [[ "$artifact_count" == "2" ]] || continue
 
             {
               echo "run_id=$run_id"
@@ -115,7 +114,7 @@ jobs:
             exit 0
           done
 
-          echo "::error::No successful '$SOURCE_WORKFLOW' run with all three live server artifacts exists for $SOURCE_BRANCH@$SOURCE_SHA."
+          echo "::error::No successful '$SOURCE_WORKFLOW' run with both live server artifacts exists for $SOURCE_BRANCH@$SOURCE_SHA."
           echo "Run that workflow for the selected branch tip, wait for it to pass, then dispatch this workflow again."
           exit 1
 
@@ -146,7 +145,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for asset in conduit-linux-x64 conduit-linux-musl-x64 conduit-win-x64.exe; do
+          for asset in conduit-linux-x64 conduit-win-x64.exe; do
             path="$RUNNER_TEMP/release-assets/$asset"
             if [[ ! -s "$path" ]]; then
               echo "::error::Expected non-empty release asset '$asset'."
@@ -227,7 +226,6 @@ jobs:
           notes="$RUNNER_TEMP/release-notes.md"
           assets=(
             "$RUNNER_TEMP/release-assets/conduit-linux-x64"
-            "$RUNNER_TEMP/release-assets/conduit-linux-musl-x64"
             "$RUNNER_TEMP/release-assets/conduit-win-x64.exe"
           )
 
@@ -251,7 +249,7 @@ jobs:
           mapfile -t published_assets < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
           for asset in "${published_assets[@]}"; do
             case "$asset" in
-              conduit-linux-x64|conduit-linux-musl-x64|conduit-win-x64.exe) ;;
+              conduit-linux-x64|conduit-win-x64.exe) ;;
               *) gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
             esac
           done
@@ -260,7 +258,7 @@ jobs:
           if ! jq -e '
             .isDraft == false and
             .isPrerelease == true and
-            ([.assets[].name] | sort) == ["conduit-linux-musl-x64", "conduit-linux-x64", "conduit-win-x64.exe"]
+            ([.assets[].name] | sort) == ["conduit-linux-x64", "conduit-win-x64.exe"]
           ' <<< "$release_info" >/dev/null; then
             echo "::error::Published prerelease state does not match the requested release."
             exit 1
