@@ -154,6 +154,24 @@ public sealed class ViewIlTests
         Assert.That(((IlFormatter.UnresolvedToken)operand!).Value, Is.EqualTo(instruction.Operand));
     }
 
+    [Test]
+    public void ObfuscatedTypeNamesDoNotBreakUnrelatedTypeLookup()
+    {
+        var assembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("ViewIlObfuscatedNames"), AssemblyBuilderAccess.Run);
+        var parent = assembly.DefineDynamicModule("Main").DefineType("Generated`notAnArity");
+        var nested = parent.DefineNestedType("Nested", TypeAttributes.NestedPublic);
+        var method = nested.DefineMethod("Run", MethodAttributes.Public | MethodAttributes.Static, typeof(void), Type.EmptyTypes);
+        method.GetILGenerator().Emit(OpCodes.Ret);
+        var parentType = parent.CreateType()!;
+        var nestedType = nested.CreateType()!;
+
+        Assert.That(ReflectionTypeFormatter.FormatType(nestedType, true), Does.Contain(parentType.Name));
+        Assert.That(IlFormatter.Format(nestedType.GetMethod("Run")!), Does.Contain(parentType.Name));
+        var types = new[] { parentType, nestedType, typeof(string) };
+        Assert.That(ReflectionQueryEngine.MatchSingleType(types, nestedType.FullName!).Type, Is.EqualTo(nestedType));
+        Assert.That(ReflectionQueryEngine.MatchSingleType(types, typeof(string).FullName!).Type, Is.EqualTo(typeof(string)));
+    }
+
     static MethodInfo Method(string name) => typeof(ViewIlFixture).GetMethod(name,
         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly)!;
 

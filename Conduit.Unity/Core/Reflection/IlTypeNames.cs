@@ -73,11 +73,9 @@ namespace Conduit
                 else if ((format == TypeNameFormat.Qualified || qualified.Contains(definition)) && !string.IsNullOrEmpty(part.Namespace))
                     builder.Append(part.Namespace).Append('.');
                 first = false;
-                int tick = part.Name.IndexOf('`');
-                builder.Append(CSharpIdentifier.Escape(tick < 0 ? part.Name : part.Name.Substring(0, tick)));
-                if (tick < 0)
+                builder.Append(CSharpIdentifier.Escape(ReflectionTypeFormatter.GetTypeName(part, out var arity)));
+                if (arity == 0)
                     continue;
-                int arity = int.Parse(part.Name.Substring(tick + 1), System.Globalization.CultureInfo.InvariantCulture);
                 builder.Append('<');
                 for (int index = 0; index < arity; index++)
                 {

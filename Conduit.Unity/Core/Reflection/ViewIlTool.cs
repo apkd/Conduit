@@ -25,7 +25,7 @@ namespace Conduit
             catch (Exception exception) when (exception is ArgumentException or InvalidOperationException
                                               or NotSupportedException or TypeLoadException or BadImageFormatException)
             {
-                return BridgeCommandResult.Error(exception.Message);
+                return BridgeCommandResult.Error($"Could not inspect IL for '{target}': {exception.Message}");
             }
         }
 

@@ -56,14 +56,10 @@ namespace Conduit
                 else if (builder.Length > 0)
                     builder.Append('.');
 
-                var tick = part.Name.IndexOf('`');
-                builder.Append(CSharpIdentifier.Escape(
-                    tick < 0 ? part.Name : part.Name.Substring(0, tick)
-                ));
-                if (tick < 0)
+                builder.Append(CSharpIdentifier.Escape(GetTypeName(part, out var arity)));
+                if (arity == 0)
                     continue;
 
-                var arity = int.Parse(part.Name.Substring(tick + 1), CultureInfo.InvariantCulture);
                 builder.Append('<');
                 for (var index = 0; index < arity; index++)
                 {
@@ -79,6 +75,19 @@ namespace Conduit
             }
 
             return builder.ToString();
+        }
+
+        internal static string GetTypeName(Type type, out int arity)
+        {
+            // obfuscated metadata can contain backticks unrelated to generic parameters.
+            arity = type.GetGenericArguments().Length - (type.DeclaringType?.GetGenericArguments().Length ?? 0);
+            var name = type.Name;
+            if (arity == 0)
+                return name;
+            var suffix = "`" + arity.ToString(CultureInfo.InvariantCulture);
+            return name.EndsWith(suffix, StringComparison.Ordinal)
+                ? name.Substring(0, name.Length - suffix.Length)
+                : name;
         }
 
         internal static string JoinTypes(Type[] types, int max)
