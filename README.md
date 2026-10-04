@@ -96,121 +96,40 @@ chmod +x "$HOME/.local/bin/conduit"
 <details>
   <summary><b>NixOS</b></summary>
 
-Use the glibc release for both stdio and HTTP. `autoPatchelfHook` patches its ELF interpreter
-and runtime library paths for NixOS. OpenSSL is included for HTTP sessions.
+Conduit supports Linux x64 and includes .NET. With `nix-command` and `flakes`
+enabled, you can try it or install it:
 
-When upgrading this package, update `version` and `hash` together.
-Setting `hash = pkgs.lib.fakeHash;` makes Nix print the current hash during the next build.
+```bash
+nix run github:apkd/Conduit -- --version
+nix profile add github:apkd/Conduit#conduit
+```
+
+For your NixOS or Home Manager configuration, add Conduit to your flake:
 
 ```nix
-# conduit.nix
-{ pkgs }:
-
-pkgs.stdenvNoCC.mkDerivation rec {
-  pname = "conduit";
-  version = "0.3.74";
-
-  src = pkgs.fetchurl {
-    url = "https://github.com/apkd/Conduit/releases/download/release/conduit-linux-x64";
-    hash = "sha256-mRlqgG2f+XZ1XJzwxi39hm8v3WG9CQ1yMbkogqsoatk=";
-  };
-
-  dontUnpack = true;
-
-  nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-  buildInputs = [ pkgs.stdenv.cc.cc.lib ];
-  runtimeDependencies = [ pkgs.openssl.out ];
-
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 "$src" "$out/bin/conduit"
-    runHook postInstall
-  '';
-}
+inputs.conduit.url = "github:apkd/Conduit";
 ```
 
-These examples also work with flakes. Place `conduit.nix` beside your `configuration.nix`,
-include that module in your flake's `nixosSystem.modules`, and Git-track the new file.
+Put `inputs.conduit.packages.x86_64-linux.default` in `environment.systemPackages`
+or `home.packages`, then rebuild. Configure your MCP client to run `conduit`.
 
-##### stdio
-
-Add Conduit and its Unity launch tools to the system profile:
+If you'd like an HTTP server, add these entries to your Home Manager module list:
 
 ```nix
-# configuration.nix
-{ lib, pkgs, ... }:
-
-let
-  conduit = import ./conduit.nix { inherit pkgs; };
-in
-{
-  environment.systemPackages = with pkgs; [
-    bash
-    conduit
-    unityhub
-    util-linux
-  ];
-
-  nixpkgs.config.allowUnfreePredicate = package:
-    lib.getName package == "unityhub";
-}
+inputs.conduit.homeManagerModules.default
+{ services.conduit.enable = true; }
 ```
 
-Configure your editor to use the `conduit` executable (see the editor configuration sections below for more details).
+Apply your Home Manager configuration, then point your MCP client at
+`http://127.0.0.1:5080`. The service starts and stops automatically with your desktop
+session. You can change the port with `services.conduit.port`.
 
-```toml
-[mcp_servers.unity]
-command = "conduit"
-```
+Install Unity Hub (`unityhub`) separately if you'd like Conduit to launch Unity.
+You can connect to an editor you've already opened without Hub.
 
-##### http
-
-Use the same `conduit.nix` package to run one server in the graphical user session:
-
-```nix
-# configuration.nix
-{ lib, pkgs, ... }:
-
-let
-  conduit = import ./conduit.nix { inherit pkgs; };
-  conduitUser = "bob";
-in
-{
-  environment.systemPackages = [ conduit ];
-
-  nixpkgs.config.allowUnfreePredicate = package:
-    lib.getName package == "unityhub";
-
-  systemd.user.services.conduit = {
-    description = "Conduit Unity MCP server";
-    wantedBy = [ "graphical-session.target" ];
-    after = [ "graphical-session.target" ];
-    partOf = [ "graphical-session.target" ];
-    unitConfig.ConditionUser = conduitUser;
-    path = with pkgs; [
-      bash
-      util-linux
-      unityhub
-    ];
-    serviceConfig = {
-      ExecStart = "${conduit}/bin/conduit --http --url http://127.0.0.1:5080";
-      Restart = "on-failure";
-      RestartSec = "1s";
-    };
-  };
-}
-```
-
-Set `conduitUser` to the account that runs Unity and the MCP client.
-Conduit reads the `unityhub` wrapper to find `unityhub-fhs-env`. Its detached launch path calls `bash` and `setsid` from `util-linux`.
-After applying the configuration, start the service with `systemctl --user start conduit`; subsequent graphical sessions start it automatically.
-
-Configure your editor to use the HTTP server (see the editor configuration sections below for more details).
-
-```toml
-[mcp_servers.unity]
-url = "http://127.0.0.1:5080"
-```
+To update a flake installation, run `nix flake update conduit` and rebuild your
+configuration. For profile installations, run `nix profile upgrade <entry>`;
+`nix profile list` shows the entry name.
 
 </details>
 
@@ -276,6 +195,7 @@ enabled = true
 [mcp_servers.unity]
 command = "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit"
 args = []
+env_vars = ["XDG_RUNTIME_DIR"]
 cwd = "/home/you/src/Conduit"
 disabled_tools = []
 tool_timeout_sec = 300
@@ -609,6 +529,7 @@ Current Cline uses flat transport fields in each server entry.
       "type": "stdio",
       "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
       "args": [],
+      "env": { "XDG_RUNTIME_DIR": "${env:XDG_RUNTIME_DIR}" },
       "disabled": false
     }
   }
@@ -758,6 +679,8 @@ mcpServers:
     type: stdio
     command: /home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit
     cwd: /home/you/src/Conduit
+    env:
+      XDG_RUNTIME_DIR: ${{ secrets.XDG_RUNTIME_DIR }}
 ```
 
 ##### http
@@ -974,7 +897,7 @@ Setting `COPILOT_HOME` moves the **User account** file to that directory.
       "type": "stdio",
       "command": "/home/you/src/Conduit/Conduit.Server/publish/linux-x64/conduit",
       "args": [],
-      "env": {},
+      "env": { "XDG_RUNTIME_DIR": "${XDG_RUNTIME_DIR}" },
       "tools": ["*"]
     }
   }

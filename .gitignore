@@ -50,3 +50,5 @@ package-lock.json
 /Logs/
 /Sandbox/
 /TestResults/
+/result
+/result-*

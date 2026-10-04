@@ -57,7 +57,9 @@ jobs:
           | any other run       |                                                       | validate only; retain the package version     |
 
           The job also selects the most recently created `vMAJOR.MINOR.PATCH` tag for release-note
-          comparisons. Its outputs are the release decision, the package/assembly/file/informational
+          comparisons. Release versions advance from the higher of the package version and the
+          last archived version, so interrupted uploads cannot cause a version to be reused.
+          Its outputs are the release decision, the package/assembly/file/informational
           versions and that previous tag. No repository or GitHub Release state changes here.
           EOF
 
@@ -68,6 +70,8 @@ jobs:
       - name: Plan version metadata
         id: plan
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -101,6 +105,11 @@ jobs:
 
           package_version="$current"
           if [[ "$release_requested" == "true" ]]; then
+            # an interrupted release may have archived binaries without committing its version bump.
+            archive_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/build-archive" --jq '.id')
+            archived_versions=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$archive_id/assets?per_page=100" \
+              --jq '.[] | .name | capture("^conduit-(?<version>[0-9]+\\.[0-9]+\\.[0-9]+)-(linux-x64|win-x64\\.exe)$") | .version')
+            current=$(printf '%s\n' "$current" "$archived_versions" | sort -V | tail -n 1)
             IFS='.' read -r major minor patch <<<"$current"
 
             case "$level" in
@@ -215,6 +224,42 @@ jobs:
         with:
           name: ${{ matrix.publish_name }}
           path: ${{ runner.temp }}/release/${{ matrix.publish_target }}
+
+  test-nix:
+    needs: [version, build]
+    name: Nix package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check release script
+        run: shellcheck .github/scripts/archive-release.sh
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.201
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v8
+        with:
+          name: conduit-linux-x64
+          path: ${{ runner.temp }}/conduit-server
+      - name: Package this run's tested binary
+        env:
+          CONDUIT_ARTIFACT: ${{ runner.temp }}/conduit-server/conduit-linux-x64
+          CONDUIT_VERSION: ${{ needs.version.outputs.package_version }}
+        run: |
+          nix build --impure --print-build-logs --out-link "$RUNNER_TEMP/conduit-nix" --expr '
+            let flake = builtins.getFlake (toString ./.);
+            in flake.packages.x86_64-linux.conduit.overrideAttrs (_: {
+              src = builtins.path {
+                path = builtins.getEnv "CONDUIT_ARTIFACT";
+                name = "conduit-linux-x64";
+              };
+              version = builtins.getEnv "CONDUIT_VERSION";
+            })'
+      - name: Test both transports through the Nix wrapper
+        run: |
+          dotnet run --file run-conduit-binary-smoke.cs -- --transport stdio "$RUNNER_TEMP/conduit-nix/bin/conduit"
+          dotnet run --file run-conduit-binary-smoke.cs -- --transport http "$RUNNER_TEMP/conduit-nix/bin/conduit"
 
   test-server-binary:
     needs: build
@@ -1218,6 +1263,7 @@ jobs:
       - build
       - test-server
       - test-server-binary
+      - test-nix
       - test-unity
       - test-unity-consumer
       - test-unity-editor-windows
@@ -1248,11 +1294,13 @@ jobs:
           ```text
           apply planned version to Conduit.Unity/package.json
                             ↓
-          create local [release] [skip ci] bot commit
-                            ↓
           fetch master and compare its tip with the tested workflow SHA
              ├─ changed   → stop successfully; emit no release SHA
-             └─ unchanged → push commit normally
+             └─ unchanged → archive both tested binaries without replacement
+                                  ↓
+                            write pinned Nix metadata and create [release] [skip ci] commit
+                                  ↓
+                            recheck master and push commit normally
                                   ↓
                             push vMAJOR.MINOR.PATCH tag
                                   ↓
@@ -1261,7 +1309,8 @@ jobs:
 
           The comparison is a snapshot. A normal, non-force branch push supplies the final guard
           if `master` advances after that comparison. The branch and semantic tag are separate
-          pushes; GitHub Release metadata and binaries are untouched in this job.
+          pushes. The archive is populated before its URLs enter the branch; a later freshness
+          failure may leave a tested build in the archive without publishing it as latest.
           EOF
 
       - name: Record target ref
@@ -1286,18 +1335,23 @@ jobs:
 
           echo "new=$next" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: conduit-*-x64
+          path: release-assets
+          merge-multiple: true
+
       - name: Commit and tag
         if: steps.prepare.outputs.new != ''
         id: push
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$PACKAGE_JSON"
-          git commit -m "${{ github.event.repository.name }} ${{ steps.prepare.outputs.new }} [release] [skip ci]"
-
           ref="${{ steps.target.outputs.ref }}"
           base_sha="${{ github.sha }}"
           git fetch origin "$ref" --quiet
@@ -1307,6 +1361,18 @@ jobs:
             exit 0
           fi
 
+          bash .github/scripts/archive-release.sh \
+            "$GITHUB_REPOSITORY" "${{ steps.prepare.outputs.new }}" \
+            release-assets nix/release.json
+
+          git add "$PACKAGE_JSON" nix/release.json
+          git commit -m "${{ github.event.repository.name }} ${{ steps.prepare.outputs.new }} [release] [skip ci]"
+
+          git fetch origin "$ref" --quiet
+          if [[ "$(git rev-parse "origin/$ref")" != "$base_sha" ]]; then
+            echo "::notice::Branch advanced during archiving; keeping the archive but cancelling publication."
+            exit 0
+          fi
           git push origin "HEAD:$ref"
           git tag "v${{ steps.prepare.outputs.new }}"
           git push origin "v${{ steps.prepare.outputs.new }}"
@@ -1473,6 +1539,7 @@ jobs:
             printf '\n#### [View diff since previous tagged release](%s/compare/%s...release)\n' "$repo_url" "$prev_tag" >> "$notes"
           fi
           printf '#### [More recent commits](%s/commits/%s/)\n' "$repo_url" "$ref" >> "$notes"
+          printf '\n[Historical build downloads](%s/releases/tag/build-archive)\n' "$repo_url" >> "$notes"
 
           cat "$notes" >> "$GITHUB_STEP_SUMMARY"
 
