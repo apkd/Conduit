@@ -17,23 +17,28 @@ sealed class ProjectSingleFlight<TResult>
         if (inFlightOperations.TryGetValue(normalizedProjectPath, out var existingOperation))
             return existingOperation.Value.WaitAsync(callerCancellationToken);
 
-        var newOperation = new Lazy<Task<TResult>>(
-            () => operationFactory(normalizedProjectPath, operationCancellationToken),
-            LazyThreadSafetyMode.ExecutionAndPublication
-        );
+        // assign the captured entry before publication so cleanup cannot remove a later attempt.
+        Lazy<Task<TResult>> newOperation = null!;
+        newOperation = new(ExecuteAsync, LazyThreadSafetyMode.ExecutionAndPublication);
 
-        var activeOperation = inFlightOperations.GetOrAdd(normalizedProjectPath, newOperation);
-        var operationTask = activeOperation.Value;
-        if (ReferenceEquals(activeOperation, newOperation))
+        return inFlightOperations
+            .GetOrAdd(normalizedProjectPath, newOperation)
+            .Value.WaitAsync(callerCancellationToken);
+
+        async Task<TResult> ExecuteAsync()
         {
-            _ = operationTask.ContinueWith(
-                _ => inFlightOperations.TryRemove(new KeyValuePair<string, Lazy<Task<TResult>>>(normalizedProjectPath, activeOperation)),
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default
-            );
+            try
+            {
+                return await operationFactory(normalizedProjectPath, operationCancellationToken)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                // evict before publishing completion, including synchronous factory failures.
+                inFlightOperations.TryRemove(
+                    new KeyValuePair<string, Lazy<Task<TResult>>>(normalizedProjectPath, newOperation)
+                );
+            }
         }
-
-        return operationTask.WaitAsync(callerCancellationToken);
     }
 }
