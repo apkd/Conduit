@@ -6,6 +6,8 @@ namespace Conduit;
 
 sealed class ProjectCommandQueue
 {
+    const string shutdownDiagnostic = "The MCP server is shutting down.";
+
     readonly Channel<QueuedProjectCommand> channel;
     readonly Func<QueuedProjectCommand, CancellationToken, Task<ToolExecutionResult>> executor;
     readonly CancellationToken shutdownToken;
@@ -35,6 +37,7 @@ sealed class ProjectCommandQueue
         Completion = ProcessAsync();
     }
 
+    // shutdown settles requests without waiting for uncooperative executor work to finish.
     internal Task Completion { get; }
 
     public async Task<ToolExecutionResult> EnqueueAsync(QueuedProjectCommand command, CancellationToken ct)
@@ -44,17 +47,16 @@ sealed class ProjectCommandQueue
         LogQueueDepthIfNeeded(Interlocked.Increment(ref queuedDepth), command.Session.ProjectPath);
 #endif
 
-        try
+        if (ct.IsCancellationRequested || shutdownToken.IsCancellationRequested || !channel.Writer.TryWrite(command))
         {
-            await channel.Writer.WriteAsync(command, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            command.Session.DecrementQueuedCount();
-#if DEBUG
-            Interlocked.Decrement(ref queuedDepth);
-#endif
-            return ToolExecutionResult.Cancelled("The request was cancelled before it entered the Unity queue.");
+            DecrementQueuedCount(command);
+            var result = ToolExecutionResult.Cancelled(
+                ct.IsCancellationRequested
+                    ? "The request was cancelled before it entered the Unity queue."
+                    : shutdownDiagnostic
+            );
+            command.TrySetResult(result);
+            return result;
         }
 
         if (!ct.CanBeCanceled)
@@ -92,10 +94,13 @@ sealed class ProjectCommandQueue
         {
             await foreach (var command in channel.Reader.ReadAllAsync(shutdownToken))
             {
-                command.Session.DecrementQueuedCount();
-#if DEBUG
-                Interlocked.Decrement(ref queuedDepth);
-#endif
+                DecrementQueuedCount(command);
+
+                if (shutdownToken.IsCancellationRequested)
+                {
+                    command.TrySetResult(ToolExecutionResult.Cancelled(shutdownDiagnostic));
+                    break;
+                }
 
                 if (command.RequestCancellation.IsCancellationRequested)
                 {
@@ -105,28 +110,58 @@ sealed class ProjectCommandQueue
 
                 try
                 {
-                    var result = await executor(command, shutdownToken);
+                    // only shutdown may release the queue before the executor finishes.
+                    var result = await ExecuteAsync(command).WaitAsync(shutdownToken);
                     command.TrySetResult(result);
                 }
                 catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
                 {
-                    command.TrySetResult(ToolExecutionResult.Cancelled("The MCP server is shutting down."));
+                    command.TrySetResult(ToolExecutionResult.Cancelled(shutdownDiagnostic));
                     break;
-                }
-                catch (Exception exception)
-                {
-                    logger.ZLogError($"Queued Unity command failed for project {command.Session.ProjectPath}.", exception);
-                    command.TrySetResult(
-                        ToolExecutionResult.FromException(
-                            exception,
-                            string.Empty,
-                            "The MCP server failed while processing the queued Unity command."
-                        )
-                    );
                 }
             }
         }
         catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested) { }
+        finally
+        {
+            // close admission before draining so a racing producer cannot strand a command.
+            channel.Writer.TryComplete();
+            while (channel.Reader.TryRead(out var command))
+            {
+                DecrementQueuedCount(command);
+                command.TrySetResult(ToolExecutionResult.Cancelled(shutdownDiagnostic));
+            }
+        }
+
+        async Task<ToolExecutionResult> ExecuteAsync(QueuedProjectCommand command)
+        {
+            // observe failures even if shutdown has already ended the queue's wait.
+            try
+            {
+                return await executor(command, shutdownToken);
+            }
+            catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+            {
+                return ToolExecutionResult.Cancelled(shutdownDiagnostic);
+            }
+            catch (Exception exception)
+            {
+                logger.ZLogError(exception, $"Queued Unity command failed for project {command.Session.ProjectPath}.");
+                return ToolExecutionResult.FromException(
+                    exception,
+                    string.Empty,
+                    "The MCP server failed while processing the queued Unity command."
+                );
+            }
+        }
+    }
+
+    void DecrementQueuedCount(QueuedProjectCommand command)
+    {
+        command.Session.DecrementQueuedCount();
+#if DEBUG
+        Interlocked.Decrement(ref queuedDepth);
+#endif
     }
 
 #if DEBUG
