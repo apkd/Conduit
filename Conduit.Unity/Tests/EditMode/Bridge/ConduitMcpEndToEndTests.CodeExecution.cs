@@ -75,6 +75,26 @@ public sealed partial class ConduitMcpEndToEndTests
 
     [Test]
     [Order(16)]
+    public async Task ExecuteCode_SupportsTypedUsingDeclarations()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        foreach (var prefix in new[] { string.Empty, "_ = 0;\n" })
+        {
+            var snippet = prefix
+                + "using System.IO.MemoryStream stream = new();\n"
+                + "if (!stream.CanRead) throw new InvalidOperationException();\n"
+                + $"return \"{marker}\";";
+            var result = await client.CallToolAsync(
+                BridgeCommandTypes.ExecuteCode,
+                Args(("projectPath", projectPath), ("snippet", snippet))
+            );
+
+            AssertSuccessful(result, marker);
+        }
+    }
+
+    [Test]
+    [Order(16)]
     public async Task ExecuteCode_SelectsSyncWrapperUnlessTopLevelAwaitRequiresAsync()
     {
         const string refSnippet
