@@ -281,28 +281,23 @@ public sealed partial class ConduitSetupWizardTests
     }
 
     [Test]
-    public void OutdatedExecutableOutsideHomeAndProjectCannotBeOverwritten()
+    public void ExecutableOutsideHomeAndProjectCannotBeOverwritten()
     {
         string executablePath = Path.Combine(
-            Path.GetTempPath(),
+            Path.GetPathRoot(Application.dataPath)!,
             $"conduit-outside-{Guid.NewGuid():N}"
         );
-        using var scope = new FileScope(executablePath);
-        File.WriteAllText(executablePath, "echo conduit");
-        ServerVersionProbe.GetCurrentPackageVersionOverride = static () => "0.3.12";
-        ServerVersionProbe.ProbeExecutableVersionOverride = static _ => "0.3.11";
 
-        var button = SetupActionEvaluator.EvaluateDownloadButton(executablePath, string.Empty, false, false);
+        // location policy must reject the path before probing file permissions, even when temp is under home.
+        var canUpdate = ServerInstallation.CanAutomaticallyUpdateServer(executablePath, out var reason);
 
-        Assert.That(button.State, Is.EqualTo(SetupActionState.Error));
-        Assert.That(button.Label, Is.EqualTo("MCP server binary is outdated but not writeable"));
+        Assert.That(canUpdate, Is.False);
         Assert.That(
-            button.Hint,
+            reason,
             Is.EqualTo(
                 $"Conduit cannot automatically update MCP server executables in this path: `{executablePath}`."
             )
         );
-        Assert.That(button.IsOutdated, Is.True);
     }
 
     [TestCase("/run/current-system/sw/bin/conduit")]
