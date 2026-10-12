@@ -127,6 +127,123 @@ public sealed class SnippetCompilerTests
     }
 
     [Test]
+    [Arguments("using Probe.Resource<int> resource = new();", 1)]
+    [Arguments("_ = 0;\nusing Probe.Resource<int> resource = new();", 1)]
+    [Arguments("using global::" + SnippetSourceBuilder.Namespace + ".Probe.Resource<int> resource = new();", 1)]
+    [Arguments("using Probe.Resource<System.Collections.Generic.List<(int X, string Y)>> resource = new();", 1)]
+    [Arguments("using Probe.Resource<int>? resource = new Probe.Resource<int>();", 1)]
+    [Arguments("using IDisposable resource = new Probe.Resource<int>();", 1)]
+    [Arguments("using ResourceAlias resource = new();", 1)]
+    [Arguments("using Probe /* ; } */ .Resource<int>\n    /* name */ @using = new();", 1)]
+    [Arguments("using Probe.Resource<int> \\u0072esource = new();", 1)]
+    [Arguments("using Probe.Resource<int> resource = new($\"{nameof(Probe)}: {\"; //\"}\");", 1)]
+    [Arguments("using Probe.Resource<int> first = new(), second = new();", 2)]
+    [Arguments("using var resource = new Probe.Resource<int>();", 1)]
+    public async Task UsingDeclarationsCompileAndDisposeAtMethodExit(string statement, int expectedDisposals)
+    {
+        var declarations = "using System;\n"
+            + $"using ResourceAlias = {SnippetSourceBuilder.Namespace}.Probe.Resource<int>;\n"
+            + "public static class Probe\n"
+            + "{\n"
+            + "    public static int Disposed;\n"
+            + "    public struct Resource<T> : IDisposable\n"
+            + "    {\n"
+            + "        public Resource(string text) { }\n"
+            + "        public void Dispose() => Disposed++;\n"
+            + "    }\n"
+            + "}";
+        var parsed = ConduitCodeParser.Parse(declarations + "\n" + statement + "\n"
+            + "if (Probe.Disposed != 0) throw new InvalidOperationException(\"Disposed before method exit.\");\n"
+            + "return new Func<int>(() => Probe.Disposed);");
+
+        var output = CompileUsingSnippet(parsed);
+        var errors = output.Diagnostics
+            .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            .ToArray();
+        await Assert.That(errors).IsEmpty();
+        await Assert.That(output.AssemblyBytes).IsNotNull();
+
+        var execute = System.Reflection.Assembly.Load(output.AssemblyBytes!)
+            .GetType(SnippetSourceBuilder.Namespace + ".TestHost")!
+            .GetMethod("Execute")!;
+        var getDisposed = (Func<int>)execute.Invoke(null, null)!;
+        await Assert.That(getDisposed()).IsEqualTo(expectedDisposals);
+    }
+
+    [Test]
+    [Arguments("", "using System.IO.MemoryStream stream = new(); return stream.CanRead ? 1 : 0;")]
+    [Arguments("using System;", "return Math.Abs(-1);")]
+    [Arguments("using global::System.IO;", "using MemoryStream stream = new(); return stream.CanRead ? 1 : 0;")]
+    [Arguments("using Stream = System.IO.MemoryStream;", "using Stream stream = new(); return stream.CanRead ? 1 : 0;")]
+    [Arguments("using @static = System.IO.MemoryStream;", "using @static stream = new(); return stream.CanRead ? 1 : 0;")]
+    [Arguments("using static System.Math;", "return Abs(-1);")]
+    [Arguments("using static System.Collections.Generic.Comparer<int>;", "return Default.Compare(2, 1);")]
+    [Arguments("using Pair = (int X, int Y);", "Pair pair = (1, 2); return pair.X;")]
+    [Arguments("using unsafe Pointer = int*;", "unsafe { Pointer value = null; return value == null ? 1 : 0; }")]
+    [Arguments("using System.IO;", "using (var stream = new MemoryStream()) { return stream.CanRead ? 1 : 0; }")]
+    public async Task UsingDirectivesAndResourceStatementsCompileInTheirOwnScopes(string directive, string body)
+    {
+        var parsed = ConduitCodeParser.Parse(directive + "\n" + body);
+        var output = CompileUsingSnippet(parsed);
+        var errors = output.Diagnostics
+            .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            .ToArray();
+        await Assert.That(errors).IsEmpty();
+        await Assert.That(output.AssemblyBytes).IsNotNull();
+
+        var execute = System.Reflection.Assembly.Load(output.AssemblyBytes!)
+            .GetType(SnippetSourceBuilder.Namespace + ".TestHost")!
+            .GetMethod("Execute")!;
+        await Assert.That(execute.Invoke(null, null)).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task UsingDeclarationDiagnosticsKeepSnippetCoordinates()
+    {
+        var declarations = "using System.IO;\n"
+            + "class Helper { }\n"
+            + "static int count;";
+        var body = "\nusing /* resource */ MemoryStream\n"
+            + "    stream = new();\n"
+            + "return missing;";
+        var source = declarations + body;
+        var parsed = ConduitCodeParser.Parse(source);
+        await Assert.That(parsed.Body.Text).IsEqualTo(body);
+
+        var sourceFileName = nameof(UsingDeclarationDiagnosticsKeepSnippetCoordinates) + ".cs";
+        var output = CompileUsingSnippet(parsed, sourceFileName);
+        var errors = output.Diagnostics
+            .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            .ToArray();
+        await Assert.That(output.AssemblyBytes).IsNull();
+        await Assert.That(errors).Count().IsEqualTo(1);
+        await Assert.That(errors[0].Id).IsEqualTo("CS0103");
+
+        var expectedPosition = Microsoft.CodeAnalysis.Text.SourceText
+            .From(source)
+            .Lines.GetLinePosition(source.IndexOf("missing", StringComparison.Ordinal));
+        var location = errors[0].Location.GetMappedLineSpan();
+        await Assert.That(location.Path).IsEqualTo(sourceFileName);
+        await Assert.That(location.StartLinePosition).IsEqualTo(expectedPosition);
+    }
+
+    [Test]
+    [Arguments("using System.Text;")]
+    [Arguments("class Late { }")]
+    [Arguments("static int late;")]
+    [Arguments("namespace N { }")]
+    [Arguments("global using System;")]
+    [Arguments("extern alias Other;")]
+    [Arguments("#define FLAG")]
+    public async Task UsingDeclarationsDoNotRelaxSnippetOrderingOrUnsupportedForms(string item)
+    {
+        await Assert.That(() => ConduitCodeParser.Parse(
+                "using System.IO.MemoryStream stream = new();\n" + item
+            ))
+            .Throws<SnippetParseException>();
+    }
+
+    [Test]
     public async Task PlayerDetourSourceFilenameCanBeReusedFromMemory()
     {
         var compiler = new SnippetCompiler(null!);
@@ -268,4 +385,16 @@ public sealed class SnippetCompilerTests
                 returnsValue
             );
     }
+
+    static SnippetCompilationEngine.Output CompileUsingSnippet(SnippetParseResult parsed, string sourceFileName = "test.cs") =>
+        SnippetCompilationEngine.Compile(
+            "TestHost",
+            sourceFileName,
+            parsed,
+            platformReferences,
+            [],
+            [],
+            async: false,
+            returnsValue: true
+        );
 }

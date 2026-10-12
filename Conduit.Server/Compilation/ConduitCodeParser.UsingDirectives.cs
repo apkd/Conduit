@@ -1,5 +1,8 @@
 #nullable enable
 
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+
 namespace Conduit
 {
     static partial class ConduitCodeParser
@@ -38,6 +41,19 @@ namespace Conduit
                     return false;
                 }
 
+                if (bodyKeyword is not ("static" or "unsafe"))
+                {
+                    // keep resource declarations in the executable scope that owns their disposal.
+                    var type = SyntaxFactory.ParseTypeName(snippet, bodyCursor, consumeFullText: false);
+                    var nextToken = SyntaxFactory.ParseToken(snippet, bodyCursor + type.FullSpan.Length);
+                    if (nextToken.IsKind(SyntaxKind.IdentifierToken))
+                    {
+                        chunk = default;
+                        endIndex = startIndex;
+                        return false;
+                    }
+                }
+
                 endIndex = ReadSemicolonTerminatedChunk(cursor, currentLine, "using directive");
                 chunk = new(
                     snippet.Substring(startIndex, endIndex - startIndex),
@@ -48,4 +64,3 @@ namespace Conduit
         }
     }
 }
-
