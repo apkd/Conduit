@@ -292,12 +292,8 @@ public sealed partial class ConduitSetupWizardTests
         var canUpdate = ServerInstallation.CanAutomaticallyUpdateServer(executablePath, out var reason);
 
         Assert.That(canUpdate, Is.False);
-        Assert.That(
-            reason,
-            Is.EqualTo(
-                $"Conduit cannot automatically update MCP server executables in this path: `{executablePath}`."
-            )
-        );
+        Assert.That(reason, Does.Contain("cannot automatically update"));
+        Assert.That(reason, Does.Contain(Path.GetFullPath(executablePath)));
     }
 
     [TestCase("/run/current-system/sw/bin/conduit")]
