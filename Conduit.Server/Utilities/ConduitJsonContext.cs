@@ -27,5 +27,6 @@ namespace Conduit;
 [JsonSerializable(typeof(ProfilerBrowseSort))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(double))]
+[JsonSerializable(typeof(double?))]
 [JsonSerializable(typeof(float))]
 partial class ConduitJsonContext : JsonSerializerContext { }

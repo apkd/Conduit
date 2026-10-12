@@ -12,53 +12,10 @@ namespace Conduit
         static double ReadColumn(HierarchyFrameDataView hierarchy, int itemId, int column)
             => hierarchy.GetItemColumnDataAsDouble(itemId, column);
 
-        static SampleRow ReadSampleRow(
-            HierarchyFrameDataView hierarchy,
-            int itemId,
-            int frameIndex,
-            int frameOrdinal,
-            float frameTimeMs,
-            string displayPath,
-            int depth,
-            int childCount
-        )
-            => new()
-            {
-                FrameIndex = frameIndex,
-                FrameOrdinal = frameOrdinal,
-                Name = hierarchy.GetItemName(itemId) ?? "<unnamed>",
-                DisplayPath = displayPath,
-                Depth = depth,
-                ChildCount = childCount,
-                TotalMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnTotalTime),
-                SelfMs = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnSelfTime),
-                GcBytes = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnGcMemory),
-                Calls = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnCalls),
-                FrameTimeMs = frameTimeMs,
-            };
-
         static List<FrameStats> TopFrames(List<FrameStats> frames, Func<FrameStats, double> selector)
         {
             frames.Sort((left, right) => selector(right).CompareTo(selector(left)));
             return frames;
-        }
-
-        static int CompareOverviewSamples(SampleRow left, SampleRow right, string mode)
-        {
-            var leftScore = GetOverviewScore(left, mode);
-            var rightScore = GetOverviewScore(right, mode);
-            var scoreComparison = rightScore.CompareTo(leftScore);
-            if (scoreComparison != 0)
-                return scoreComparison;
-
-            var totalComparison = right.TotalMs.CompareTo(left.TotalMs);
-            if (totalComparison != 0)
-                return totalComparison;
-
-            var selfComparison = right.SelfMs.CompareTo(left.SelfMs);
-            return selfComparison != 0
-                ? selfComparison
-                : left.DisplayPath.CompareTo(right.DisplayPath);
         }
 
         static bool ShouldIncludeOverviewSample(SampleRow sample, string mode)
@@ -116,12 +73,13 @@ namespace Conduit
 
         static void AppendFrameTable(StringBuilder builder, IReadOnlyList<FrameStats> rows)
         {
-            builder.AppendLine("frame    cpu_ms    gpu_ms    fps       gc_kb    samples");
+            builder.AppendLine("frame    unity_index  cpu_ms    gpu_ms    fps       gc_kb    samples");
             var count = Math.Min(OverviewRowLimit, rows.Count);
             for (var index = 0; index < count; ++index)
             {
                 var row = rows[index];
                 AppendPadded(builder, ProfilerValueFormatter.FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex), 9);
+                AppendPadded(builder, row.FrameIndex, 13);
                 AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.CpuMs), 10);
                 AppendPadded(builder, ProfilerValueFormatter.FormatOptionalNumber(row.GpuMs), 10);
                 AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.Fps), 10);
@@ -130,52 +88,25 @@ namespace Conduit
             }
         }
 
-        static void AppendSampleTable(StringBuilder builder, IReadOnlyList<SampleRow> rows, bool includeRank = false)
-        {
-            builder.AppendLine(includeRank
-                ? "rank  frame  total_ms  self_ms  gc_kb  calls  frame_%  sample"
-                : "frame  total_ms  self_ms  gc_kb  calls  frame_%  name");
-            var rank = 1;
-            var count = Math.Min(OverviewRowLimit, rows.Count);
-            for (var index = 0; index < count; ++index)
-            {
-                var row = rows[index];
-                if (includeRank)
-                    AppendPadded(builder, rank++, 6);
-
-                AppendPadded(builder, ProfilerValueFormatter.FormatFrameOrdinal(row.FrameOrdinal, row.FrameIndex), 7);
-                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.TotalMs), 10);
-                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.SelfMs), 9);
-                AppendPadded(builder, ProfilerValueFormatter.FormatKb(row.GcBytes), 7);
-                AppendPadded(builder, (int)Math.Round(row.Calls), 7);
-                AppendPadded(builder, ProfilerValueFormatter.FormatPercent(row.TotalMs, row.FrameTimeMs), 9);
-                builder.AppendLine(
-                    includeRank
-                        ? ProfilerValueFormatter.FormatSamplePath(row.DisplayPath)
-                        : ProfilerValueFormatter.FormatSampleName(row.Name)
-                );
-            }
-        }
-
-        static void AppendBrowseRow(StringBuilder builder, HierarchyRow row, int rootDepth, float frameTimeMs, int aggregateWorkerCount)
+        static void AppendBrowseRow(StringBuilder builder, HierarchyRow row, int rootDepth, float frameTimeMs, int aggregateWorkerCount, string reference)
         {
             var relativeDepth = row.Depth - rootDepth;
             var normalizedMs = aggregateWorkerCount > 0 ? GetNormalizedWorkerMs(row, aggregateWorkerCount) : row.TotalMs;
-            AppendPadded(builder, row.PublicId ?? "", 10);
+            AppendPadded(builder, reference, 42);
             AppendPadded(builder, relativeDepth, 7);
-            AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.TotalMs), 10);
+            AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.TotalMs), 12);
             if (aggregateWorkerCount > 0)
             {
-                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(GetWorkerMeanMs(row)), 9);
-                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.MinTotalMs), 8);
-                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.MaxTotalMs), 8);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(GetWorkerMeanMs(row)), 16);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.MinTotalMs), 15);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.MaxTotalMs), 15);
                 AppendPadded(builder, row.ContributingWorkerCount, 9);
             }
 
             AppendPadded(builder, ProfilerValueFormatter.FormatNumber(row.SelfMs), 9);
             AppendPadded(builder, ProfilerValueFormatter.FormatKb(row.GcBytes), 7);
             AppendPadded(builder, (int)Math.Round(row.Calls), 7);
-            AppendPadded(builder, ProfilerValueFormatter.FormatPercent(normalizedMs, frameTimeMs), 9);
+            AppendPadded(builder, ProfilerValueFormatter.FormatPercent(normalizedMs, frameTimeMs), 12);
             builder.Append(' ', Math.Max(0, relativeDepth * 2));
             builder.AppendLine(ProfilerValueFormatter.FormatSampleName(row.Name));
         }
@@ -183,8 +114,7 @@ namespace Conduit
         static void AppendPadded(StringBuilder builder, string value, int width)
         {
             builder.Append(value);
-            if (value.Length < width)
-                builder.Append(' ', width - value.Length);
+            builder.Append(' ', Math.Max(1, width - value.Length));
         }
 
         static void AppendPadded(StringBuilder builder, int value, int width)
@@ -192,8 +122,7 @@ namespace Conduit
             var start = builder.Length;
             builder.AppendInvariant(value);
             var length = builder.Length - start;
-            if (length < width)
-                builder.Append(' ', width - length);
+            builder.Append(' ', Math.Max(1, width - length));
         }
 
         static double GetWorkerMeanMs(HierarchyRow row) => row.TotalMs / row.ContributingWorkerCount;

@@ -18,11 +18,12 @@ namespace Conduit
             out float frameTimeMs,
             out int aggregateWorkerCount,
             out string threadSummary,
-            out string diagnostic
+            out string diagnostic,
+            bool includeSamples = true
         )
         {
             if (string.Equals(threadSelector, "all_workers", StringComparison.OrdinalIgnoreCase))
-                return TryBuildWorkerHierarchy(frameIndex, sort, out root, out frameTimeMs, out aggregateWorkerCount, out threadSummary, out diagnostic);
+                return TryBuildWorkerHierarchy(frameIndex, sort, out root, out frameTimeMs, out aggregateWorkerCount, out threadSummary, out diagnostic, includeSamples);
 
             root = null!;
             frameTimeMs = 0;
@@ -45,7 +46,7 @@ namespace Conduit
                 return false;
             }
 
-            root = BuildHierarchy(hierarchy, sort);
+            root = BuildHierarchy(hierarchy, sort, includeSamples);
             frameTimeMs = hierarchy.frameTimeMs;
             diagnostic = string.Empty;
             return true;
@@ -58,7 +59,8 @@ namespace Conduit
             out float frameTimeMs,
             out int aggregateWorkerCount,
             out string threadSummary,
-            out string diagnostic
+            out string diagnostic,
+            bool includeSamples
         )
         {
             root = CreateWorkerAggregateRoot();
@@ -98,7 +100,7 @@ namespace Conduit
                 if (labels.Count == 0)
                     frameTimeMs = hierarchy.frameTimeMs;
 
-                MergeWorkerHierarchy(root, BuildHierarchy(hierarchy, sort));
+                MergeWorkerHierarchy(root, BuildHierarchy(hierarchy, sort, includeSamples));
                 labels.Add(ProfilerThreadLabels.FormatWorkerLabel(workerIndex));
             }
 
@@ -170,9 +172,10 @@ namespace Conduit
             target.SelfMs += source.SelfMs;
             target.GcBytes += source.GcBytes;
             target.Calls += source.Calls;
+            target.Sources.AddRange(source.Sources);
         }
 
-        static HierarchyRow BuildHierarchy(HierarchyFrameDataView hierarchy, string sort)
+        static HierarchyRow BuildHierarchy(HierarchyFrameDataView hierarchy, string sort, bool includeSamples)
             => BuildHierarchyRow(
                 hierarchy,
                 hierarchy.GetRootItemID(),
@@ -180,7 +183,8 @@ namespace Conduit
                 depth: 0,
                 identityHash: 0,
                 GetRowComparison(sort),
-                knownName: null
+                knownName: null,
+                includeSamples
             );
 
         static HierarchyRow BuildHierarchyRow(
@@ -190,7 +194,8 @@ namespace Conduit
             int depth,
             uint identityHash,
             Comparison<HierarchyRow> rowComparison,
-            string? knownName
+            string? knownName,
+            bool includeSamples
         )
         {
             var name = knownName ?? hierarchy.GetItemName(itemId) ?? "<unnamed>";
@@ -204,7 +209,6 @@ namespace Conduit
 
             var row = new HierarchyRow
             {
-                ItemId = itemId,
                 Parent = parent,
                 Name = name,
                 Depth = depth,
@@ -214,6 +218,14 @@ namespace Conduit
                 GcBytes = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnGcMemory),
                 Calls = ReadColumn(hierarchy, itemId, HierarchyFrameDataView.columnCalls),
             };
+            if (includeSamples)
+            {
+                // hierarchy item IDs belong to this view; only raw sample indices survive its disposal.
+                using var pooledSamples = ConduitPool.GetPooledList<int>(out var samples);
+                hierarchy.GetItemRawFrameDataViewIndices(itemId, samples);
+                foreach (var sample in samples)
+                    row.Sources.Add((hierarchy.threadIndex, sample));
+            }
 
             using var pooledChildren = ConduitPool.GetPooledList<int>(out var children);
             hierarchy.GetItemChildren(itemId, children);
@@ -240,7 +252,8 @@ namespace Conduit
                                 includeSeparator: true
                             ),
                             rowComparison,
-                            childName
+                            childName,
+                            includeSamples
                         )
                     );
                 }
@@ -277,7 +290,7 @@ namespace Conduit
 
             if (selector.IndexOf('/') >= 0)
                 foreach (var row in rows)
-                    if (string.Equals(BuildDisplayPath(row), selector, StringComparison.OrdinalIgnoreCase))
+                    if (MatchesSample(row, BuildDisplayPath(row), selector))
                         return row;
 
             using var pooledExactMatches = ConduitPool.GetPooledList<HierarchyRow>(out var exactMatches);
@@ -287,7 +300,7 @@ namespace Conduit
 
             if (exactMatches.Count == 0)
                 foreach (var row in rows)
-                    if (string.Equals(row.Name, selector, StringComparison.OrdinalIgnoreCase))
+                    if (MatchesSample(row, BuildDisplayPath(row), selector))
                         exactMatches.Add(row);
 
             if (exactMatches.Count == 0)

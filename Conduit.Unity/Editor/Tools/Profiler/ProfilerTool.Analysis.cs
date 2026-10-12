@@ -1,5 +1,6 @@
 #nullable enable
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -10,232 +11,158 @@ namespace Conduit
 {
     static partial class ProfilerTool
     {
-        static void AppendCpuOverview(StringBuilder builder, List<FrameStats> frameStats, List<string> warnings)
+        /// <summary>Accumulates present observations; absent samples contribute zero over available frames.</summary>
+        internal sealed class SampleDistribution
         {
-            builder.AppendLine("Worst frames, sorted by cpu_ms:");
-            AppendFrameTable(builder, TopFrames(frameStats, static stats => stats.CpuMs));
-            builder.AppendLine();
+            internal readonly List<double> Values = new();
+            internal double Sum;
+            internal double Max;
+            internal int FramesOverThreshold;
 
-            var samples = CollectMainThreadSamples(frameStats, "cpu_ms");
-            builder.AppendLine("Interesting samples, sorted by actionable_cpu_ms:");
-            AppendSampleTable(builder, samples, includeRank: true);
-            AppendWarnings(builder, warnings);
+            internal void Add(double value, double cpuMs, double? thresholdMs)
+            {
+                Values.Add(value);
+                Sum += value;
+                Max = Math.Max(Max, value);
+                if (thresholdMs.HasValue && cpuMs > thresholdMs.Value)
+                    FramesOverThreshold++;
+            }
+
+            internal (double Mean, double P95) Summarize(int availableFrames)
+            {
+                if (availableFrames == 0)
+                    return default;
+                Values.Sort();
+                // nearest-rank percentile, with implicit zeros for frames where this path was absent.
+                var index = (int)Math.Ceiling(availableFrames * 0.95) - 1 - (availableFrames - Values.Count);
+                return (Sum / availableFrames, index < 0 ? 0 : Values[index]);
+            }
         }
 
-        static void AppendGcOverview(StringBuilder builder, List<FrameStats> frameStats, List<string> warnings)
+        sealed class RangeSample
         {
-            builder.AppendLine("Worst frames, sorted by gc_kb:");
-            AppendFrameTable(builder, TopFrames(frameStats, static stats => stats.GcBytes));
-            builder.AppendLine();
-
-            builder.AppendLine("Interesting samples, sorted by gc_kb:");
-            AppendSampleTable(builder, CollectMainThreadSamples(frameStats, "gc_kb"), includeRank: true);
-            AppendWarnings(builder, warnings);
+            internal readonly SampleDistribution Distribution = new();
+            internal string Path = "";
+            internal string Reference = "";
+            internal int WorstFrame;
+            internal int WorstUnityFrame;
+            internal double Rank;
+            internal bool Interesting;
         }
 
-        static List<SampleRow> CollectMainThreadSamples(List<FrameStats> frames, string mode)
+        static void AppendRangeOverview(
+            StringBuilder builder, List<FrameStats> frames, string mode, string selector,
+            string thread, double? thresholdMs, List<string> warnings)
         {
-            using var pooledBestByPath = ConduitPool.GetPooledDictionary<string, SampleRow>(out var bestByPath);
-            // profiler hierarchies repeat across frames; share their path strings instead of rebuilding each copy.
-            using var pooledIdentityPaths = ConduitPool.GetPooledDictionary<
-                (string Parent, string Segment, int Occurrence),
-                string
-            >(out var identityPaths);
-            using var pooledDisplayPaths = ConduitPool.GetPooledDictionary<
-                (string Parent, string Name),
-                string
-            >(out var displayPaths);
+            (string Path, uint Identity)? selectedIdentity = null;
+            if (TryParseReference(selector, out var reference))
+            {
+                if (reference.Kind != 'h')
+                    throw new InvalidOperationException("Use a hierarchy reference or sample name for range statistics.");
+                thread = reference.Thread;
+                selectedIdentity = ResolveReferencedIdentity(reference);
+            }
+            if (!IsThreadSelector(thread))
+                throw new ArgumentException($"Invalid thread '{thread}'. Use main, render, all_workers, or worker<N>.");
+
+            var samples = new Dictionary<(string Path, uint Identity), RangeSample>();
+            var available = 0;
             foreach (var frame in frames)
             {
-                if (!TryResolveThread(frame.FrameIndex, "main", out var thread, out _))
+                if (!TryBuildBrowseHierarchy(frame.FrameIndex, thread, "total_ms", out var root,
+                        out var frameMs, out _, out _, out _, includeSamples: false))
                     continue;
-
-                using var hierarchy = ProfilerDriver.GetHierarchyFrameDataView(
-                    frame.FrameIndex,
-                    thread.Index,
-                    HierarchyFrameDataView.ViewModes.MergeSamplesWithTheSameName,
-                    HierarchyFrameDataView.columnDontSort,
-                    false
-                );
-
-                if (!hierarchy.valid)
-                    continue;
-
-                CollectSampleChildren(
-                    hierarchy,
-                    hierarchy.GetRootItemID(),
-                    frame.FrameIndex,
-                    frame.FrameOrdinal,
-                    hierarchy.frameTimeMs,
-                    bestByPath,
-                    mode,
-                    identityPaths,
-                    displayPaths,
-                    identityPath: "",
-                    displayPath: "",
-                    depth: 0
-                );
+                available++;
+                using var pooledRows = ConduitPool.GetPooledList<HierarchyRow>(out var rows);
+                Flatten(root, rows);
+                AssignPublicIds(rows);
+                foreach (var row in rows)
+                {
+                    var path = BuildDisplayPath(row);
+                    if (selectedIdentity.HasValue
+                        ? (path, row.IdentityHash) != selectedIdentity.Value
+                        : !string.IsNullOrEmpty(selector) && !MatchesSample(row, path, selector))
+                        continue;
+                    var sample = new SampleRow
+                    {
+                        Name = row.Name, TotalMs = row.TotalMs, SelfMs = row.SelfMs,
+                        GcBytes = row.GcBytes, ChildCount = row.Children.Count, FrameTimeMs = frameMs,
+                    };
+                    if (string.IsNullOrEmpty(selector) && (ReferenceEquals(row, root) || IsOverviewContainerSample(sample)))
+                        continue;
+                    if (!samples.TryGetValue((path, row.IdentityHash), out var entry))
+                    {
+                        entry = new() { Path = path };
+                        samples.Add((path, row.IdentityHash), entry);
+                    }
+                    var value = mode == "gc_kb" ? row.GcBytes / 1024 : row.TotalMs;
+                    if (entry.Distribution.Values.Count == 0 || value > entry.Distribution.Max)
+                    {
+                        entry.WorstFrame = frame.FrameOrdinal;
+                        entry.WorstUnityFrame = frame.FrameIndex;
+                        entry.Reference = row.PublicId!;
+                    }
+                    entry.Distribution.Add(value, row.TotalMs, thresholdMs);
+                    entry.Interesting |= !string.IsNullOrEmpty(selector) || ShouldIncludeOverviewSample(sample, mode);
+                    entry.Rank = Math.Max(entry.Rank, GetOverviewScore(sample, mode));
+                }
             }
 
-            var rows = new List<SampleRow>(bestByPath.Values);
-            rows.Sort((left, right) => CompareOverviewSamples(left, right, mode));
-            return rows;
+            builder.AppendLine($"Sample thread: {thread}; available frames: {available}/{frames.Count}; missing: {frames.Count - available}");
+            builder.AppendLine(mode == "gc_kb"
+                ? "Per-frame GC totals, KB. Absent samples count as zero; missing frames are excluded."
+                : "Per-frame inclusive totals, ms. Absent samples count as zero; missing frames are excluded.");
+            if (thread == "all_workers")
+                builder.AppendLine("Worker CPU is summed across threads; it is not elapsed frame time.");
+            builder.AppendLine("p95 uses nearest rank. Paths are measured separately; parent and child totals overlap.");
+
+            var ranked = new List<RangeSample>();
+            foreach (var sample in samples.Values)
+                if (sample.Interesting)
+                    ranked.Add(sample);
+            ranked.Sort((left, right) =>
+            {
+                var result = right.Rank.CompareTo(left.Rank);
+                return result != 0 ? result : string.CompareOrdinal(left.Path, right.Path);
+            });
+
+            builder.Append("mean      p95       max       worst_frame  unity_frame  ");
+            if (thresholdMs.HasValue)
+                builder.Append($"frames>{ProfilerValueFormatter.FormatNumber(thresholdMs.Value)}ms  ");
+            builder.AppendLine("reference  sample");
+            for (var index = 0; index < Math.Min(OverviewRowLimit, ranked.Count); index++)
+            {
+                var sample = ranked[index];
+                var (mean, p95) = sample.Distribution.Summarize(available);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(mean), 10);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(p95), 10);
+                AppendPadded(builder, ProfilerValueFormatter.FormatNumber(sample.Distribution.Max), 10);
+                AppendPadded(builder, sample.WorstFrame, 13);
+                AppendPadded(builder, sample.WorstUnityFrame, 13);
+                if (thresholdMs.HasValue)
+                    AppendPadded(builder, $"{sample.Distribution.FramesOverThreshold}/{available}", 14);
+                builder.Append(MakeReference(sample.WorstUnityFrame, thread, 'h', sample.Reference))
+                    .Append("  ").AppendLine(ProfilerValueFormatter.FormatSamplePath(sample.Path));
+            }
+            if (ranked.Count > OverviewRowLimit)
+                builder.AppendLine($"{ranked.Count - OverviewRowLimit} more paths omitted; select root to narrow the report.");
+            if (ranked.Count == 0)
+                builder.AppendLine("No matching samples in the available frames.");
+
+            if (string.IsNullOrEmpty(selector))
+            {
+                builder.AppendLine();
+                builder.AppendLine(mode == "gc_kb" ? "Worst frames by GC:" : "Worst frames by CPU:");
+                AppendFrameTable(builder, TopFrames(frames, stats => mode == "gc_kb" ? stats.GcBytes : stats.CpuMs));
+            }
+            AppendWarnings(builder, warnings);
         }
 
-        static void CollectSampleChildren(
-            HierarchyFrameDataView hierarchy,
-            int itemId,
-            int frameIndex,
-            int frameOrdinal,
-            float frameTimeMs,
-            Dictionary<string, SampleRow> bestByPath,
-            string mode,
-            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
-            Dictionary<(string Parent, string Name), string> displayPaths,
-            string identityPath,
-            string displayPath,
-            int depth
-        )
-        {
-            using var pooledChildren = ConduitPool.GetPooledList<int>(out var children);
-            hierarchy.GetItemChildren(itemId, children);
-            using var pooledOccurrences = ConduitPool.GetPooledDictionary<string, int>(out var occurrences);
-            foreach (var child in children)
-            {
-                var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
-                var segment = NormalizeIdentitySegment(childName);
-                occurrences.TryGetValue(segment, out var occurrence);
-                occurrences[segment] = ++occurrence;
-
-                GetSamplePaths(
-                    identityPaths,
-                    displayPaths,
-                    identityPath,
-                    displayPath,
-                    childName,
-                    segment,
-                    occurrence,
-                    out var childIdentityPath,
-                    out var childDisplayPath
-                );
-
-                CollectSampleTree(
-                    hierarchy,
-                    child,
-                    frameIndex,
-                    frameOrdinal,
-                    frameTimeMs,
-                    bestByPath,
-                    mode,
-                    identityPaths,
-                    displayPaths,
-                    childIdentityPath,
-                    childDisplayPath,
-                    depth
-                );
-            }
-        }
-
-        static void CollectSampleTree(
-            HierarchyFrameDataView hierarchy,
-            int itemId,
-            int frameIndex,
-            int frameOrdinal,
-            float frameTimeMs,
-            Dictionary<string, SampleRow> bestByPath,
-            string mode,
-            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
-            Dictionary<(string Parent, string Name), string> displayPaths,
-            string identityPath,
-            string displayPath,
-            int depth
-        )
-        {
-            using var pooledChildren = ConduitPool.GetPooledList<int>(out var children);
-            hierarchy.GetItemChildren(itemId, children);
-            var sample = ReadSampleRow(
-                hierarchy,
-                itemId,
-                frameIndex,
-                frameOrdinal,
-                frameTimeMs,
-                displayPath,
-                depth,
-                children.Count
-            );
-            if (ShouldIncludeOverviewSample(sample, mode)
-                && (!bestByPath.TryGetValue(identityPath, out var existing)
-                    || CompareOverviewSamples(sample, existing, mode) < 0))
-                bestByPath[identityPath] = sample;
-            if (children.Count == 0)
-                return;
-
-            using var pooledOccurrences = ConduitPool.GetPooledDictionary<string, int>(out var occurrences);
-            foreach (var child in children)
-            {
-                var childName = hierarchy.GetItemName(child) ?? "<unnamed>";
-                var segment = NormalizeIdentitySegment(childName);
-                occurrences.TryGetValue(segment, out var occurrence);
-                occurrences[segment] = ++occurrence;
-
-                GetSamplePaths(
-                    identityPaths,
-                    displayPaths,
-                    identityPath,
-                    displayPath,
-                    childName,
-                    segment,
-                    occurrence,
-                    out var childIdentityPath,
-                    out var childDisplayPath
-                );
-
-                CollectSampleTree(
-                    hierarchy,
-                    child,
-                    frameIndex,
-                    frameOrdinal,
-                    frameTimeMs,
-                    bestByPath,
-                    mode,
-                    identityPaths,
-                    displayPaths,
-                    childIdentityPath,
-                    childDisplayPath,
-                    depth + 1
-                );
-            }
-        }
-
-        static void GetSamplePaths(
-            Dictionary<(string Parent, string Segment, int Occurrence), string> identityPaths,
-            Dictionary<(string Parent, string Name), string> displayPaths,
-            string identityPath,
-            string displayPath,
-            string childName,
-            string segment,
-            int occurrence,
-            out string childIdentityPath,
-            out string childDisplayPath)
-        {
-            var identityKey = (identityPath, segment, occurrence);
-            if (!identityPaths.TryGetValue(identityKey, out childIdentityPath))
-            {
-                childIdentityPath = string.IsNullOrEmpty(identityPath)
-                    ? $"{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]"
-                    : $"{identityPath}/{segment}[{occurrence.ToString(CultureInfo.InvariantCulture)}]";
-                identityPaths.Add(identityKey, childIdentityPath);
-            }
-
-            var displayKey = (displayPath, childName);
-            if (!displayPaths.TryGetValue(displayKey, out childDisplayPath))
-            {
-                childDisplayPath = string.IsNullOrEmpty(displayPath)
-                    ? childName
-                    : $"{displayPath}/{childName}";
-                displayPaths.Add(displayKey, childDisplayPath);
-            }
-        }
+        static bool MatchesSample(HierarchyRow row, string path, string selector)
+            => string.Equals(row.Name, selector, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(ProfilerValueFormatter.FormatSampleName(row.Name), selector, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(path, selector, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(ProfilerValueFormatter.FormatSamplePath(path), selector, StringComparison.OrdinalIgnoreCase);
 
         static FrameStats ReadFrameStats(
             int frameIndex,

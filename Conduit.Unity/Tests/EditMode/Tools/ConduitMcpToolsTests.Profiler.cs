@@ -281,4 +281,151 @@ public sealed partial class ConduitMcpToolsTests
         Assert.That(snapshot, Does.Contain("\"profiler_status_line\""));
         Assert.That(snapshot, Does.Contain("Profiler:"));
     }
+
+    [Test]
+    public void ProfilerAnalysis_DistributionIncludesAbsentFramesAndCountsStrictExceedances()
+    {
+        var distribution = new ProfilerTool.SampleDistribution();
+        distribution.Add(0.5, 0.5, 0.5);
+        distribution.Add(2, 2, 0.5);
+        var (mean, p95) = distribution.Summarize(20);
+        Assert.That(mean, Is.EqualTo(0.125));
+        Assert.That(p95, Is.EqualTo(0.5));
+        Assert.That(distribution.Max, Is.EqualTo(2));
+        Assert.That(distribution.FramesOverThreshold, Is.EqualTo(1));
+        Assert.That(distribution.Summarize(40).P95, Is.Zero);
+        Assert.That(new ProfilerTool.SampleDistribution().Summarize(0), Is.EqualTo((0.0, 0.0)));
+    }
+
+    [Test]
+    public void ProfilerAnalysis_ReferencesCarryTheirTargetAndRejectReplacedFrames()
+    {
+        var text = ProfilerTool.FormatReference("captureA", 8137, "all_workers", 'c', "row~producer");
+        var reference = ProfilerTool.ParseReference(text, "captureA");
+        Assert.That(reference.Frame, Is.EqualTo(8137));
+        Assert.That(reference.Thread, Is.EqualTo("all_workers"));
+        Assert.That(reference.Kind, Is.EqualTo('c'));
+        Assert.That(reference.Key, Is.EqualTo("row~producer"));
+        Assert.Throws<InvalidOperationException>(() => ProfilerTool.ParseReference(text, "captureB"));
+        Assert.Throws<ArgumentException>(() => ProfilerTool.ParseReference("p:broken", "captureA"));
+    }
+
+    [Test]
+    public void ProfilerAnalysis_FlowAttributionRequiresOneRecordedSubmittingScope()
+    {
+        var points = new List<ProfilerTool.FlowPoint>
+        {
+            new(3, 0, 11, Unity.Profiling.ProfilerFlowEventType.Begin, 10),
+            new(3, 4, 50, Unity.Profiling.ProfilerFlowEventType.ParallelNext, 20),
+            new(3, 4, 60, Unity.Profiling.ProfilerFlowEventType.Next, 30),
+        };
+        Assert.That(ProfilerTool.FindFlowSource(points, 40, out var source), Is.EqualTo("linked"));
+        Assert.That(source.Sample, Is.EqualTo(11));
+        Assert.That(source.Thread, Is.Zero);
+        points.Add(new(3, 0, 12, Unity.Profiling.ProfilerFlowEventType.Begin, 15));
+        Assert.That(ProfilerTool.FindFlowSource(points, 40, out _), Is.EqualTo("ambiguous"));
+        Assert.That(ProfilerTool.FindFlowSource(points, 5, out _), Is.EqualTo("missing begin"));
+        Assert.That(ProfilerTool.FindFlowSource(Array.Empty<ProfilerTool.FlowPoint>(), 40, out _), Is.EqualTo("missing begin"));
+    }
+
+    [Test]
+    public void ProfilerAnalysis_JobScopeIndexHandlesInnerMarkersEndMarkersAndNestedJobs()
+    {
+        var names = new[] { "Thread", "EndJob", "BeginJob", "OuterJob", "InnerMarker", "BeginJob", "NestedJob", "EndJob", "OuterTail", "EndJob", "Unrelated" };
+        var scopes = ProfilerTool.BuildJobScopeIndex(names.Length, index => names[index]);
+        Assert.That(scopes[1], Is.EqualTo(-1), "a capture may begin with a job's unmatched end");
+        Assert.That(scopes[4], Is.EqualTo(3));
+        Assert.That(scopes[7], Is.EqualTo(6));
+        Assert.That(scopes[8], Is.EqualTo(3));
+        Assert.That(scopes[9], Is.EqualTo(3));
+        Assert.That(scopes[10], Is.EqualTo(-1));
+    }
+
+    [Test]
+    public void ProfilerAnalysis_CompletionIntervalsClipAndDoNotDoubleCountNestedWork()
+    {
+        var idle = new List<(ulong Start, ulong End)> { (5, 20), (12, 18), (45, 70) };
+        var all = new List<(ulong Start, ulong End)>(idle) { (15, 35), (25, 30) };
+        var idleNs = ProfilerTool.UnionDuration(idle, 10, 50);
+        var combinedNs = ProfilerTool.UnionDuration(all, 10, 50);
+        Assert.That(idleNs, Is.EqualTo(15));
+        Assert.That(combinedNs - idleNs, Is.EqualTo(15));
+        Assert.That(40 - combinedNs, Is.EqualTo(10));
+    }
+
+    [Test]
+    public async Task ProfilerAnalysis_ReferencesOpenRecordedCallsAndRejectReloadedCaptures()
+    {
+        var markerName = $"Conduit.ProfilerTest.{Guid.NewGuid():N}";
+        var marker = new Unity.Profiling.ProfilerMarker(markerName);
+        EditorApplication.update += RecordSamples;
+        try
+        {
+            var capture = await ProfilerTool.RecordAsync(new[]
+            {
+                "action=capture", "target=edit_mode", "frames=5", "delay_seconds=0",
+            });
+            Assert.That(capture.outcome, Is.EqualTo(ToolOutcome.Success), capture.diagnostic);
+        }
+        finally
+        {
+            EditorApplication.update -= RecordSamples;
+        }
+
+        var overview = ProfilerTool.Overview(new[] { $"root={markerName}", "threshold_ms=0" });
+        Assert.That(overview.outcome, Is.EqualTo(ToolOutcome.Success), overview.diagnostic);
+        var row = Reference(overview.return_value, 'h');
+        var selected = Browse(row);
+        var calls = Browse(Reference(selected, 'c'), "start_ms");
+        var invocations = System.Text.RegularExpressions.Regex.Matches(calls, @"p:[^\s:]+:\d+:t\d+:s\d+")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(match => match.Value)
+            .ToArray();
+        Assert.That(invocations.Length, Is.GreaterThanOrEqualTo(2));
+        Assert.That(invocations.Distinct().Count(), Is.EqualTo(invocations.Length));
+        foreach (var invocation in invocations)
+            Assert.That(Browse(invocation), Does.Contain(markerName));
+
+        var byReference = ProfilerTool.Overview(new[] { $"root={row}", "thread=invalid" });
+        Assert.That(byReference.outcome, Is.EqualTo(ToolOutcome.Success), byReference.diagnostic);
+        Assert.That(byReference.return_value, Does.Contain(markerName));
+
+        var path = Path.Combine(Path.GetTempPath(), $"conduit-profiler-{Guid.NewGuid():N}.data");
+        try
+        {
+            var saved = await ProfilerTool.RecordAsync(new[] { "action=save", $"file_name={path}" });
+            Assert.That(saved.outcome, Is.EqualTo(ToolOutcome.Success), saved.diagnostic);
+            var loaded = await ProfilerTool.RecordAsync(new[] { "action=load", $"file_name={path}" });
+            Assert.That(loaded.outcome, Is.EqualTo(ToolOutcome.Success), loaded.diagnostic);
+            Assert.That(ProfilerTool.Browse(new[] { $"root={row}" }).outcome, Is.Not.EqualTo(ToolOutcome.Success));
+            Assert.That(ProfilerTool.Browse(new[] { $"root={invocations[0]}" }).outcome, Is.Not.EqualTo(ToolOutcome.Success));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+
+        void RecordSamples()
+        {
+            // repeated markers exercise the hierarchy-to-raw mapping after the hierarchy view is disposed.
+            for (var index = 0; index < 2; index++)
+                using (marker.Auto())
+                    System.Threading.Thread.SpinWait(1000);
+        }
+
+        static string Reference(string text, char kind)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(text, $@"p:[^\s:]+:\d+:[^\s:]+:{kind}\S+");
+            Assert.That(match.Success, Is.True, text);
+            return match.Value;
+        }
+
+        static string Browse(string reference, string sort = "total_ms")
+        {
+            // the reference must preserve its original target even when explicit selectors are invalid.
+            var result = ProfilerTool.Browse(new[] { $"root={reference}", "frame=invalid", "thread=invalid", $"sort={sort}" });
+            Assert.That(result.outcome, Is.EqualTo(ToolOutcome.Success), result.diagnostic);
+            return result.return_value;
+        }
+    }
 }

@@ -16,4 +16,7 @@ public enum ProfilerBrowseSort
 
     [JsonStringEnumMemberName("calls")]
     Calls,
+
+    [JsonStringEnumMemberName("start_ms")]
+    StartMs,
 }

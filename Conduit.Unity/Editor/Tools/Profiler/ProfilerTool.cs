@@ -80,6 +80,17 @@ namespace Conduit
                 var options = new ProfilerOptions(args);
                 var mode = options.GetString("mode", "cpu_ms");
                 var frameRange = options.GetString("frame_range", "0..^1");
+                var rootSelector = options.GetString("root", "");
+                var threadSelector = options.GetString("thread", "main");
+                var thresholdText = options.GetString("threshold_ms", "");
+                double? threshold = null;
+                if (!string.IsNullOrEmpty(thresholdText))
+                {
+                    if (!double.TryParse(thresholdText, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                        || double.IsNaN(value) || double.IsInfinity(value) || value < 0)
+                        throw new ArgumentException("threshold_ms must be a finite, nonnegative number.");
+                    threshold = value;
+                }
                 var frames = ResolveFrameRange(frameRange, out var warnings, out var firstFrameOrdinal);
                 if (frames.Count == 0)
                     return BridgeCommandResult.Success("No profiler frames available. Use profiler_record action=capture first.");
@@ -103,14 +114,12 @@ namespace Conduit
                 using var pooledBuilder = ConduitPool.GetStringBuilder(out var builder);
                 builder.Append("Threads: ");
                 builder.AppendLine(ProfilerThreadLabels.FormatThreadLabels(threadLabels));
+                builder.AppendLine($"Capture: {captureId}; frames: {firstFrameOrdinal}..{firstFrameOrdinal + frames.Count - 1}; Unity indices: {frames[0]}..{frames[^1]}");
                 builder.Append("Sample count: ");
                 builder.AppendInvariant(sampleCount).AppendLine();
                 builder.AppendLine();
 
-                if (mode == "gc_kb")
-                    AppendGcOverview(builder, frameStats, warnings);
-                else
-                    AppendCpuOverview(builder, frameStats, warnings);
+                AppendRangeOverview(builder, frameStats, mode, rootSelector, threadSelector, threshold, warnings);
 
                 return BridgeCommandResult.Success(builder.ToTrimmedString());
             }
@@ -133,7 +142,16 @@ namespace Conduit
                 var limit = options.GetInt("limit", 50, 1, MaxBrowseLimit);
                 var onlyNonTrivial = options.GetBool("only_non_trivial", true);
 
-                var frame = ResolveSingleFrame(frameSelector, out var warnings);
+                var hasReference = TryParseReference(rootSelector, out var reference);
+                var warnings = new List<string>();
+                var frame = hasReference ? reference.Frame : ResolveSingleFrame(frameSelector, out warnings);
+                if (hasReference)
+                {
+                    threadSelector = reference.Thread;
+                    rootSelector = reference.Key.Split('~')[0];
+                    if (reference.Kind == 's')
+                        return BrowseInvocation(reference, limit);
+                }
                 if (frame < 0)
                     return BridgeCommandResult.Success("No profiler frames available. Use profiler_record action=capture first.");
 
@@ -156,9 +174,16 @@ namespace Conduit
                 if (selectedRoot == null)
                     return Failure("Unable to browse profiler hierarchy.", $"Root '{rootSelector}' was not found.", null);
 
+                if (hasReference && reference.Kind == 'c')
+                    return BrowseCalls(frame, threadSelector, selectedRoot, reference.Key, sort, limit);
+                if (sort == "start_ms")
+                    return Failure("Unable to sort hierarchy by start time.", "Open the calls reference, then use sort=start_ms.", null);
+
                 using var pooledVisibleRows = ConduitPool.GetPooledSet<HierarchyRow>(out var visibleRows);
                 SelectVisibleRows(selectedRoot, depth, sort, onlyNonTrivial, frameTimeMs, visibleRows);
                 using var pooledBuilder = ConduitPool.GetStringBuilder(out var builder);
+                AppendFrameIdentity(builder, frame, threadSelector);
+                var frameToken = GetFrameToken(frame);
                 if (!string.IsNullOrEmpty(threadSummary))
                 {
                     builder.AppendLine(threadSummary);
@@ -167,8 +192,8 @@ namespace Conduit
 
                 builder.AppendLine(
                     aggregateWorkerCount > 0
-                        ? "id        depth  total_ms  mean_ms  min_ms  max_ms  workers  self_ms  gc_kb  calls  frame_%  name"
-                        : "id        depth  total_ms  self_ms  gc_kb  calls  frame_%  name"
+                        ? $"{"reference",-42}{"depth",-7}{"cpu_sum_ms",-12}{"worker_mean_ms",-16}{"worker_min_ms",-15}{"worker_max_ms",-15}{"workers",-9}{"self_ms",-9}{"gc_kb",-7}{"calls",-7}{"capacity_%",-12}name"
+                        : $"{"reference",-42}{"depth",-7}{"total_ms",-12}{"self_ms",-9}{"gc_kb",-7}{"calls",-7}{"frame_%",-12}name"
                 );
 
                 var printed = 0;
@@ -189,7 +214,8 @@ namespace Conduit
                         break;
                     }
 
-                    AppendBrowseRow(builder, row, selectedRoot.Depth, frameTimeMs, aggregateWorkerCount);
+                    AppendBrowseRow(builder, row, selectedRoot.Depth, frameTimeMs, aggregateWorkerCount,
+                        FormatReference(frameToken, frame, threadSelector, 'h', row.PublicId!));
                     printed++;
 
                     if (aggregateWorkerCount > 0)
@@ -199,6 +225,8 @@ namespace Conduit
                             pendingRows.Add(row.Children[index]);
                 }
 
+                if (!string.IsNullOrWhiteSpace(rootSelector))
+                    AppendSelectedDetails(builder, frame, threadSelector, selectedRoot, limit);
                 AppendWarnings(builder, warnings);
                 return BridgeCommandResult.Success(builder.ToTrimmedString());
             }
@@ -297,22 +325,16 @@ namespace Conduit
 
         struct SampleRow
         {
-            internal int FrameIndex;
-            internal int FrameOrdinal;
             internal string Name;
-            internal string DisplayPath;
-            internal int Depth;
             internal int ChildCount;
             internal double TotalMs;
             internal double SelfMs;
             internal double GcBytes;
-            internal double Calls;
             internal float FrameTimeMs;
         }
 
         internal sealed class HierarchyRow
         {
-            internal int ItemId;
             internal HierarchyRow? Parent;
             internal string? PublicId;
             internal string Name = string.Empty;
@@ -327,6 +349,7 @@ namespace Conduit
             internal double MaxTotalMs;
             internal List<HierarchyRow> Children { get; } = new();
             internal Dictionary<string, HierarchyRow>? MergedChildren;
+            internal List<(int Thread, int Sample)> Sources { get; } = new();
         }
 
     }

@@ -174,6 +174,9 @@ namespace Conduit
         {
             var matchMain = string.Equals(selector, "main", StringComparison.OrdinalIgnoreCase);
             var matchRender = string.Equals(selector, "render", StringComparison.OrdinalIgnoreCase);
+            var requestedThreadIndex = -1;
+            var matchIndex = selector.StartsWith("t", StringComparison.Ordinal)
+                             && int.TryParse(selector.AsSpan(1), out requestedThreadIndex);
             var requestedWorkerIndex = 0;
             var matchWorker = selector.StartsWith("worker", StringComparison.OrdinalIgnoreCase)
                               && int.TryParse(
@@ -182,7 +185,7 @@ namespace Conduit
                                   CultureInfo.InvariantCulture,
                                   out requestedWorkerIndex
                               );
-            if (!matchMain && !matchRender && !matchWorker)
+            if (!IsThreadSelector(selector))
             {
                 thread = default;
                 diagnostic = $"Profiler thread '{selector}' was not found. Use main, render, all_workers, or worker<N>.";
@@ -202,7 +205,8 @@ namespace Conduit
                     raw.threadName ?? $"Thread {threadIndex.ToString(CultureInfo.InvariantCulture)}",
                     raw.threadGroupName ?? string.Empty
                 );
-                if (matchMain && ProfilerThreadLabels.IsMainThread(candidate)
+                if (matchIndex && threadIndex == requestedThreadIndex
+                    || matchMain && ProfilerThreadLabels.IsMainThread(candidate)
                     || matchRender && ProfilerThreadLabels.IsRenderThread(candidate)
                     || matchWorker
                     && ProfilerThreadLabels.TryParseJobWorkerIndex(candidate, out var workerIndex)
@@ -219,6 +223,17 @@ namespace Conduit
                 ? "Profiler thread was not found."
                 : $"No profiler threads are available for frame {frameIndex}.";
             return false;
+        }
+
+        static bool IsThreadSelector(string selector)
+        {
+            if (string.Equals(selector, "main", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(selector, "render", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(selector, "all_workers", StringComparison.OrdinalIgnoreCase))
+                return true;
+            var prefix = selector.StartsWith("worker", StringComparison.OrdinalIgnoreCase) ? 6
+                : selector.StartsWith("t", StringComparison.Ordinal) ? 1 : 0;
+            return prefix > 0 && int.TryParse(selector.AsSpan(prefix), out var index) && index >= 0;
         }
 
         static List<int> GetAvailableFrames()

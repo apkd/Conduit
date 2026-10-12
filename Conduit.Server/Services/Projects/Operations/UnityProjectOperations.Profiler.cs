@@ -42,6 +42,9 @@ public sealed partial class UnityProjectOperations
         string projectPath,
         ProfilerOverviewMode mode,
         string frameRange,
+        string root,
+        string thread,
+        double? thresholdMs,
         CT ct
     ) => EnqueueAsync(
         projectPath,
@@ -52,6 +55,9 @@ public sealed partial class UnityProjectOperations
             [
                 $"mode={mode.ToWireName()}",
                 $"frame_range={frameRange}",
+                $"root={root}",
+                $"thread={thread}",
+                $"threshold_ms={thresholdMs?.ToString(CultureInfo.InvariantCulture) ?? string.Empty}",
             ],
         },
         ct

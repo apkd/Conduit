@@ -58,7 +58,7 @@ namespace Conduit
             return typeSeparatorIndex < 0 ? value : value[(typeSeparatorIndex + 1)..].Trim();
         }
 
-        internal static string FormatNumber(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+        internal static string FormatNumber(double value) => value.ToString("0.####", CultureInfo.InvariantCulture);
 
         internal static string FormatOptionalNumber(double value) => value <= 0 ? "n/a" : FormatNumber(value);
 

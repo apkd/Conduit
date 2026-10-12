@@ -482,7 +482,7 @@ public sealed class UnityTools
     [McpServerTool(Name = CMD.ProfilerOverview, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
-        Summarizes Unity Profiler frames and main-thread hot samples.
+        Summarizes captured frames and sample costs: mean, p95, maximum, and worst-frame references.
         """
     )]
     public static Task<string> ProfilerOverview(
@@ -492,13 +492,20 @@ public sealed class UnityTools
         ProfilerOverviewMode mode = ProfilerOverviewMode.CpuMs,
         [Description("Available-frame ordinal range. Examples: 0..^1, ^120..^1, 10..50.")]
         string frameRange = "0..^1",
+        [Description("Optional sample name, path, or hierarchy reference to measure over the range.")]
+        string root = "",
+        [Description("Thread selector: main, render, all_workers, or worker<N>.")]
+        string thread = "main",
+        [Description("Optional nonnegative CPU threshold in milliseconds. Counts frames whose sample total exceeds it; does not filter frames.")]
+        double? thresholdMs = null,
         CancellationToken ct = default
-    ) => ToPlainTextToolResponseAsync(operations.ProfilerOverviewAsync(projectPath, mode, frameRange, ct));
+    ) => ToPlainTextToolResponseAsync(operations.ProfilerOverviewAsync(projectPath, mode, frameRange, root, thread, thresholdMs, ct));
 
     [McpServerTool(Name = CMD.ProfilerBrowse, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         """
-        Browses the sample hierarchy of a captured frame in the Unity Profiler.
+        Browses a captured frame. Open a row for submitting scopes and completion details;
+        follow calls or invocation references through root for individual timings and recorded evidence.
         """
     )]
     public static Task<string> ProfilerBrowse(
@@ -508,11 +515,11 @@ public sealed class UnityTools
         string frame = "selected",
         [Description("Thread selector: main, render, all_workers, or worker<N>.")]
         string thread = "main",
-        [Description("Root selector: empty root, an output id, slash-separated path, or exact marker/sample name.")]
+        [Description("Empty root, sample name/path, or returned reference. References carry their frame and thread; frame/thread arguments then do not override them.")]
         string root = "",
         [Description("Number of hierarchy levels to print. Clamped to 1..32.")]
         int depth = 3,
-        [Description("Sort metric: total_ms, self_ms, gc_bytes, or calls.")]
+        [Description("Sort metric: total_ms, self_ms, gc_bytes, calls, or start_ms (individual calls in execution order).")]
         ProfilerBrowseSort sort = ProfilerBrowseSort.TotalMs,
         [Description("Maximum number of rows to print. Clamped to 1..200.")]
         int limit = 50,

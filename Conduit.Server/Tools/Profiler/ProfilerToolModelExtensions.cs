@@ -27,6 +27,7 @@ static class ProfilerToolModelExtensions
             ProfilerBrowseSort.SelfMs  => "self_ms",
             ProfilerBrowseSort.GcBytes => "gc_bytes",
             ProfilerBrowseSort.Calls   => "calls",
+            ProfilerBrowseSort.StartMs => "start_ms",
             _                          => sort.ToString(),
         };
 }
