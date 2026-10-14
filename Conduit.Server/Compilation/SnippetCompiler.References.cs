@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.CodeAnalysis;
 
 namespace Conduit;
 
@@ -16,7 +15,7 @@ public sealed partial class SnippetCompiler
             references.PreserveSnippets,
             references.SessionInstanceId,
             references.Failure
-        );
+        ) { ReferenceSet = references.ReferenceSet };
     }
 
     async Task<ReferenceSetResult> GetReferencesAsync(
@@ -140,34 +139,23 @@ public sealed partial class SnippetCompiler
                         resolvedPaths[pair.Key] = pair.Value;
                 }
 
-                var metadataReferences = new List<MetadataReference>(manifestReferences.Length);
-                var referencePaths = new List<string>(manifestReferences.Length);
-                foreach (var reference in manifestReferences)
+                CompilationReferenceSet references;
+                lock (referenceSharingGate)
                 {
-                    if (!resolvedPaths.TryGetValue(reference.Id, out var path))
-                        continue;
-
-                    try
-                    {
-                        metadataReferences.Add(CompilationMetadata.CreateReference(path));
-                        referencePaths.Add(path);
-                    }
-                    catch (Exception exception) when (exception is BadImageFormatException or IOException)
-                    {
-                        // native and facade-only files can appear in a Mono AppDomain location list.
-                    }
-                }
-
-                if (metadataReferences.Count == 0)
-                    return ReferenceSetResult.Failed(
-                        CompileError("Unity returned no valid managed compilation references.")
+                    references = CompilationReferenceSet.Create(
+                        session.SessionInstanceId,
+                        manifestReferences,
+                        resolvedPaths,
+                        sessionCaches.Values.Select(static value => value.References)
                     );
+                    if (references.References.Length == 0)
+                        return ReferenceSetResult.Failed(
+                            CompileError("Unity returned no valid managed compilation references.")
+                        );
 
-                var references = new CachedReferenceSet(
-                    metadataReferences.ToArray(),
-                    referencePaths.ToArray()
-                );
-                session.References = references;
+                    // publish before another cold target builds, so it can share these snapshots.
+                    session.References = references;
+                }
                 return ReferenceSetResult.Succeeded(
                     references,
                     handshake,

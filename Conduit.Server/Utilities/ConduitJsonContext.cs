@@ -2,6 +2,8 @@ using System.Text.Json.Serialization;
 
 namespace Conduit;
 
+// fast-path generation treats the shared DTO fields and wrapper properties as conflicting
+// JSON names, even though fields are excluded. Metadata mode correctly filters them first.
 [JsonSourceGenerationOptions(
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     GenerationMode = JsonSourceGenerationMode.Metadata,

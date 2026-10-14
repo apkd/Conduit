@@ -20,6 +20,8 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         "using static Conduit.Runtime.ConduitRuntimeSearch;",
     ];
 
+    // only cold reference construction is serialized; cache hits and compilation do not take this lock.
+    readonly object referenceSharingGate = new();
     readonly ConcurrentDictionary<string, TargetSessionCache> sessionCaches
         = new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, ReferenceFlight> referenceFlights
@@ -190,7 +192,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
             {
                 var inferred = SnippetNamespaceInference.InferNamespaces(
                     compile.Diagnostics,
-                    references.ReferencePaths!,
+                    references.References!,
                     inferredNamespaces,
                     sessionCache.NamespaceCandidates
                 );
@@ -304,7 +306,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
 
         internal string SessionInstanceId { get; } = sessionInstanceId;
         internal SemaphoreSlim ReferenceGate { get; } = new(1, 1);
-        internal CachedReferenceSet? References { get; set; }
+        internal CompilationReferenceSet? References { get; set; }
         internal ConcurrentDictionary<string, string[]> NamespaceCandidates { get; } = new(StringComparer.Ordinal);
 
         internal TargetCompilationCache GetCompilationCache(string? snippetRoot) =>
@@ -345,8 +347,10 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         bool PreserveSnippets,
         ToolExecutionResult? Failure)
     {
+        internal CompilationReferenceSet? ReferenceSet { get; init; }
+
         internal static ReferenceSetResult Succeeded(
-            CachedReferenceSet references,
+            CompilationReferenceSet references,
             BridgeProjectHandshake handshake,
             bool preserveSnippets) =>
             new(
@@ -355,7 +359,7 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
                 handshake.SessionInstanceId,
                 preserveSnippets,
                 null
-            );
+            ) { ReferenceSet = references };
 
         internal static ReferenceSetResult Failed(ToolExecutionResult failure) =>
             new(null, null, string.Empty, false, failure);
@@ -375,6 +379,4 @@ public sealed partial class SnippetCompiler(UnityBridgeClient bridgeClient)
         internal static ReferenceFetchBatchResult Failed(ToolExecutionResult failure) =>
             new(null, null, failure);
     }
-
-    sealed record CachedReferenceSet(MetadataReference[] References, string[] Paths);
 }

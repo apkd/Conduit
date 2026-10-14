@@ -134,10 +134,10 @@ public sealed partial class UnityBridgeClient
             ct
         );
 
-        // compilation phases exchange large player payloads; isolate each phase on a fresh fifo.
+        // keep the player isolation workaround; healthy editor connections remain reusable.
         if (!connection.IsConnected
-            || command.CommandType is BridgeCommandTypes.CompilationReferences
-                or BridgeCommandTypes.AssemblyBlob
+            || (handshake.IsPlayer && command.CommandType is BridgeCommandTypes.CompilationReferences
+                or BridgeCommandTypes.AssemblyBlob)
             || result.FailureKind is BridgeRuntimeFailureKind.ProcessExited
                 or BridgeRuntimeFailureKind.SendFailed
                 or BridgeRuntimeFailureKind.SendTimedOut

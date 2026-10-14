@@ -4,6 +4,7 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace Conduit;
 
@@ -25,6 +26,7 @@ static class MethodSignatureDecoder
         );
         var signature = definition.DecodeSignature(provider, genericContext: null);
         var parameters = GetParameters(reader, definition, signature.ParameterTypes);
+        var signatureBlob = reader.GetBlobBytes(definition.Signature);
         return new(
             declaringType,
             signature.ReturnType,
@@ -34,19 +36,10 @@ static class MethodSignatureDecoder
                 declaringType,
                 signature,
                 parameters
-            )
+            ),
+            // retain bytes from this read, but avoid hashing candidates used only for overload listing.
+            new(() => Convert.ToHexStringLower(SHA256.HashData(signatureBlob)))
         );
-    }
-
-    internal static byte[] ReadMethodSignatureBlob(string path, int metadataToken)
-    {
-        using var stream = File.OpenRead(path);
-        using var pe = new PEReader(stream);
-        var reader = pe.GetMetadataReader();
-        var definition = reader.GetMethodDefinition(
-            MetadataTokens.MethodDefinitionHandle(metadataToken & 0x00ff_ffff)
-        );
-        return reader.GetBlobBytes(definition.Signature);
     }
 
     static ImmutableArray<MethodParameter> GetParameters(
@@ -92,7 +85,8 @@ static class MethodSignatureDecoder
         CSharpType DeclaringType,
         CSharpType ReturnType,
         ImmutableArray<MethodParameter> Parameters,
-        string? UnsupportedReason
+        string? UnsupportedReason,
+        Lazy<string> SignatureHash
     );
 
     static bool HasAttribute(

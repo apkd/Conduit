@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.CodeAnalysis;
 
@@ -7,8 +6,6 @@ namespace Conduit;
 /// <summary>Resolves a loaded Mono method and compiles an ABI-identical replacement.</summary>
 public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
 {
-    readonly ConcurrentDictionary<string, DetourSessionCache> sessionCaches = new(StringComparer.Ordinal);
-
     internal async Task<PreparedDetour> PrepareAsync(
         string target,
         string selector,
@@ -24,12 +21,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         if (references.Failure is { } referenceFailure)
             return PreparedDetour.Failed(referenceFailure);
 
-        var sessionCache = GetSessionCache(
-            target,
-            references.SessionInstanceId,
-            references.References!,
-            references.Paths!
-        );
+        var sessionCache = references.ReferenceSet!.GetDetourCache();
         var resolution = sessionCache.GetMethodCatalog().Resolve(selector);
         if (resolution.Target is not { } method)
             return PreparedDetour.Failed(
@@ -210,7 +202,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             {
                 var inferred = SnippetNamespaceInference.InferNamespaces(
                     compilation.Diagnostics,
-                    references.Paths!,
+                    references.References!,
                     inferredNamespaces,
                     sessionCache.NamespaceCandidates
                 );
@@ -295,38 +287,6 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
             references,
             OptimizationLevel.Release
         );
-
-    DetourSessionCache GetSessionCache(
-        string target,
-        string sessionInstanceId,
-        MetadataReference[] standardReferences,
-        string[] referencePaths)
-    {
-        if (sessionCaches.TryGetValue(target, out var cached)
-            && cached.SessionInstanceId == sessionInstanceId)
-            return cached;
-
-        return sessionCaches.AddOrUpdate(
-            target,
-            static (_, state) => new(
-                state.SessionInstanceId,
-                state.StandardReferences,
-                state.ReferencePaths
-            ),
-            static (_, current, state) => current.SessionInstanceId == state.SessionInstanceId
-                ? current
-                : new(
-                    state.SessionInstanceId,
-                    state.StandardReferences,
-                    state.ReferencePaths
-                ),
-            (
-                SessionInstanceId: sessionInstanceId,
-                StandardReferences: standardReferences,
-                ReferencePaths: referencePaths
-            )
-        );
-    }
 
     static ToolExecutionResult ExceptionResult(string diagnostic) =>
         new() { Outcome = ToolOutcome.Exception, Diagnostic = diagnostic };

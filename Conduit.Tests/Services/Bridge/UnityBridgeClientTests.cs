@@ -46,6 +46,7 @@ public sealed partial class UnityBridgeClientTests
         readonly string projectPath;
         readonly int editorProcessId;
         readonly int handshakeProtocolVersion;
+        readonly string endpointKind;
         readonly bool coalesceCommandResponses;
         readonly bool waitForCancellation;
         readonly bool multiplexCommands;
@@ -76,11 +77,13 @@ public sealed partial class UnityBridgeClientTests
             bool preserveSnippetsAfterFirstCommand,
             bool holdCommand,
             bool holdConnection,
-            string endpointDirectory)
+            string endpointDirectory,
+            string endpointKind)
         {
             this.projectPath = projectPath;
             this.editorProcessId = editorProcessId;
             this.handshakeProtocolVersion = handshakeProtocolVersion;
+            this.endpointKind = endpointKind;
             this.coalesceCommandResponses = coalesceCommandResponses;
             this.waitForCancellation = waitForCancellation;
             this.multiplexCommands = multiplexCommands;
@@ -116,7 +119,8 @@ public sealed partial class UnityBridgeClientTests
             bool preserveSnippetsAfterFirstCommand = false,
             bool holdCommand = false,
             bool holdConnection = false,
-            int handshakeProtocolVersion = BridgeProtocol.Version)
+            int handshakeProtocolVersion = BridgeProtocol.Version,
+            string endpointKind = BridgeEndpointKinds.Editor)
         {
             var endpointDirectory = ConduitIpcPaths.GetEndpointDirectory(
                 ConduitIpcPaths.GetDiscoveryRoots()[0],
@@ -142,7 +146,8 @@ public sealed partial class UnityBridgeClientTests
                     preserveSnippetsAfterFirstCommand,
                     holdCommand,
                     holdConnection,
-                    endpointDirectory
+                    endpointDirectory,
+                    endpointKind
                 )
             );
         }
@@ -212,6 +217,7 @@ public sealed partial class UnityBridgeClientTests
                         ["display_name"] = Path.GetFileName(projectPath),
                         ["unity_version"] = "6000.3.10f1",
                         ["editor_process_id"] = editorProcessId,
+                        ["endpoint_kind"] = endpointKind,
                         ["session_instance_id"] = changeSessionOnReconnect
                             ? "fake-bridge-" + connectionNumber
                             : "fake-bridge",
@@ -223,107 +229,116 @@ public sealed partial class UnityBridgeClientTests
                 if (handshakeProtocolVersion != BridgeProtocol.Version)
                     return;
 
-                var commandPayload = await reader.ReadLineAsync(cts.Token);
-                if (commandPayload is null)
-                    return;
-
-                var currentCommand = Interlocked.Increment(ref commandCount);
-                if (disconnectFirstCommand && currentCommand == 1)
-                    return;
-
-                var commandJson = JsonNode.Parse(commandPayload);
-                var requestId = commandJson?["request_id"]?.GetValue<string>() ?? "";
-                var commandType = commandJson?["command"]?["command_type"]?.GetValue<string>();
-                var commandStarted = new JsonObject
+                // normal clients reuse the connection; specialized scenarios can still close it explicitly.
+                while (!cts.IsCancellationRequested)
                 {
-                    ["protocol_version"] = BridgeProtocol.Version,
-                    ["message_type"] = "command_started",
-                    ["request_id"] = requestId,
-                };
+                    var commandPayload = await reader.ReadLineAsync(cts.Token);
+                    if (commandPayload is null)
+                        return;
 
-                var commandResult = new JsonObject
-                {
-                    ["protocol_version"] = BridgeProtocol.Version,
-                    ["message_type"] = "command_result",
-                    ["request_id"] = requestId,
-                    ["result"] = new JsonObject
+                    var currentCommand = Interlocked.Increment(ref commandCount);
+                    if (disconnectFirstCommand && currentCommand == 1)
+                        return;
+
+                    var commandJson = JsonNode.Parse(commandPayload);
+                    var requestId = commandJson?["request_id"]?.GetValue<string>() ?? "";
+                    var commandType = commandJson?["command"]?["command_type"]?.GetValue<string>();
+                    var commandStarted = new JsonObject
                     {
-                        ["outcome"] = ToolOutcome.Success,
-                        ["logs"] = "",
-                        ["return_value"] = "",
-                    },
-                };
-                if (commandType == BridgeCommandTypes.CompilationReferences)
-                {
-                    commandResult["result"]!["return_value"] = JsonSerializer.Serialize(
-                        new BridgeAssemblyReferenceManifest
+                        ["protocol_version"] = BridgeProtocol.Version,
+                        ["message_type"] = "command_started",
+                        ["request_id"] = requestId,
+                    };
+
+                    var commandResult = new JsonObject
+                    {
+                        ["protocol_version"] = BridgeProtocol.Version,
+                        ["message_type"] = "command_result",
+                        ["request_id"] = requestId,
+                        ["result"] = new JsonObject
                         {
-                            PreserveSnippets = preserveSnippetsAfterFirstCommand
-                                               && currentCommand > 1,
-                            References =
-                            [
-                                new()
-                                {
-                                    Id = Guid.NewGuid().ToString("N"),
-                                    AssemblyName = typeof(object).Assembly.FullName ?? "System.Private.CoreLib",
-                                    Path = typeof(object).Assembly.Location,
-                                    Length = new FileInfo(typeof(object).Assembly.Location).Length,
-                                },
-                            ],
+                            ["outcome"] = ToolOutcome.Success,
+                            ["logs"] = "",
+                            ["return_value"] = "",
                         },
-                        ConduitJsonContext.Default.BridgeAssemblyReferenceManifest
-                    );
-                }
+                    };
+                    if (commandType == BridgeCommandTypes.CompilationReferences)
+                    {
+                        commandResult["result"]!["return_value"] = JsonSerializer.Serialize(
+                            new BridgeAssemblyReferenceManifest
+                            {
+                                PreserveSnippets = preserveSnippetsAfterFirstCommand
+                                                   && currentCommand > 1,
+                                References =
+                                [
+                                    new()
+                                    {
+                                        Id = typeof(object).Module.ModuleVersionId.ToString("N"),
+                                        AssemblyName = typeof(object).Assembly.FullName ?? "System.Private.CoreLib",
+                                        Path = typeof(object).Assembly.Location,
+                                        Length = new FileInfo(typeof(object).Assembly.Location).Length,
+                                    },
+                                ],
+                            },
+                            ConduitJsonContext.Default.BridgeAssemblyReferenceManifest
+                        );
+                    }
 
-                if (multiplexCommands)
-                {
-                    await WritePayloadAsync(output, commandStarted, cts.Token);
-                    this.commandStarted.TrySetResult();
-                    var concurrentPayload = await reader.ReadLineAsync(cts.Token);
-                    if (concurrentPayload is null)
-                        return;
+                    if (multiplexCommands)
+                    {
+                        await WritePayloadAsync(output, commandStarted, cts.Token);
+                        this.commandStarted.TrySetResult();
+                        var concurrentPayload = await reader.ReadLineAsync(cts.Token);
+                        if (concurrentPayload is null)
+                            return;
 
-                    var concurrentRequestId = JsonNode.Parse(concurrentPayload)?["request_id"]?.GetValue<string>() ?? "";
-                    commandStarted["request_id"] = concurrentRequestId;
-                    commandResult["request_id"] = concurrentRequestId;
-                    await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
-                    concurrentCommandCompleted.TrySetResult();
-                    await releaseFirstCommand.Task.WaitAsync(cts.Token);
-                    commandResult["request_id"] = requestId;
-                    await WritePayloadAsync(output, commandResult, cts.Token);
-                    return;
-                }
-
-                if (waitForCancellation)
-                {
-                    await WritePayloadAsync(output, commandStarted, cts.Token);
-                    this.commandStarted.TrySetResult();
-                    var cancellationPayload = await reader.ReadLineAsync(cts.Token);
-                    if (cancellationPayload is null)
-                        return;
-
-                    var cancellation = JsonNode.Parse(cancellationPayload);
-                    cancelledRequestId.TrySetResult(
-                        cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
-                            ? cancellation["request_id"]?.GetValue<string>()
-                            : null
-                    );
-                    commandResult["result"]!["outcome"] = ToolOutcome.Cancelled;
-                    await WritePayloadAsync(output, commandResult, cts.Token);
-                }
-                else if (coalesceCommandResponses)
-                    await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
-                else
-                {
-                    await WritePayloadAsync(output, commandStarted, cts.Token);
-                    this.commandStarted.TrySetResult();
-                    if (holdCommand)
+                        var concurrentRequestId = JsonNode.Parse(concurrentPayload)?["request_id"]?.GetValue<string>() ?? "";
+                        commandStarted["request_id"] = concurrentRequestId;
+                        commandResult["request_id"] = concurrentRequestId;
+                        await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
+                        concurrentCommandCompleted.TrySetResult();
                         await releaseFirstCommand.Task.WaitAsync(cts.Token);
-                    await WritePayloadAsync(output, commandResult, cts.Token);
-                }
+                        commandResult["request_id"] = requestId;
+                        await WritePayloadAsync(output, commandResult, cts.Token);
+                        return;
+                    }
 
-                if (holdConnection)
-                    await closeConnection.Task.WaitAsync(cts.Token);
+                    if (waitForCancellation)
+                    {
+                        await WritePayloadAsync(output, commandStarted, cts.Token);
+                        this.commandStarted.TrySetResult();
+                        var cancellationPayload = await reader.ReadLineAsync(cts.Token);
+                        if (cancellationPayload is null)
+                            return;
+
+                        var cancellation = JsonNode.Parse(cancellationPayload);
+                        cancelledRequestId.TrySetResult(
+                            cancellation?["message_type"]?.GetValue<string>() == "cancel_command"
+                                ? cancellation["request_id"]?.GetValue<string>()
+                                : null
+                        );
+                        commandResult["result"]!["outcome"] = ToolOutcome.Cancelled;
+                        await WritePayloadAsync(output, commandResult, cts.Token);
+                    }
+                    else if (coalesceCommandResponses)
+                        await WritePayloadsAsync(output, cts.Token, commandStarted, commandResult);
+                    else
+                    {
+                        await WritePayloadAsync(output, commandStarted, cts.Token);
+                        this.commandStarted.TrySetResult();
+                        if (holdCommand)
+                            await releaseFirstCommand.Task.WaitAsync(cts.Token);
+                        await WritePayloadAsync(output, commandResult, cts.Token);
+                    }
+
+                    if (holdConnection)
+                    {
+                        await closeConnection.Task.WaitAsync(cts.Token);
+                        return;
+                    }
+                    if (waitForCancellation)
+                        return;
+                }
             }
             catch (IOException) when (!handshakeReceived)
             {
@@ -358,6 +373,10 @@ public sealed partial class UnityBridgeClientTests
             try
             {
                 await serverTask.WaitAsync(TestTimeout);
+                // clients remove their own FIFO directories after observing the peer close.
+                using var cleanupTimeout = new CancellationTokenSource(TestTimeout);
+                while (Directory.EnumerateDirectories(Path.Combine(endpointDirectory, "clients")).Any())
+                    await Task.Delay(10, cleanupTimeout.Token);
             }
             finally
             {

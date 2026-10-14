@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Security.Cryptography;
 
 namespace Conduit;
 
@@ -94,21 +93,7 @@ sealed class MethodTarget
         }
     }
 
-    internal string SignatureHash
-    {
-        get
-        {
-            var state = GetSignature();
-            if (state.SignatureHash is not null)
-                return state.SignatureHash;
-
-            var hash = Convert.ToHexStringLower(SHA256.HashData(
-                MethodSignatureDecoder.ReadMethodSignatureBlob(AssemblyPath, MetadataToken)
-            ));
-            return Interlocked.CompareExchange(ref state.SignatureHash, hash, null)
-                   ?? hash;
-        }
-    }
+    internal string SignatureHash => GetSignature().SignatureHash.Value;
 
     internal bool Matches(string selector)
     {
@@ -209,7 +194,8 @@ sealed class MethodTarget
                 value.DeclaringType,
                 value.ReturnType,
                 value.Parameters,
-                value.UnsupportedReason
+                value.UnsupportedReason,
+                value.SignatureHash
             );
             Volatile.Write(ref signature, state);
             return state;
@@ -220,13 +206,14 @@ sealed class MethodTarget
         CSharpType declaringType,
         CSharpType returnType,
         ImmutableArray<MethodParameter> parameters,
-        string? unsupportedReason)
+        string? unsupportedReason,
+        Lazy<string> signatureHash)
     {
         internal readonly CSharpType DeclaringType = declaringType;
         internal readonly CSharpType ReturnType = returnType;
         internal readonly ImmutableArray<MethodParameter> Parameters = parameters;
         internal readonly string? UnsupportedReason = unsupportedReason;
         internal string? CanonicalSelector;
-        internal string? SignatureHash;
+        internal readonly Lazy<string> SignatureHash = signatureHash;
     }
 }

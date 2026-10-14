@@ -40,18 +40,31 @@ public sealed partial class UnityBridgeClientTests
         await using var bridge = await FakeFifoBridge.StartAsync(
             projectPath,
             int.MaxValue,
-            changeSessionOnReconnect: true
+            changeSessionOnReconnect: true,
+            holdConnection: true
         );
         var client = new UnityBridgeClient(NullLogger<UnityBridgeClient>.Instance);
         var compiler = new SnippetCompiler(client);
 
-        await Assert.That(
-            (await compiler.GetReferencePathsAsync(projectPath, ct)).Failure
-        ).IsNull();
+        var first = await compiler.GetReferencePathsAsync(projectPath, ct);
+        await Assert.That(first.Failure).IsNull();
+        var oldDetour = first.ReferenceSet!.GetDetourCache();
 
-        await Assert.That(
-            (await compiler.GetReferencePathsAsync(projectPath, ct)).Failure
-        ).IsNull();
+        // model a real reload/peer close instead of relying on reference requests to close the connection.
+        bridge.CloseConnection();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        while (client.TryGetLiveHandshake(projectPath, out _))
+            await Task.Delay(10, timeout.Token);
+
+        var second = await compiler.GetReferencePathsAsync(projectPath, ct);
+        await Assert.That(second.Failure).IsNull();
+        await Assert.That(second.SessionInstanceId != first.SessionInstanceId).IsTrue();
+        await Assert.That(ReferenceEquals(first.ReferenceSet, second.ReferenceSet)).IsFalse();
+        await Assert.That(ReferenceEquals(oldDetour, second.ReferenceSet!.GetDetourCache())).IsFalse();
+        // a caller holding the old snapshot can still use it; replacement does not dispose it underneath work.
+        await Assert.That(oldDetour.SessionInstanceId).IsEqualTo(first.SessionInstanceId);
+        await Assert.That(bridge.ConnectionCount).IsEqualTo(2);
         await Assert.That(bridge.CommandCount).IsEqualTo(2);
     }
 
@@ -76,6 +89,8 @@ public sealed partial class UnityBridgeClientTests
         var second = await compiler.GetReferencePathsAsync(projectPath, ct);
         await Assert.That(second.Failure).IsNull();
         await Assert.That(second.PreserveSnippets).IsTrue();
+        await Assert.That(ReferenceEquals(first.ReferenceSet, second.ReferenceSet)).IsTrue();
+        await Assert.That(bridge.ConnectionCount).IsEqualTo(1);
         await Assert.That(bridge.CommandCount).IsEqualTo(2);
     }
 }
