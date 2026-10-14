@@ -118,6 +118,13 @@ sealed class BridgeClientConnection : IAsyncDisposable
 
             await transport.WritePayloadAsync(BridgeProtocol.Serialize(message), ct);
         }
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            // a partial frame cannot be reused; reject queued sends before releasing the write gate.
+            Disconnect();
+            receiveCts.Cancel();
+            throw;
+        }
         finally
         {
             writeGate.Release();

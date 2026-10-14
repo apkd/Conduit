@@ -172,21 +172,19 @@ sealed partial class BridgeTransport
             exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException) { }
     }
 
-    // FileStream cannot cancel a pending FIFO read on Linux. Polling a nonblocking
-    // descriptor keeps bridge command deadlines enforceable when a peer stops responding.
-    internal sealed class FifoLineReader(int descriptor) : IDisposable
+    // nonblocking reads let cancellation and disposal finish even when Unity stops writing.
+    internal sealed class FifoLineReader(int descriptor, LinuxFifoReadiness? readiness = null) : IDisposable
     {
-        const int RetryDelayMilliseconds = 10;
+        readonly object gate = new();
         readonly byte[] readBuffer = new byte[4096];
-        readonly MemoryStream lineBuffer = new(InitialLineBufferLength);
+        readonly MemoryStream lineBuffer = new();
         readonly Queue<string> lines = new();
-        readonly PeriodicTimer retryTimer = new(
-            TimeSpan.FromMilliseconds(RetryDelayMilliseconds)
-        );
+        readonly CancellationTokenSource disposeCts = new();
         int descriptor = descriptor;
+        int reading;
         bool endOfStream;
 
-        internal static FifoLineReader Open(string path)
+        internal static FifoLineReader Open(string path, LinuxFifoReadiness? readiness = null)
         {
             const int readOnly = 0;
             const int nonBlocking = 0x800;
@@ -197,41 +195,67 @@ sealed partial class BridgeTransport
                     $"Could not open FIFO reader '{path}' (errno {Marshal.GetLastPInvokeError()})."
                 );
 
-            return new(descriptor);
+            return new(descriptor, readiness);
         }
 
         internal async ValueTask<string?> ReadLineAsync(CancellationToken ct)
         {
-            while (true)
+            if (Interlocked.CompareExchange(ref reading, 1, 0) != 0)
+                throw new InvalidOperationException("Only one FIFO read may be pending.");
+
+            CancellationTokenSource? waitCts = null;
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                if (lines.TryDequeue(out var line))
-                    return line;
-                if (endOfStream)
-                    return TakeIncompleteLine();
-                if (descriptor < 0)
-                    throw new ObjectDisposedException(nameof(FifoLineReader));
-
-                var count = read(descriptor, readBuffer, (nuint)readBuffer.Length);
-                if (count > 0)
+                while (true)
                 {
-                    Append(readBuffer.AsSpan(0, checked((int)count)));
-                    continue;
+                    ct.ThrowIfCancellationRequested();
+                    Task wait;
+                    lock (gate)
+                    {
+                        ObjectDisposedException.ThrowIf(descriptor < 0, this);
+                        if (lines.TryDequeue(out var line))
+                            return line;
+                        if (endOfStream)
+                            return TakeIncompleteLine();
+
+                        var count = read(descriptor, readBuffer, (nuint)readBuffer.Length);
+                        if (count > 0)
+                        {
+                            Append(readBuffer.AsSpan(0, checked((int)count)));
+                            continue;
+                        }
+                        if (count == 0)
+                        {
+                            endOfStream = true;
+                            continue;
+                        }
+
+                        var error = Marshal.GetLastPInvokeError();
+                        if (error == ErrorInterrupted)
+                            continue;
+                        if (error != ErrorAgain)
+                            throw new IOException($"Could not read the Unity FIFO response (errno {error}).");
+
+                        // buffered responses need no cancellation registration.
+                        waitCts ??= CancellationTokenSource.CreateLinkedTokenSource(ct, disposeCts.Token);
+                        wait = (readiness ?? LinuxFifoReadiness.Shared).WaitAsync(descriptor, waitCts.Token);
+                    }
+
+                    await wait.ConfigureAwait(false);
                 }
-
-                if (count == 0)
-                {
-                    endOfStream = true;
-                    continue;
-                }
-
-                var error = Marshal.GetLastPInvokeError();
-                if (error == ErrorInterrupted)
-                    continue;
-                if (error != ErrorAgain)
-                    throw new IOException($"Could not read the Unity FIFO response (errno {error}).");
-
-                await retryTimer.WaitForNextTickAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(ct);
+            }
+            catch (OperationCanceledException) when (Volatile.Read(ref descriptor) < 0)
+            {
+                throw new ObjectDisposedException(nameof(FifoLineReader));
+            }
+            finally
+            {
+                waitCts?.Dispose();
+                Volatile.Write(ref reading, 0);
             }
         }
 
@@ -243,8 +267,13 @@ sealed partial class BridgeTransport
                 if (bytes[index] != (byte)'\n')
                     continue;
 
-                lineBuffer.Write(bytes[start..index]);
-                lines.Enqueue(TakeLine());
+                if (lineBuffer.Length == 0)
+                    lines.Enqueue(DecodeLine(bytes[start..index]));
+                else
+                {
+                    lineBuffer.Write(bytes[start..index]);
+                    lines.Enqueue(TakeLine());
+                }
                 start = index + 1;
             }
 
@@ -255,23 +284,37 @@ sealed partial class BridgeTransport
 
         string TakeLine()
         {
-            var bytes = lineBuffer.GetBuffer().AsSpan(0, checked((int)lineBuffer.Length));
-            if (bytes is [.., (byte)'\r'])
-                bytes = bytes[..^1];
-            var line = utf8NoBom.GetString(bytes);
+            var line = DecodeLine(lineBuffer.GetBuffer().AsSpan(0, checked((int)lineBuffer.Length)));
             lineBuffer.SetLength(0);
             if (lineBuffer.Capacity > MaximumRetainedLineBufferLength)
                 lineBuffer.Capacity = InitialLineBufferLength;
             return line;
         }
 
+        static string DecodeLine(ReadOnlySpan<byte> bytes)
+        {
+            if (bytes is [.., (byte)'\r'])
+                bytes = bytes[..^1];
+            return utf8NoBom.GetString(bytes);
+        }
+
         public void Dispose()
         {
-            var current = Interlocked.Exchange(ref descriptor, -1);
-            if (current >= 0)
-                close(current);
-            retryTimer.Dispose();
-            lineBuffer.Dispose();
+            int current;
+            lock (gate)
+            {
+                if (descriptor < 0)
+                    return;
+                current = descriptor;
+                Volatile.Write(ref descriptor, -1);
+                lines.Clear();
+                lineBuffer.Dispose();
+            }
+
+            // mark disposed before closing so a resumed read cannot use a recycled descriptor.
+            disposeCts.Cancel();
+            close(current);
+            disposeCts.Dispose();
         }
     }
 

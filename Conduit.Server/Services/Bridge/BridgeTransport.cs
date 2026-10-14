@@ -12,7 +12,7 @@ sealed partial class BridgeTransport(
     const int ErrorAgain = 11;
     const int ErrorInterrupted = 4;
     const int InitialLineBufferLength = 8192;
-    const int MaximumPooledPayloadBufferLength = 1024 * 1024;
+    const int PayloadWriteBufferLength = 64 * 1024;
     const int MaximumRetainedLineBufferLength = 1024 * 1024;
     static readonly UTF8Encoding utf8NoBom = new(false);
     static readonly byte[] newline = [(byte)'\n'];
@@ -84,19 +84,45 @@ sealed partial class BridgeTransport(
 
     static async Task WriteStreamPayloadAsync(Stream stream, string payload, CancellationToken ct)
     {
-        var byteCount = utf8NoBom.GetByteCount(payload);
-        var buffer = byteCount <= MaximumPooledPayloadBufferLength
-            ? ArrayPool<byte>.Shared.Rent(byteCount)
-            : new byte[byteCount];
+        ct.ThrowIfCancellationRequested();
+        // keep ordinary commands in one write while bounding large-message scratch space.
+        var small = payload.Length <= PayloadWriteBufferLength / 4;
+        var buffer = ArrayPool<byte>.Shared.Rent(small
+            ? Math.Max(1, utf8NoBom.GetByteCount(payload))
+            : PayloadWriteBufferLength);
         try
         {
-            var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
-            await stream.WriteAsync(buffer.AsMemory(0, written), ct);
+            if (small)
+            {
+                var written = utf8NoBom.GetBytes(payload.AsSpan(), buffer.AsSpan());
+                await stream.WriteAsync(buffer.AsMemory(0, written), ct);
+            }
+            else
+            {
+                var encoder = utf8NoBom.GetEncoder();
+                var offset = 0;
+                bool completed;
+                do
+                {
+                    ct.ThrowIfCancellationRequested();
+                    // preserve surrogate pairs and replacement fallback across chunk boundaries.
+                    encoder.Convert(
+                        payload.AsSpan(offset),
+                        buffer.AsSpan(0, PayloadWriteBufferLength),
+                        flush: true,
+                        out var charsUsed,
+                        out var bytesUsed,
+                        out completed
+                    );
+                    offset += charsUsed;
+                    await stream.WriteAsync(buffer.AsMemory(0, bytesUsed), ct);
+                }
+                while (!completed);
+            }
         }
         finally
         {
-            if (buffer.Length <= MaximumPooledPayloadBufferLength)
-                ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(buffer);
         }
 
         await stream.WriteAsync(newline, ct); // distinct write preserves Wine/Proton FIFO framing

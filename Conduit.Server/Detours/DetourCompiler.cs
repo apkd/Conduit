@@ -101,7 +101,7 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
         var inferredNamespaces = new List<string>();
         bool asyncMode = false;
         var output = CompileWithReferences(compilationReferences);
-        if (SnippetCompilationEngine.HasErrors(output.Diagnostics))
+        if (ShouldRetryWithPublicizedReferences(output.Diagnostics))
         {
             MetadataReference[] fullyPublicizedReferences;
             try
@@ -232,6 +232,28 @@ public sealed class DetourCompiler(SnippetCompiler snippetCompiler)
 
             return compilation;
         }
+    }
+
+    // visibility cannot repair syntax. inaccessible overloads can still appear as missing names.
+    internal static bool ShouldRetryWithPublicizedReferences(IEnumerable<Diagnostic> diagnostics)
+    {
+        var hasErrors = false;
+        HashSet<SyntaxTree>? examinedTrees = null;
+        foreach (var diagnostic in diagnostics)
+        {
+            if (diagnostic.Severity != DiagnosticSeverity.Error)
+                continue;
+
+            hasErrors = true;
+            if (diagnostic.Location.SourceTree is not { } tree)
+                continue;
+            examinedTrees ??= new();
+            if (examinedTrees.Add(tree)
+                && tree.GetDiagnostics().Any(static value => value.Severity == DiagnosticSeverity.Error))
+                return false;
+        }
+
+        return hasErrors;
     }
 
     static BridgeCommand BuildCommand(MethodTarget method, string mode) =>

@@ -9,6 +9,85 @@ namespace Conduit;
 public sealed partial class UnityBridgeClientTests
 {
     [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task InterruptedSendDisconnectsBeforeQueuedWriter(bool cancel, CancellationToken ct)
+    {
+        var writing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writes = 0;
+        await using var transport = new BridgeTransport(
+            async token =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return null;
+            },
+            async (_, token) =>
+            {
+                Interlocked.Increment(ref writes);
+                writing.TrySetResult();
+                await release.Task.WaitAsync(token);
+            },
+            static () => true,
+            static () => ValueTask.CompletedTask
+        );
+        await using var connection = new BridgeClientConnection(transport, new(), NullLogger<UnityBridgeClient>.Instance);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var interrupted = connection.SendCommandAsync("interrupted", new(), cancellation.Token);
+        await writing.Task.WaitAsync(ct);
+        var queued = connection.SendCommandAsync("queued", new(), ct);
+
+        if (cancel)
+        {
+            cancellation.Cancel();
+            await Assert.That(async () => await interrupted).Throws<OperationCanceledException>();
+            release.TrySetResult();
+        }
+        else
+        {
+            release.SetException(new IOException("The peer closed during a write."));
+            await Assert.That((await interrupted)?.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.SendFailed);
+        }
+
+        await Assert.That((await queued)?.FailureKind).IsEqualTo(BridgeRuntimeFailureKind.SendFailed);
+        await Assert.That(connection.IsConnected).IsFalse();
+        await Assert.That(writes).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task CancellationWhileWaitingForWriterPreservesConnection(CancellationToken ct)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writes = 0;
+        await using var transport = new BridgeTransport(
+            async token =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return null;
+            },
+            async (_, token) =>
+            {
+                Interlocked.Increment(ref writes);
+                await release.Task.WaitAsync(token);
+            },
+            static () => true,
+            static () => ValueTask.CompletedTask
+        );
+        await using var connection = new BridgeClientConnection(transport, new(), NullLogger<UnityBridgeClient>.Instance);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var active = connection.SendCommandAsync("active", new(), ct);
+        var queued = connection.SendCommandAsync("queued", new(), cancellation.Token);
+
+        cancellation.Cancel();
+        await Assert.That(async () => await queued).Throws<OperationCanceledException>();
+        release.SetResult();
+
+        await Assert.That(await active).IsNull();
+        await Assert.That(connection.IsConnected).IsTrue();
+        await Assert.That(writes).IsEqualTo(1);
+    }
+
+    [Test]
     public async Task ProcessExitSupersedesAConcurrentResultDisconnect(CancellationToken ct)
     {
         var disconnected = BridgeClientResult.Failure(
