@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Http.Headers;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -35,11 +37,24 @@ try
     """);
 
     await using var bridge = await FakeBridge.StartAsync(projectPath);
-    var statusText = transport == "stdio"
-        ? await RunStdioStatusAsync(conduitExecutable, projectPath)
-        : await RunHttpStatusAsync(conduitExecutable, projectPath);
-    if (!statusText.Contains("Unity 6000.3.10f1", StringComparison.Ordinal))
-        throw new InvalidOperationException($"Binary smoke failed. Unexpected status response:\n{statusText}");
+    if (transport == "stdio")
+        CheckStatus(await RunStdioStatusAsync(conduitExecutable, projectPath));
+    else
+    {
+        await CheckInvalidHttpOptionsAsync(conduitExecutable, projectPath);
+        foreach (var tokenOption in new[] { null, "--token-file", "--token-sha256-file" })
+        foreach (var protectProcess in OperatingSystem.IsLinux() ? new[] { false, true } : new[] { false })
+        {
+            CheckStatus(await RunHttpStatusAsync(conduitExecutable, projectPath, tokenOption, protectProcess));
+            Console.WriteLine($"HTTP smoke passed: {tokenOption ?? "no token"}, protection {(protectProcess ? "on" : "off")}.");
+        }
+    }
+
+    static void CheckStatus(string statusText)
+    {
+        if (!statusText.Contains("Unity 6000.3.10f1", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Binary smoke failed. Unexpected status response:\n{statusText}");
+    }
 
     Console.WriteLine($"Binary {transport} smoke passed.");
 }
@@ -126,9 +141,16 @@ static async Task<string> RunStdioStatusAsync(
 
 static async Task<string> RunHttpStatusAsync(
     string conduitExecutable,
-    string projectPath
+    string projectPath,
+    string? tokenOption,
+    bool protectProcess
 )
 {
+    var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+    var tokenHash = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(token)));
+    var tokenFile = Path.Combine(projectPath, "http-token");
+    if (tokenOption is not null)
+        await File.WriteAllTextAsync(tokenFile, tokenOption == "--token-sha256-file" ? tokenHash : token);
     var listening = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
     using var process = new Process
     {
@@ -141,6 +163,18 @@ static async Task<string> RunHttpStatusAsync(
     process.StartInfo.ArgumentList.Add("--http");
     process.StartInfo.ArgumentList.Add("--url");
     process.StartInfo.ArgumentList.Add("http://127.0.0.1:0");
+    if (tokenOption is not null)
+    {
+        process.StartInfo.ArgumentList.Add(tokenOption);
+        process.StartInfo.ArgumentList.Add(tokenFile);
+    }
+    process.StartInfo.Environment.Remove("DOTNET_EnableDiagnostics");
+    process.StartInfo.Environment.Remove("COMPlus_EnableDiagnostics");
+    if (protectProcess)
+    {
+        process.StartInfo.ArgumentList.Add("--protect-process");
+        process.StartInfo.Environment["DOTNET_EnableDiagnostics"] = "0";
+    }
 
     process.Start();
     var stderrTask = CaptureStandardErrorAsync(process, listening);
@@ -149,12 +183,61 @@ static async Task<string> RunHttpStatusAsync(
     {
         // let the server own the port from allocation through shutdown
         var address = await listening.Task.WaitAsync(TimeSpan.FromMinutes(1));
+        if (OperatingSystem.IsLinux())
+        {
+            var accessible = false;
+            try
+            {
+                using var memory = File.OpenRead($"/proc/{process.Id}/mem");
+                accessible = true;
+            }
+            catch (UnauthorizedAccessException) { }
+            if (accessible == protectProcess)
+                throw new InvalidOperationException($"HTTP smoke failed: unexpected process memory access with protection {(protectProcess ? "on" : "off")}.");
+        }
         using var client = new HttpClient(
             new SocketsHttpHandler { UseProxy = false }
         )
         {
             BaseAddress = address,
         };
+
+        if (tokenOption is not null)
+        {
+            foreach (var method in new[] { HttpMethod.Post, HttpMethod.Get, HttpMethod.Delete })
+            {
+                using var request = new HttpRequestMessage(method, "");
+                await ExpectUnauthorizedAsync(request);
+            }
+
+            using (var wrongToken = new HttpRequestMessage(HttpMethod.Post, ""))
+            {
+                wrongToken.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token + "wrong");
+                await ExpectUnauthorizedAsync(wrongToken);
+            }
+
+            using (var hashAsToken = new HttpRequestMessage(HttpMethod.Post, ""))
+            {
+                hashAsToken.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenHash);
+                await ExpectUnauthorizedAsync(hashAsToken);
+            }
+
+            using (var duplicateToken = new HttpRequestMessage(HttpMethod.Post, ""))
+            {
+                duplicateToken.Headers.TryAddWithoutValidation("Authorization", new[] { $"Bearer {token}", $"Bearer {token}" });
+                await ExpectUnauthorizedAsync(duplicateToken);
+            }
+
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        using (var browserRequest = new HttpRequestMessage(HttpMethod.Post, ""))
+        {
+            browserRequest.Headers.Add("Origin", "https://untrusted.example");
+            using var response = await client.SendAsync(browserRequest);
+            if (response.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException("HTTP smoke failed: browser origin was not rejected.");
+        }
 
         var requestId = 0;
         await RequestHttpAsync(client, ++requestId, "initialize", new JsonObject
@@ -187,7 +270,21 @@ static async Task<string> RunHttpStatusAsync(
             ["arguments"] = new JsonObject { ["projectPath"] = projectPath },
         }, TimeSpan.FromSeconds(20));
 
+        if (tokenOption is not null)
+        {
+            client.DefaultRequestHeaders.Authorization = null;
+            using var anonymousRequest = new HttpRequestMessage(HttpMethod.Post, "unknown-path");
+            await ExpectUnauthorizedAsync(anonymousRequest);
+        }
         return ReadStatusText(status);
+
+        async Task ExpectUnauthorizedAsync(HttpRequestMessage request)
+        {
+            using var response = await client.SendAsync(request);
+            if (response.StatusCode != HttpStatusCode.Unauthorized
+                || !response.Headers.WwwAuthenticate.Any(header => header.Scheme == "Bearer"))
+                throw new InvalidOperationException("HTTP smoke failed: missing or invalid credentials were not challenged.");
+        }
     }
     catch
     {
@@ -204,6 +301,56 @@ static async Task<string> RunHttpStatusAsync(
     finally
     {
         StopProcess(process);
+    }
+}
+
+static async Task CheckInvalidHttpOptionsAsync(string conduitExecutable, string projectPath)
+{
+    var tokenFile = Path.Combine(projectPath, "startup-token");
+    var hashFile = Path.Combine(projectPath, "startup-token.sha256");
+    var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+    await File.WriteAllTextAsync(tokenFile, token);
+    await File.WriteAllTextAsync(hashFile, Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(token))));
+    string[][] invalidArguments =
+    [
+        ["--http", "--token-file", Path.Combine(projectPath, "missing-token")],
+        ["--http", "--token-file", tokenFile, "--token-sha256-file", hashFile],
+        ["--http", "--token-file", tokenFile, "--protect-process"],
+        ["--token-file", tokenFile],
+        ["--token-sha256-file", hashFile],
+        ["--protect-process"],
+    ];
+    foreach (var arguments in invalidArguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new(conduitExecutable)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            },
+        };
+        process.StartInfo.Environment.Remove("DOTNET_EnableDiagnostics");
+        process.StartInfo.Environment.Remove("COMPlus_EnableDiagnostics");
+        foreach (var argument in arguments)
+            process.StartInfo.ArgumentList.Add(argument);
+        process.Start();
+        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await process.WaitForExitAsync(cts.Token);
+            if (process.ExitCode == 0 || string.IsNullOrWhiteSpace(await stderr))
+                throw new InvalidOperationException("HTTP smoke failed: invalid startup options were accepted.");
+            await stdout;
+        }
+        finally
+        {
+            StopProcess(process);
+        }
     }
 }
 

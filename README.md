@@ -117,12 +117,21 @@ If you'd like an HTTP server, add these entries to your Home Manager module list
 
 ```nix
 inputs.conduit.homeManagerModules.default
-{ services.conduit.enable = true; }
+{
+  services.conduit = {
+    enable = true;
+  };
+}
 ```
 
 Apply your Home Manager configuration, then point your MCP client at
 `http://127.0.0.1:5080`. The service starts and stops automatically with your desktop
-session. You can change the port with `services.conduit.port`.
+session. You can change the port with `services.conduit.port`. Authentication is
+optional. To enable it, set `services.conduit.tokenFile` to a token file path as
+described below and configure the client to send it as a bearer token.
+Alternatively, set `tokenSha256File` to the absolute path of a token fingerprint
+file as described below. Set `protectProcess = true` on Linux to protect Conduit's
+memory and turn off its .NET diagnostics.
 
 Install Unity Hub (`unityhub`) separately if you'd like Conduit to launch Unity.
 You can connect to an editor you've already opened without Hub.
@@ -285,8 +294,17 @@ claude mcp add --scope project --transport stdio unity -- /home/you/src/Conduit/
 conduit --http [--port 5080] [--url http://127.0.0.1:5080]
 ```
 
-```bash
-claude mcp add --scope project --transport http unity http://127.0.0.1:5080
+Add the server to your private user configuration:
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "type": "http",
+      "url": "http://127.0.0.1:5080"
+    }
+  }
+}
 ```
 
 </details>
@@ -331,7 +349,6 @@ Claude Desktop keeps one MCP configuration for the **User account**:
 
 Claude Desktop's Custom Connectors are reached through Anthropic's cloud and cannot connect directly to a server on `localhost`.
 Use the local `stdio` configuration above for Conduit.
-A publicly reachable HTTPS deployment may be added through **Settings → Connectors** where Custom Connectors are available.
 
 </details>
 
@@ -916,7 +933,6 @@ conduit --http [--port 5080] [--url http://127.0.0.1:5080]
     "unity": {
       "type": "http",
       "url": "http://127.0.0.1:5080",
-      "headers": {},
       "tools": ["*"]
     }
   }
@@ -1112,7 +1128,7 @@ Paths under `%USERPROFILE%\.gemini\antigravity\` or `%USERPROFILE%\.gemini\antig
 ##### http
 
 ```bash
-conduit --http --port 5080 --url http://127.0.0.1:5080
+conduit --http --port 5080
 ```
 
 ```json

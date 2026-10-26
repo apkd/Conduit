@@ -1,6 +1,8 @@
 using System.CommandLine;
+using System.ComponentModel;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -40,6 +42,21 @@ var portOption = new Option<ushort?>("--port")
     Description = "HTTP port when running with --http. Uses 127.0.0.1 unless --url is provided.",
 };
 
+var tokenFileOption = new Option<string?>("--token-file")
+{
+    Description = "Enable HTTP bearer token authentication using a token file; read once at startup.",
+};
+
+var tokenSha256FileOption = new Option<string?>("--token-sha256-file")
+{
+    Description = "Enable HTTP bearer token authentication using a SHA-256 fingerprint file (hex). Alternative to --token-file.",
+};
+
+var protectProcessOption = new Option<bool>("--protect-process")
+{
+    Description = "Block ordinary memory inspection and crash dumps on Linux. Requires --http and DOTNET_EnableDiagnostics=0 at startup.",
+};
+
 var updateOption = new Option<bool>("--update", "-U")
 {
     Description = "Download the latest GitHub release executable and replace the current one.",
@@ -55,6 +72,9 @@ var rootCommand = new RootCommand("Conduit MCP server")
     httpOption,
     urlOption,
     portOption,
+    tokenFileOption,
+    tokenSha256FileOption,
+    protectProcessOption,
     updateOption,
     printAgentInstructionsOption,
 };
@@ -87,10 +107,19 @@ rootCommand.SetAction(async parseResult =>
         var http = parseResult.GetValue(httpOption);
         var url = parseResult.GetValue(urlOption);
         var port = parseResult.GetValue(portOption);
+        var tokenFile = parseResult.GetValue(tokenFileOption);
+        var tokenSha256File = parseResult.GetValue(tokenSha256FileOption);
+        var protectProcess = parseResult.GetValue(protectProcessOption);
         if (http)
-            await RunHttpAsync(url, port);
-        else
-            await RunStdioAsync();
+            return await RunHttpAsync(url, port, tokenFile, tokenSha256File, protectProcess);
+
+        if (tokenFile is not null || tokenSha256File is not null || protectProcess)
+        {
+            Console.Error.WriteLine("--token-file, --token-sha256-file and --protect-process require --http.");
+            return 1;
+        }
+
+        await RunStdioAsync();
 
         return 0;
     }
@@ -125,8 +154,28 @@ static async Task RunStdioAsync()
     await builder.Build().RunAsync();
 }
 
-static async Task RunHttpAsync(string? url, ushort? port)
+static async Task<int> RunHttpAsync(
+    string? url,
+    ushort? port,
+    string? tokenFile,
+    string? tokenSha256File,
+    bool protectProcess)
 {
+    Func<HttpContext, RequestDelegate, Task> authenticate;
+    try
+    {
+        if (protectProcess)
+            ProcessProtection.Enable();
+
+        authenticate = HttpTokenAuthentication.Load(tokenFile, tokenSha256File);
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException
+        or PlatformNotSupportedException or Win32Exception)
+    {
+        Console.Error.WriteLine($"HTTP startup failed: {exception.Message}");
+        return 1;
+    }
+
     var builder = WebApplication.CreateBuilder(
         new WebApplicationOptions
         {
@@ -148,8 +197,10 @@ static async Task RunHttpAsync(string? url, ushort? port)
         .WithTools<UnityTools>(CreateToolSerializerOptions());
 
     var app = builder.Build();
+    app.Use(authenticate);
     app.MapMcp();
     await app.RunAsync();
+    return 0;
 }
 
 static string? ResolveHttpUrl(string? url, ushort? port)

@@ -166,21 +166,24 @@ namespace Conduit
                 "MCP server instance and the client owns its lifetime. Streamable HTTP can serve remote " +
                 "clients or let multiple clients share one server, but it adds a persistent service, " +
                 "shared failures, and network security concerns. The MCP client does not automatically " +
-                "start Conduit in HTTP mode. You should configure your system to run `conduit --http` " +
-                "as a daemon or service (or remember to launch it manually)."
+                "start Conduit in HTTP mode. Run `conduit --http` as a service or launch it manually. " +
+                "To enable authentication, add `--token-file <path>` containing a random bearer token " +
+                "and configure the client to send `Authorization: Bearer <token>` on every request. " +
+                "Keep the token private and use loopback, HTTPS, or an encrypted tunnel."
             );
             if (httpLines.Length > 0)
                 DrawMarkdown(httpLines);
             else
             {
                 DrawParagraph(
-                    "Start Conduit with `--http` and configure the MCP client to use `http://127.0.0.1:5080`. " +
+                    "Start Conduit with `--http --port 5080` and configure the MCP client to use " +
+                    "`http://127.0.0.1:5080`. Authentication is optional. " +
                     "This README section is not available for the selected client, so check whether it " +
                     "supports streamable HTTP."
                 );
                 DrawCodeBlock(
                     ConduitManualSetupInstructions.PatchExecutablePaths(
-                        "conduit --http --port 5080 --url http://127.0.0.1:5080",
+                        "conduit --http --port 5080",
                         Application.platform,
                         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
                     )
